@@ -1,0 +1,136 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Student Dashboard</title>
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body>
+  <div class="container wide">
+    <div class="topbar card">
+      <div>
+        <p class="eyebrow">Student Panel</p>
+        <h1>Welcome, <%= profile?.name || user.name %></h1>
+        <p class="muted">Roll No: <%= profile?.roll_no || user.rollNo %></p>
+      </div>
+      <form method="post" action="/logout"><button type="submit" class="btn secondary">Logout</button></form>
+    </div>
+
+    <% if (flash) { %>
+      <div class="alert <%= flash.type %>"><%= flash.text %></div>
+    <% } %>
+
+    <section class="stats-grid">
+      <div class="stat-card">
+        <p>Standard</p>
+        <h3><%= profile?.standard || '-' %></h3>
+      </div>
+      <div class="stat-card">
+        <p>Course</p>
+        <h3><%= profile?.course ? profile.course.toUpperCase() : '-' %></h3>
+      </div>
+      <div class="stat-card">
+        <p>Pending Fees</p>
+        <h3><%= feeSummary.pendingCount %> (<%= feeSummary.pendingAmount.toFixed(2) %>)</h3>
+      </div>
+      <div class="stat-card">
+        <p>Attendance</p>
+        <h3><%= attendanceSummary.attendancePercent %>%</h3>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <div class="card">
+        <h2>Attendance Overview</h2>
+        <table>
+          <tr><th>Total</th><th>Present</th><th>Absent</th><th>Late</th></tr>
+          <tr>
+            <td><%= attendanceSummary.total %></td>
+            <td><%= attendanceSummary.presentCount %></td>
+            <td><%= attendanceSummary.absentCount %></td>
+            <td><%= attendanceSummary.lateCount %></td>
+          </tr>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Fee Overview</h2>
+        <table>
+          <tr><th>Total Records</th><th>Pending/Overdue</th><th>Pending Amount</th></tr>
+          <tr>
+            <td><%= feeSummary.totalFees %></td>
+            <td><%= feeSummary.pendingCount %></td>
+            <td><%= feeSummary.pendingAmount.toFixed(2) %></td>
+          </tr>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>My Test Papers</h2>
+      <table>
+        <tr><th>File</th><th>Upload Date</th><th>Actions</th></tr>
+        <% papers.forEach((p) => { %>
+          <tr>
+            <td><%= p.original_name %></td>
+            <td><%= p.upload_date %></td>
+            <td>
+              <a href="/papers/<%= p.id %>/view" target="_blank" rel="noopener">Open in New Tab</a>
+              <a href="/papers/<%= p.id %>/download">Download</a>
+            </td>
+          </tr>
+        <% }) %>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Batch Notes and Class Links</h2>
+      <table>
+        <tr><th>Title</th><th>Link</th><th>Description</th><th>Date</th></tr>
+        <% notes.forEach((n) => { %>
+          <tr>
+            <td><%= n.title %></td>
+            <td><a href="<%= n.resource_url %>" target="_blank" rel="noopener">Open Resource</a></td>
+            <td><%= n.description || '-' %></td>
+            <td><%= n.created_at %></td>
+          </tr>
+        <% }) %>
+      </table>
+      <% if (!notes.length) { %>
+        <p class="muted">No notes published yet for your batch.</p>
+      <% } %>
+    </section>
+
+    <section class="card">
+      <h2>Attendance History</h2>
+      <table>
+        <tr><th>Date</th><th>Status</th><th>Notes</th></tr>
+        <% attendance.forEach((a) => { %>
+          <tr>
+            <td><%= a.attendance_date %></td>
+            <td><span class="status <%= a.status %>"><%= a.status %></span></td>
+            <td><%= a.notes || '-' %></td>
+          </tr>
+        <% }) %>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Fee History</h2>
+      <table>
+        <tr><th>Amount</th><th>Due Date</th><th>Payment Date</th><th>Status</th><th>Notes</th></tr>
+        <% fees.forEach((f) => { %>
+          <tr>
+            <td><%= f.amount %></td>
+            <td><%= f.due_date || '-' %></td>
+            <td><%= f.payment_date || '-' %></td>
+            <td><span class="status <%= f.status %>"><%= f.status %></span></td>
+            <td><%= f.notes || '-' %></td>
+          </tr>
+        <% }) %>
+      </table>
+    </section>
+  </div>
+</body>
+</html>

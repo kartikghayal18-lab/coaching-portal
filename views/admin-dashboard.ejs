@@ -1,0 +1,427 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin Dashboard</title>
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body>
+  <div class="container wide">
+    <div class="topbar card">
+      <div>
+        <p class="eyebrow">Coaching Management</p>
+        <h1>Admin Dashboard</h1>
+        <p class="muted">Welcome, <%= user.name %></p>
+      </div>
+      <form method="post" action="/logout"><button type="submit" class="btn secondary">Logout</button></form>
+    </div>
+
+    <% if (flash) { %>
+      <div class="alert <%= flash.type %>"><%= flash.text %></div>
+    <% } %>
+
+    <section class="section-switcher card">
+      <a class="sec-btn <%= activeSection === 'overview' ? 'active' : '' %>" href="/admin/dashboard?section=overview">Overview</a>
+      <a class="sec-btn <%= activeSection === 'attendance' ? 'active' : '' %>" href="/admin/dashboard?section=attendance">Attendance</a>
+      <a class="sec-btn <%= activeSection === 'students' ? 'active' : '' %>" href="/admin/dashboard?section=students">Student List</a>
+      <a class="sec-btn <%= activeSection === 'fees' ? 'active' : '' %>" href="/admin/dashboard?section=fees">Fees Management</a>
+      <a class="sec-btn <%= activeSection === 'papers' ? 'active' : '' %>" href="/admin/dashboard?section=papers">Test Papers</a>
+      <a class="sec-btn <%= activeSection === 'notes' ? 'active' : '' %>" href="/admin/dashboard?section=notes">Batch Notes</a>
+    </section>
+
+    <% if (activeSection === 'overview') { %>
+      <section class="stats-grid">
+        <div class="stat-card"><p>Total Students</p><h3><%= stats.totalStudents %></h3></div>
+        <div class="stat-card"><p>Total Papers</p><h3><%= stats.totalPapers %></h3></div>
+        <div class="stat-card"><p>Pending/Overdue Fees</p><h3><%= stats.pendingFees %></h3></div>
+        <div class="stat-card"><p>Absent Entries</p><h3><%= stats.absentEntries %></h3></div>
+        <div class="stat-card"><p>Batch Notes</p><h3><%= stats.notesCount %></h3></div>
+        <div class="stat-card"><p>File Storage</p><h3><%= (storageMode || 'local').toUpperCase() %></h3></div>
+      </section>
+
+      <section class="card">
+        <h2>Quick Access</h2>
+        <p class="muted">Use the top buttons to open Attendance, Student List, Fees Management, Papers, and Batch Notes.</p>
+      </section>
+    <% } %>
+
+    <% if (activeSection === 'students') { %>
+      <section class="grid two">
+        <div class="card">
+          <h2>Add Student</h2>
+          <form method="post" action="/admin/students">
+            <label>Roll Number</label>
+            <input type="text" name="rollNo" required />
+
+            <label>Name</label>
+            <input type="text" name="name" />
+
+            <label>Standard</label>
+            <select name="standard" required>
+              <option value="11th">11th</option>
+              <option value="12th">12th</option>
+            </select>
+
+            <label>Course</label>
+            <select name="course" required>
+              <option value="jee">JEE</option>
+              <option value="neet">NEET</option>
+            </select>
+
+            <label>Password (optional, default = roll no)</label>
+            <input type="text" name="password" />
+
+            <button type="submit" class="btn">Create Student</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Total Student Groups</h2>
+          <table>
+            <tr><th>Batch</th><th>Count</th></tr>
+            <tr><td>11th - JEE</td><td><%= (studentGroups['11th-jee'] || []).length %></td></tr>
+            <tr><td>11th - NEET</td><td><%= (studentGroups['11th-neet'] || []).length %></td></tr>
+            <tr><td>12th - JEE</td><td><%= (studentGroups['12th-jee'] || []).length %></td></tr>
+            <tr><td>12th - NEET</td><td><%= (studentGroups['12th-neet'] || []).length %></td></tr>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Students by Batch</h2>
+        <div class="grid two">
+          <div>
+            <h3>11th - JEE</h3>
+            <table>
+              <tr><th>Roll</th><th>Name</th><th>Action</th></tr>
+              <% (studentGroups['11th-jee'] || []).forEach((s) => { %>
+                <tr>
+                  <td><%= s.roll_no %></td>
+                  <td><%= s.name %></td>
+                  <td>
+                    <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
+                      <button type="submit" class="btn danger compact">Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              <% }) %>
+            </table>
+          </div>
+
+          <div>
+            <h3>11th - NEET</h3>
+            <table>
+              <tr><th>Roll</th><th>Name</th><th>Action</th></tr>
+              <% (studentGroups['11th-neet'] || []).forEach((s) => { %>
+                <tr>
+                  <td><%= s.roll_no %></td>
+                  <td><%= s.name %></td>
+                  <td>
+                    <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
+                      <button type="submit" class="btn danger compact">Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              <% }) %>
+            </table>
+          </div>
+
+          <div>
+            <h3>12th - JEE</h3>
+            <table>
+              <tr><th>Roll</th><th>Name</th><th>Action</th></tr>
+              <% (studentGroups['12th-jee'] || []).forEach((s) => { %>
+                <tr>
+                  <td><%= s.roll_no %></td>
+                  <td><%= s.name %></td>
+                  <td>
+                    <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
+                      <button type="submit" class="btn danger compact">Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              <% }) %>
+            </table>
+          </div>
+
+          <div>
+            <h3>12th - NEET</h3>
+            <table>
+              <tr><th>Roll</th><th>Name</th><th>Action</th></tr>
+              <% (studentGroups['12th-neet'] || []).forEach((s) => { %>
+                <tr>
+                  <td><%= s.roll_no %></td>
+                  <td><%= s.name %></td>
+                  <td>
+                    <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
+                      <button type="submit" class="btn danger compact">Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              <% }) %>
+            </table>
+          </div>
+        </div>
+
+        <% if ((studentGroups.unassigned || []).length) { %>
+          <h3 style="margin-top: 16px;">Unassigned (old records)</h3>
+          <table>
+            <tr><th>Roll</th><th>Name</th><th>Created</th><th>Action</th></tr>
+            <% studentGroups.unassigned.forEach((s) => { %>
+              <tr>
+                <td><%= s.roll_no %></td>
+                <td><%= s.name %></td>
+                <td><%= s.created_at %></td>
+                <td>
+                  <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
+                    <button type="submit" class="btn danger compact">Delete</button>
+                  </form>
+                </td>
+              </tr>
+            <% }) %>
+          </table>
+        <% } %>
+      </section>
+    <% } %>
+
+    <% if (activeSection === 'attendance') { %>
+      <section class="grid two">
+        <div class="card">
+          <h2>Mark Attendance</h2>
+          <div class="tab-buttons" role="tablist">
+            <button type="button" class="tab-btn active" data-tab="single">Single Student</button>
+            <button type="button" class="tab-btn" data-tab="bulk">Bulk by Batch</button>
+          </div>
+
+          <div id="tab-single" class="tab-panel active">
+            <form method="post" action="/admin/attendance">
+              <label>Roll Number</label>
+              <input type="text" name="rollNo" required />
+              <label>Date</label>
+              <input type="date" name="attendanceDate" required />
+              <label>Status</label>
+              <select name="status" required>
+                <option value="present">Present</option>
+                <option value="absent">Absent</option>
+                <option value="late">Late</option>
+              </select>
+              <label>Notes</label>
+              <input type="text" name="notes" />
+              <button type="submit" class="btn">Save Attendance</button>
+            </form>
+          </div>
+
+          <div id="tab-bulk" class="tab-panel">
+            <form method="post" action="/admin/attendance-bulk">
+              <label>Standard</label>
+              <select name="standard" required>
+                <option value="11th">11th</option>
+                <option value="12th">12th</option>
+              </select>
+
+              <label>Course</label>
+              <select name="course" required>
+                <option value="jee">JEE</option>
+                <option value="neet">NEET</option>
+              </select>
+
+              <label>Date</label>
+              <input type="date" name="attendanceDate" required />
+
+              <label>Absent Roll Numbers (comma/new line/space)</label>
+              <textarea name="absentRollNos" rows="3" placeholder="101, 105, 108"></textarea>
+
+              <label>Notes (optional)</label>
+              <input type="text" name="notes" placeholder="Special class note" />
+
+              <button type="submit" class="btn">Mark Attendance (others present)</button>
+            </form>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Attendance By Date</h2>
+          <form method="get" action="/admin/dashboard" class="inline-controls">
+            <input type="hidden" name="section" value="attendance" />
+            <label>Date Filter</label>
+            <select name="attendanceDate">
+              <option value="">All Dates</option>
+              <% attendanceDates.forEach((d) => { %>
+                <option value="<%= d.attendance_date %>" <%= attendanceDateFilter === d.attendance_date ? 'selected' : '' %>><%= d.attendance_date %></option>
+              <% }) %>
+            </select>
+            <button type="submit" class="btn">Apply</button>
+          </form>
+          <a class="mini-link" href="/admin/dashboard?section=attendance">Clear Filter</a>
+
+          <% if (!Object.keys(attendanceByDate || {}).length) { %>
+            <p class="muted">No attendance records found for selected date.</p>
+          <% } %>
+        </div>
+      </section>
+
+      <% Object.keys(attendanceByDate || {}).forEach((day) => { %>
+        <section class="card">
+          <h3>Attendance Date: <%= day %></h3>
+          <table>
+            <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Status</th><th>Notes</th></tr>
+            <% attendanceByDate[day].forEach((a) => { %>
+              <tr>
+                <td><%= a.roll_no %></td>
+                <td><%= a.name %></td>
+                <td><%= a.standard || '-' %> - <%= a.course ? a.course.toUpperCase() : '-' %></td>
+                <td><span class="status <%= a.status %>"><%= a.status %></span></td>
+                <td><%= a.notes || '-' %></td>
+              </tr>
+            <% }) %>
+          </table>
+        </section>
+      <% }) %>
+    <% } %>
+
+    <% if (activeSection === 'fees') { %>
+      <section class="grid two">
+        <div class="card">
+          <h2>Add Fee Record</h2>
+          <form method="post" action="/admin/fees">
+            <label>Roll Number</label>
+            <input type="text" name="rollNo" required />
+            <label>Amount</label>
+            <input type="number" name="amount" step="0.01" min="0" required />
+            <label>Due Date</label>
+            <input type="date" name="dueDate" />
+            <label>Payment Date</label>
+            <input type="date" name="paymentDate" />
+            <label>Status</label>
+            <select name="status" required>
+              <option value="pending">Pending</option>
+              <option value="paid">Paid</option>
+              <option value="overdue">Overdue</option>
+            </select>
+            <label>Notes</label>
+            <input type="text" name="notes" />
+            <button type="submit" class="btn">Save Fee</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Fee Records</h2>
+          <table>
+            <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Amount</th><th>Due</th><th>Payment</th><th>Status</th><th>Notes</th></tr>
+            <% fees.forEach((f) => { %>
+              <tr>
+                <td><%= f.roll_no %></td>
+                <td><%= f.name %></td>
+                <td><%= f.standard || '-' %> - <%= f.course ? f.course.toUpperCase() : '-' %></td>
+                <td><%= f.amount %></td>
+                <td><%= f.due_date || '-' %></td>
+                <td><%= f.payment_date || '-' %></td>
+                <td><span class="status <%= f.status %>"><%= f.status %></span></td>
+                <td><%= f.notes || '-' %></td>
+              </tr>
+            <% }) %>
+          </table>
+        </div>
+      </section>
+    <% } %>
+
+    <% if (activeSection === 'papers') { %>
+      <section class="grid two">
+        <div class="card">
+          <h2>Bulk Upload Test Papers</h2>
+          <p class="muted">Filename without extension must match roll number. Example: <code>101.pdf</code></p>
+          <form method="post" action="/admin/upload-papers" enctype="multipart/form-data">
+            <label>Select Files</label>
+            <input type="file" name="papers" multiple required />
+            <button type="submit" class="btn">Upload and Assign</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>All Test Papers</h2>
+          <table>
+            <tr><th>Roll</th><th>Name</th><th>Batch</th><th>File</th><th>Upload Date</th><th>Actions</th></tr>
+            <% papers.forEach((p) => { %>
+              <tr>
+                <td><%= p.roll_no %></td>
+                <td><%= p.name %></td>
+                <td><%= p.standard || '-' %> - <%= p.course ? p.course.toUpperCase() : '-' %></td>
+                <td><%= p.original_name %></td>
+                <td><%= p.upload_date %></td>
+                <td>
+                  <a href="/papers/<%= p.id %>/view" target="_blank" rel="noopener">Open</a>
+                  <a href="/papers/<%= p.id %>/download">Download</a>
+                </td>
+              </tr>
+            <% }) %>
+          </table>
+        </div>
+      </section>
+    <% } %>
+
+    <% if (activeSection === 'notes') { %>
+      <section class="grid two">
+        <div class="card">
+          <h2>Add Batch Note / Video Link</h2>
+          <form method="post" action="/admin/notes">
+            <label>Standard</label>
+            <select name="standard" required>
+              <option value="11th">11th</option>
+              <option value="12th">12th</option>
+            </select>
+
+            <label>Course</label>
+            <select name="course" required>
+              <option value="jee">JEE</option>
+              <option value="neet">NEET</option>
+            </select>
+
+            <label>Title</label>
+            <input type="text" name="title" placeholder="Physics Revision Notes" required />
+
+            <label>Resource URL (Google Drive / YouTube)</label>
+            <input type="url" name="resourceUrl" placeholder="https://..." required />
+
+            <label>Description (optional)</label>
+            <textarea name="description" rows="3"></textarea>
+
+            <button type="submit" class="btn">Publish for Batch</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Published Batch Notes</h2>
+          <table>
+            <tr><th>Title</th><th>Batch</th><th>Link</th><th>Description</th><th>Date</th></tr>
+            <% notes.forEach((n) => { %>
+              <tr>
+                <td><%= n.title %></td>
+                <td><%= n.standard || '-' %> - <%= n.course ? n.course.toUpperCase() : '-' %></td>
+                <td><a href="<%= n.resource_url %>" target="_blank" rel="noopener">Open Link</a></td>
+                <td><%= n.description || '-' %></td>
+                <td><%= n.created_at %></td>
+              </tr>
+            <% }) %>
+          </table>
+        </div>
+      </section>
+    <% } %>
+  </div>
+
+  <script>
+    const tabButtons = document.querySelectorAll('.tab-btn');
+    const tabPanels = document.querySelectorAll('.tab-panel');
+
+    tabButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const tab = btn.dataset.tab;
+        tabButtons.forEach((b) => b.classList.remove('active'));
+        tabPanels.forEach((p) => p.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById(`tab-${tab}`).classList.add('active');
+      });
+    });
+  </script>
+</body>
+</html>

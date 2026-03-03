@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Coaching Portal - Login</title>
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body>
+  <div class="container small">
+    <h1>Coaching Classes Portal</h1>
+    <p class="muted">Admin and Student Login</p>
+
+    <% if (flash) { %>
+      <div class="alert <%= flash.type %>"><%= flash.text %></div>
+    <% } %>
+
+    <form method="post" action="/login" class="card">
+      <label>Login Type</label>
+      <select name="role" id="role" required>
+        <option value="admin">Admin</option>
+        <option value="student">Student</option>
+      </select>
+
+      <label id="usernameLabel">Admin Username</label>
+      <input type="text" id="usernameInput" name="username" placeholder="Enter username" required />
+
+      <label>Password</label>
+      <input type="password" name="password" required />
+
+      <button type="submit">Login</button>
+    </form>
+
+  </div>
+
+  <script>
+    const roleSelect = document.getElementById('role');
+    const usernameLabel = document.getElementById('usernameLabel');
+    const usernameInput = document.getElementById('usernameInput');
+
+    function toggleField() {
+      if (roleSelect.value === 'student') {
+        usernameLabel.textContent = 'Student Roll Number';
+        usernameInput.placeholder = 'e.g. 101';
+      } else {
+        usernameLabel.textContent = 'Admin Username';
+        usernameInput.placeholder = 'Enter username';
+      }
+    }
+
+    roleSelect.addEventListener('change', toggleField);
+    toggleField();
+  </script>
+</body>
+</html>
