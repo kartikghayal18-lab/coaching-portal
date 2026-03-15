@@ -12,13 +12,17 @@
       <div>
         <p class="eyebrow">Student Panel</p>
         <h1>Welcome, <%= profile?.name || user.name %></h1>
-        <p class="muted">Roll No: <%= profile?.roll_no || user.rollNo %></p>
+        <p class="muted">Roll No: <%= profile?.roll_no || user.rollNo %> | Coaching: <%= coaching?.name || user.coachingName || '-' %></p>
       </div>
       <form method="post" action="/logout"><button type="submit" class="btn secondary">Logout</button></form>
     </div>
 
     <% if (flash) { %>
       <div class="alert <%= flash.type %>"><%= flash.text %></div>
+    <% } %>
+
+    <% if (subscriptionNotice) { %>
+      <div class="alert warning"><%= subscriptionNotice %></div>
     <% } %>
 
     <section class="stats-grid">
@@ -38,6 +42,20 @@
         <p>Attendance</p>
         <h3><%= attendanceSummary.attendancePercent %>%</h3>
       </div>
+      <div class="stat-card">
+        <p>Marks Progress</p>
+        <h3><%= marksSummary.marksPercent %>%</h3>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Test Progress Chart</h2>
+      <% if (!progressSeries.length) { %>
+        <p class="muted">No marks data yet. Upload papers with filename like <code>101_78_100.pdf</code> for auto marks.</p>
+      <% } else { %>
+        <p class="muted">Total: <%= marksSummary.totalMarksObtained %>/<%= marksSummary.totalMaxMarks %> across <%= marksSummary.testsCount %> tests</p>
+        <canvas id="progressChart" height="260"></canvas>
+      <% } %>
     </section>
 
     <section class="grid two">
@@ -70,10 +88,17 @@
     <section class="card">
       <h2>My Test Papers</h2>
       <table>
-        <tr><th>File</th><th>Upload Date</th><th>Actions</th></tr>
+        <tr><th>Test</th><th>Marks</th><th>Upload Date</th><th>Actions</th></tr>
         <% papers.forEach((p) => { %>
           <tr>
-            <td><%= p.original_name %></td>
+            <td><%= p.test_label || p.original_name %></td>
+            <td>
+              <% if (p.marks_obtained !== null && p.max_marks !== null) { %>
+                <%= p.marks_obtained %>/<%= p.max_marks %>
+              <% } else { %>
+                -
+              <% } %>
+            </td>
             <td><%= p.upload_date %></td>
             <td>
               <a href="/papers/<%= p.id %>/view" target="_blank" rel="noopener">Open in New Tab</a>
@@ -132,5 +157,74 @@
       </table>
     </section>
   </div>
+
+  <script>
+    const progressData = <%- JSON.stringify(progressSeries || []) %>;
+    const canvas = document.getElementById('progressChart');
+
+    if (canvas && progressData.length) {
+      const ctx = canvas.getContext('2d');
+      const width = canvas.width = canvas.clientWidth;
+      const height = canvas.height = 260;
+      const pad = { left: 42, right: 18, top: 18, bottom: 34 };
+      const chartW = width - pad.left - pad.right;
+      const chartH = height - pad.top - pad.bottom;
+      const maxY = 100;
+
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, width, height);
+
+      ctx.strokeStyle = '#d6e0eb';
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 5; i += 1) {
+        const y = pad.top + (chartH / 5) * i;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(width - pad.right, y);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = '#556070';
+      ctx.font = '12px sans-serif';
+      for (let i = 0; i <= 5; i += 1) {
+        const val = maxY - (maxY / 5) * i;
+        const y = pad.top + (chartH / 5) * i + 4;
+        ctx.fillText(`${val}%`, 6, y);
+      }
+
+      const points = progressData.map((d, idx) => {
+        const x = pad.left + (chartW * idx) / Math.max(progressData.length - 1, 1);
+        const y = pad.top + chartH - (d.percent / maxY) * chartH;
+        return { x, y, d };
+      });
+
+      ctx.strokeStyle = '#1769aa';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      points.forEach((p, idx) => {
+        if (idx === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      });
+      ctx.stroke();
+
+      points.forEach((p) => {
+        ctx.fillStyle = '#1769aa';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#2f3b4c';
+        ctx.fillText(`${p.d.percent}%`, p.x - 14, p.y - 10);
+      });
+
+      ctx.fillStyle = '#556070';
+      ctx.font = '11px sans-serif';
+      points.forEach((p, idx) => {
+        const text = `T${idx + 1}`;
+        ctx.fillText(text, p.x - 8, height - 10);
+      });
+    }
+  </script>
 </body>
 </html>

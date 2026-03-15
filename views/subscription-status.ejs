@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Subscription Status</title>
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body>
+  <div class="container small">
+    <div class="card login-hero">
+      <p class="eyebrow">Subscription Notice</p>
+      <h1><%= subscriptionState.blockedTitle %></h1>
+      <p class="muted"><strong><%= coaching?.name || user.coachingName || 'Coaching Portal' %></strong></p>
+    </div>
+
+    <section class="card blocked-card">
+      <p><%= subscriptionState.blockedMessage %></p>
+      <% if (subscriptionState.endsAt) { %>
+        <p class="muted">Subscription end date: <strong><%= subscriptionState.endsAt %></strong></p>
+      <% } %>
+      <p class="muted">Student access is paused until the coaching renews the subscription.</p>
+      <form method="post" action="/logout">
+        <button type="submit" class="btn">Back to Login</button>
+      </form>
+    </section>
+  </div>
+</body>
+</html>

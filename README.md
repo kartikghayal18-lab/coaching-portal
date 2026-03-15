@@ -1,10 +1,14 @@
 # Coaching Classes Management System
 
 A deploy-ready coaching management website with:
-- Admin + student login
+- Owner SaaS dashboard
+- Coaching admin + student login
+- Multi-tenant coaching isolation by coaching code
+- Owner-managed subscription plans (`basic`, `mid`, `premium`)
 - Student creation by roll number + batch (`11th/12th`, `JEE/NEET`)
 - Student delete (also deletes linked papers/attendance/fees)
 - Bulk paper upload and auto-assignment from filename = roll no
+- Auto marks parsing from filename (`roll_marks_max.ext`)
 - Attendance (single + bulk absent entry)
 - Fees management
 - Batch notes (Google Drive / YouTube links)
@@ -17,7 +21,7 @@ A deploy-ready coaching management website with:
 - `jpg`
 - `png`
 
-## Default Admin Credentials
+## Default Owner Credentials
 - Username: `Scc@coaching`
 - Password: `Scc@8208`
 
@@ -46,6 +50,20 @@ npm start
 
 5. Open
 - `http://localhost:3000/login`
+
+## SaaS Login Flow
+- Owner logs in from `/login` with role `Owner`
+- Coaching admin logs in from `/login` with role `Coaching Admin` + `Coaching Code`
+- Student logs in from `/login` with role `Student` + `Coaching Code`
+- You can also share direct portal links like:
+  - `http://your-domain.com/login?coaching=alpha-jee-academy`
+
+This is how 10 different coaching classes use the same website but still see separate dashboards. Every session is bound to one `coaching_id`, and all student/admin data queries are filtered by that tenant.
+
+## Paper Filename Format
+- Assignment only: `101.pdf`
+- Assignment + marks: `101_78_100.pdf` (roll `101`, marks `78/100`)
+- Pattern for auto marks: `rollno_marks_max.ext`
 
 ## Storage Modes
 ### Cloud (recommended for deployment)

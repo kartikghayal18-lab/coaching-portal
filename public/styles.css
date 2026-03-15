@@ -77,9 +77,15 @@ h3 { font-size: 1rem; }
   gap: 16px;
 }
 
+.grid.three {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 12px;
   margin-bottom: 16px;
 }
@@ -198,6 +204,12 @@ th {
   color: var(--danger);
 }
 
+.alert.warning {
+  border: 1px solid #f2c078;
+  background: #fff8ea;
+  color: #9a5b00;
+}
+
 .status {
   display: inline-block;
   padding: 3px 8px;
@@ -288,6 +300,36 @@ th {
   margin-top: 8px;
 }
 
+.login-hero {
+  background:
+    radial-gradient(circle at top left, rgba(23, 105, 170, 0.12), transparent 42%),
+    linear-gradient(180deg, #ffffff, #f7fbff);
+}
+
+.blocked-card {
+  border-color: #f1c27d;
+  background:
+    radial-gradient(circle at top right, rgba(244, 163, 42, 0.12), transparent 38%),
+    linear-gradient(180deg, #fffdf8, #fff7eb);
+}
+
+.tiny-note {
+  margin-top: 6px;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.tiny-note.warning {
+  color: #9a5b00;
+}
+
+.owner-inline-form {
+  display: grid;
+  grid-template-columns: 1.2fr 1.2fr 1fr 1fr auto;
+  gap: 10px;
+  align-items: end;
+}
+
 .btn.danger {
   background: #b42318;
 }
@@ -308,6 +350,13 @@ table form {
   margin: 0;
 }
 
+canvas {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+}
+
 @media (max-width: 980px) {
   .stats-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -317,9 +366,17 @@ table form {
     grid-template-columns: 1fr;
   }
 
+  .grid.three {
+    grid-template-columns: 1fr;
+  }
+
   .topbar {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .owner-inline-form {
+    grid-template-columns: 1fr;
   }
 
   table {

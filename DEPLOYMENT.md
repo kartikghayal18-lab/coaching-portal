@@ -68,7 +68,10 @@ npm run migrate:papers:cloud -- --delete-local
 ```
 
 ## 5) Verify
-- Login as admin.
+- Login as owner from `/login`.
+- Create a coaching tenant and set its `basic`, `mid`, or `premium` subscription.
+- Open the generated coaching portal link.
+- Login there as coaching admin.
 - Open Admin Dashboard > Overview and check `File Storage: S3`.
 - Upload PDF/JPG/PNG.
 - Login as student and confirm open/download works.

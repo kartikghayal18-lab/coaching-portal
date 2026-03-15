@@ -12,7 +12,7 @@
       <div>
         <p class="eyebrow">Coaching Management</p>
         <h1>Admin Dashboard</h1>
-        <p class="muted">Welcome, <%= user.name %></p>
+        <p class="muted">Welcome, <%= user.name %> | <strong><%= coaching?.name || user.coachingName || '-' %></strong> | Plan: <%= coaching?.plan_name || user.coachingPlan || '-' %></p>
       </div>
       <form method="post" action="/logout"><button type="submit" class="btn secondary">Logout</button></form>
     </div>
@@ -21,14 +21,26 @@
       <div class="alert <%= flash.type %>"><%= flash.text %></div>
     <% } %>
 
-    <section class="section-switcher card">
-      <a class="sec-btn <%= activeSection === 'overview' ? 'active' : '' %>" href="/admin/dashboard?section=overview">Overview</a>
-      <a class="sec-btn <%= activeSection === 'attendance' ? 'active' : '' %>" href="/admin/dashboard?section=attendance">Attendance</a>
-      <a class="sec-btn <%= activeSection === 'students' ? 'active' : '' %>" href="/admin/dashboard?section=students">Student List</a>
-      <a class="sec-btn <%= activeSection === 'fees' ? 'active' : '' %>" href="/admin/dashboard?section=fees">Fees Management</a>
-      <a class="sec-btn <%= activeSection === 'papers' ? 'active' : '' %>" href="/admin/dashboard?section=papers">Test Papers</a>
-      <a class="sec-btn <%= activeSection === 'notes' ? 'active' : '' %>" href="/admin/dashboard?section=notes">Batch Notes</a>
-    </section>
+    <% if (subscriptionState.accessBlocked) { %>
+      <section class="card blocked-card">
+        <h2><%= subscriptionState.blockedTitle %></h2>
+        <p class="muted"><%= subscriptionState.blockedMessage %></p>
+        <p class="muted">Portal access is restricted until the owner renews or reactivates the coaching subscription.</p>
+      </section>
+    <% } else { %>
+      <section class="section-switcher card">
+        <a class="sec-btn <%= activeSection === 'overview' ? 'active' : '' %>" href="/admin/dashboard?section=overview">Overview</a>
+        <a class="sec-btn <%= activeSection === 'attendance' ? 'active' : '' %>" href="/admin/dashboard?section=attendance">Attendance</a>
+        <a class="sec-btn <%= activeSection === 'students' ? 'active' : '' %>" href="/admin/dashboard?section=students">Student List</a>
+        <a class="sec-btn <%= activeSection === 'fees' ? 'active' : '' %>" href="/admin/dashboard?section=fees">Fees Management</a>
+        <a class="sec-btn <%= activeSection === 'papers' ? 'active' : '' %>" href="/admin/dashboard?section=papers">Test Papers</a>
+        <a class="sec-btn <%= activeSection === 'notes' ? 'active' : '' %>" href="/admin/dashboard?section=notes">Batch Notes</a>
+      </section>
+    <% } %>
+
+    <% if (subscriptionNotice) { %>
+      <div class="alert warning"><%= subscriptionNotice %></div>
+    <% } %>
 
     <% if (activeSection === 'overview') { %>
       <section class="stats-grid">
@@ -38,18 +50,26 @@
         <div class="stat-card"><p>Absent Entries</p><h3><%= stats.absentEntries %></h3></div>
         <div class="stat-card"><p>Batch Notes</p><h3><%= stats.notesCount %></h3></div>
         <div class="stat-card"><p>File Storage</p><h3><%= (storageMode || 'local').toUpperCase() %></h3></div>
+        <div class="stat-card"><p>Student Limit</p><h3><%= studentUsage.limit === null ? 'Unlimited' : `${studentUsage.count}/${studentUsage.limit}` %></h3></div>
       </section>
 
       <section class="card">
         <h2>Quick Access</h2>
         <p class="muted">Use the top buttons to open Attendance, Student List, Fees Management, Papers, and Batch Notes.</p>
+        <% if (studentUsage.limit !== null) { %>
+          <p class="muted">Remaining student seats on this plan: <strong><%= studentUsage.remaining %></strong></p>
+        <% } %>
       </section>
     <% } %>
 
-    <% if (activeSection === 'students') { %>
+    <% if (!subscriptionState.accessBlocked && activeSection === 'students') { %>
       <section class="grid two">
         <div class="card">
           <h2>Add Student</h2>
+          <p class="muted">If you leave password empty, the student logs in with roll number as password.</p>
+          <% if (studentUsage.limit !== null) { %>
+            <p class="muted">Current plan allows <strong><%= studentUsage.limit %></strong> students. Added: <strong><%= studentUsage.count %></strong>. Remaining: <strong><%= studentUsage.remaining %></strong>.</p>
+          <% } %>
           <form method="post" action="/admin/students">
             <label>Roll Number</label>
             <input type="text" name="rollNo" required />
@@ -100,6 +120,9 @@
                   <td><%= s.roll_no %></td>
                   <td><%= s.name %></td>
                   <td>
+                    <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
+                      <button type="submit" class="btn secondary compact">Reset Password</button>
+                    </form>
                     <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
                       <button type="submit" class="btn danger compact">Delete</button>
                     </form>
@@ -118,6 +141,9 @@
                   <td><%= s.roll_no %></td>
                   <td><%= s.name %></td>
                   <td>
+                    <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
+                      <button type="submit" class="btn secondary compact">Reset Password</button>
+                    </form>
                     <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
                       <button type="submit" class="btn danger compact">Delete</button>
                     </form>
@@ -136,6 +162,9 @@
                   <td><%= s.roll_no %></td>
                   <td><%= s.name %></td>
                   <td>
+                    <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
+                      <button type="submit" class="btn secondary compact">Reset Password</button>
+                    </form>
                     <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
                       <button type="submit" class="btn danger compact">Delete</button>
                     </form>
@@ -154,6 +183,9 @@
                   <td><%= s.roll_no %></td>
                   <td><%= s.name %></td>
                   <td>
+                    <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
+                      <button type="submit" class="btn secondary compact">Reset Password</button>
+                    </form>
                     <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
                       <button type="submit" class="btn danger compact">Delete</button>
                     </form>
@@ -174,6 +206,9 @@
                 <td><%= s.name %></td>
                 <td><%= s.created_at %></td>
                 <td>
+                  <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
+                    <button type="submit" class="btn secondary compact">Reset Password</button>
+                  </form>
                   <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
                     <button type="submit" class="btn danger compact">Delete</button>
                   </form>
@@ -185,7 +220,7 @@
       </section>
     <% } %>
 
-    <% if (activeSection === 'attendance') { %>
+    <% if (!subscriptionState.accessBlocked && activeSection === 'attendance') { %>
       <section class="grid two">
         <div class="card">
           <h2>Mark Attendance</h2>
@@ -280,7 +315,7 @@
       <% }) %>
     <% } %>
 
-    <% if (activeSection === 'fees') { %>
+    <% if (!subscriptionState.accessBlocked && activeSection === 'fees') { %>
       <section class="grid two">
         <div class="card">
           <h2>Add Fee Record</h2>
@@ -326,11 +361,14 @@
       </section>
     <% } %>
 
-    <% if (activeSection === 'papers') { %>
+    <% if (!subscriptionState.accessBlocked && activeSection === 'papers') { %>
       <section class="grid two">
         <div class="card">
           <h2>Bulk Upload Test Papers</h2>
-          <p class="muted">Filename without extension must match roll number. Example: <code>101.pdf</code></p>
+          <p class="muted">Filename rules:</p>
+          <p class="muted"><code>101.pdf</code> (only assign paper)</p>
+          <p class="muted"><code>101_78_100.pdf</code> (auto-save marks 78/100)</p>
+          <p class="muted">Pattern: <code>rollno_marks_max.ext</code></p>
           <form method="post" action="/admin/upload-papers" enctype="multipart/form-data">
             <label>Select Files</label>
             <input type="file" name="papers" multiple required />
@@ -341,13 +379,20 @@
         <div class="card">
           <h2>All Test Papers</h2>
           <table>
-            <tr><th>Roll</th><th>Name</th><th>Batch</th><th>File</th><th>Upload Date</th><th>Actions</th></tr>
+            <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Test</th><th>Marks</th><th>Upload Date</th><th>Actions</th></tr>
             <% papers.forEach((p) => { %>
               <tr>
                 <td><%= p.roll_no %></td>
                 <td><%= p.name %></td>
                 <td><%= p.standard || '-' %> - <%= p.course ? p.course.toUpperCase() : '-' %></td>
-                <td><%= p.original_name %></td>
+                <td><%= p.test_label || p.original_name %></td>
+                <td>
+                  <% if (p.marks_obtained !== null && p.max_marks !== null) { %>
+                    <%= p.marks_obtained %>/<%= p.max_marks %>
+                  <% } else { %>
+                    -
+                  <% } %>
+                </td>
                 <td><%= p.upload_date %></td>
                 <td>
                   <a href="/papers/<%= p.id %>/view" target="_blank" rel="noopener">Open</a>
@@ -360,7 +405,7 @@
       </section>
     <% } %>
 
-    <% if (activeSection === 'notes') { %>
+    <% if (!subscriptionState.accessBlocked && activeSection === 'notes') { %>
       <section class="grid two">
         <div class="card">
           <h2>Add Batch Note / Video Link</h2>

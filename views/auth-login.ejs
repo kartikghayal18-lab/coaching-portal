@@ -8,8 +8,11 @@
 </head>
 <body>
   <div class="container small">
-    <h1>Coaching Classes Portal</h1>
-    <p class="muted">Admin and Student Login</p>
+    <div class="card login-hero">
+      <p class="eyebrow">SaaS Coaching Portal</p>
+      <h1>Coaching Classes Portal</h1>
+      <p class="muted">Owner controls plans and subscriptions. Coaching admins and students enter their coaching code to open only their portal.</p>
+    </div>
 
     <% if (flash) { %>
       <div class="alert <%= flash.type %>"><%= flash.text %></div>
@@ -18,38 +21,81 @@
     <form method="post" action="/login" class="card">
       <label>Login Type</label>
       <select name="role" id="role" required>
-        <option value="admin">Admin</option>
+        <option value="owner">Owner</option>
+        <option value="admin">Coaching Admin</option>
         <option value="student">Student</option>
       </select>
 
-      <label id="usernameLabel">Admin Username</label>
+      <div id="coachingField">
+        <label>Coaching Code</label>
+        <input
+          type="text"
+          id="coachingSlug"
+          name="coachingSlug"
+          value="<%= coachingHint || '' %>"
+          placeholder="e.g. alpha-jee-academy"
+        />
+        <% if (coaching) { %>
+          <p class="muted">Opening portal for <strong><%= coaching.name %></strong> (<%= coaching.slug %>)</p>
+        <% } %>
+      </div>
+
+      <label id="usernameLabel">Owner Username</label>
       <input type="text" id="usernameInput" name="username" placeholder="Enter username" required />
 
-      <label>Password</label>
-      <input type="password" name="password" required />
+      <label id="passwordLabel">Password</label>
+      <input type="password" id="passwordInput" name="password" required />
+      <p id="passwordHelp" class="muted"></p>
 
-      <button type="submit">Login</button>
+      <button type="submit" class="btn">Login</button>
     </form>
-
   </div>
 
   <script>
     const roleSelect = document.getElementById('role');
+    const coachingField = document.getElementById('coachingField');
     const usernameLabel = document.getElementById('usernameLabel');
     const usernameInput = document.getElementById('usernameInput');
+    const passwordLabel = document.getElementById('passwordLabel');
+    const passwordInput = document.getElementById('passwordInput');
+    const passwordHelp = document.getElementById('passwordHelp');
 
-    function toggleField() {
-      if (roleSelect.value === 'student') {
-        usernameLabel.textContent = 'Student Roll Number';
-        usernameInput.placeholder = 'e.g. 101';
-      } else {
-        usernameLabel.textContent = 'Admin Username';
-        usernameInput.placeholder = 'Enter username';
+    function toggleLoginForm() {
+      const role = roleSelect.value;
+
+      if (role === 'owner') {
+        coachingField.style.display = 'none';
+        usernameLabel.textContent = 'Owner Username';
+        usernameInput.placeholder = 'Enter owner username';
+        passwordLabel.textContent = 'Password';
+        passwordInput.placeholder = 'Enter owner password';
+        passwordInput.required = true;
+        passwordHelp.textContent = '';
+        return;
       }
+
+      coachingField.style.display = 'block';
+
+      if (role === 'admin') {
+        usernameLabel.textContent = 'Admin Username';
+        usernameInput.placeholder = 'Enter admin username';
+        passwordLabel.textContent = 'Password';
+        passwordInput.placeholder = 'Enter admin password';
+        passwordInput.required = true;
+        passwordHelp.textContent = '';
+        return;
+      }
+
+      usernameLabel.textContent = 'Student Roll Number';
+      usernameInput.placeholder = 'e.g. 101';
+      passwordLabel.textContent = 'Password';
+      passwordInput.placeholder = 'Leave blank to use roll number';
+      passwordInput.required = false;
+      passwordHelp.textContent = 'Default student password is the roll number unless the admin set a custom password.';
     }
 
-    roleSelect.addEventListener('change', toggleField);
-    toggleField();
+    roleSelect.addEventListener('change', toggleLoginForm);
+    toggleLoginForm();
   </script>
 </body>
 </html>
