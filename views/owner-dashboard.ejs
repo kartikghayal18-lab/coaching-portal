@@ -131,7 +131,10 @@
           </tr>
           <% coachings.forEach((coaching) => { %>
             <tr>
-              <td><%= coaching.name %></td>
+              <td>
+                <strong><%= coaching.name %></strong>
+                <div class="tiny-note"><%= coaching.brand_name || coaching.name %></div>
+              </td>
               <td><code><%= coaching.slug %></code></td>
               <td><%= coaching.admin_username || '-' %></td>
               <td>
@@ -174,6 +177,53 @@
                   <input type="date" name="subscriptionEndsAt" value="<%= coaching.subscription_ends_at || '' %>" />
                   <button type="submit" class="btn compact">Save Subscription</button>
                 </form>
+              </td>
+            </tr>
+            <tr>
+              <td colspan="8">
+                <div class="owner-manage-grid">
+                  <form method="post" action="/owner/coachings/<%= coaching.id %>/branding" class="card embedded-card">
+                    <h3>Portal Branding</h3>
+                    <label>Coaching Name</label>
+                    <input type="text" name="name" value="<%= coaching.name %>" required />
+
+                    <label>Brand Name</label>
+                    <input type="text" name="brandName" value="<%= coaching.brand_name || coaching.name %>" placeholder="Name shown inside portal" />
+
+                    <label>Logo URL</label>
+                    <input type="url" name="logoUrl" value="<%= coaching.logo_url || '' %>" placeholder="https://..." />
+
+                    <label>Contact Email</label>
+                    <input type="email" name="contactEmail" value="<%= coaching.contact_email || '' %>" />
+
+                    <div class="branding-colors">
+                      <div>
+                        <label>Theme Primary</label>
+                        <input type="text" name="themePrimary" value="<%= coaching.theme_primary || '#1769aa' %>" placeholder="#1769aa" />
+                      </div>
+                      <div>
+                        <label>Theme Background</label>
+                        <input type="text" name="themeBackground" value="<%= coaching.theme_background || '#f3f6fb' %>" placeholder="#f3f6fb" />
+                      </div>
+                      <div>
+                        <label>Theme Surface</label>
+                        <input type="text" name="themeSurface" value="<%= coaching.theme_surface || '#ffffff' %>" placeholder="#ffffff" />
+                      </div>
+                    </div>
+
+                    <p class="muted">These settings update the client portal branding, logo, and dashboard colors for this coaching.</p>
+                    <button type="submit" class="btn compact">Save Branding</button>
+                  </form>
+
+                  <div class="card embedded-card danger-card">
+                    <h3>Danger Zone</h3>
+                    <p class="muted">Deleting a coaching removes its admin, all students, papers, notes, attendance, fees, and portal access permanently.</p>
+                    <p class="muted"><strong>Portal:</strong> <a href="<%= coaching.portal_url %>" target="_blank" rel="noopener"><%= coaching.portal_url %></a></p>
+                    <form method="post" action="/owner/coachings/<%= coaching.id %>/delete" onsubmit="return confirm('Delete <%= coaching.name %>? This will permanently remove all class data and cannot be undone.');">
+                      <button type="submit" class="btn danger">Delete Coaching Permanently</button>
+                    </form>
+                  </div>
+                </div>
               </td>
             </tr>
           <% }) %>

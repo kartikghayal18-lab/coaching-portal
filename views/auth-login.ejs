@@ -3,15 +3,28 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Coaching Portal - Login</title>
+  <title><%= branding?.brandName || 'Coaching Portal' %> - Login</title>
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
-<body>
+<body style="<%= branding?.cssVars || '' %>">
   <div class="container small">
     <div class="card login-hero">
-      <p class="eyebrow">SaaS Coaching Portal</p>
-      <h1>Coaching Classes Portal</h1>
-      <p class="muted">Owner controls plans and subscriptions. Coaching admins and students enter their coaching code to open only their portal.</p>
+      <div class="brand-lockup">
+        <% if (branding?.logoUrl) { %>
+          <img src="<%= branding.logoUrl %>" alt="<%= branding.brandName %> logo" class="brand-logo" />
+        <% } %>
+        <div>
+          <p class="eyebrow"><%= coaching ? 'Coaching Portal' : 'Coaching Platform' %></p>
+          <h1><%= branding?.brandName || 'Coaching Classes Portal' %></h1>
+          <p class="muted">
+            <% if (coaching) { %>
+              Sign in to <strong><%= coaching.name %></strong> with your coaching code and account details.
+            <% } else { %>
+              Coaching admins and students sign in with their coaching code to open only their own portal.
+            <% } %>
+          </p>
+        </div>
+      </div>
     </div>
 
     <% if (flash) { %>
@@ -21,7 +34,6 @@
     <form method="post" action="/login" class="card">
       <label>Login Type</label>
       <select name="role" id="role" required>
-        <option value="owner">Owner</option>
         <option value="admin">Coaching Admin</option>
         <option value="student">Student</option>
       </select>
@@ -34,13 +46,14 @@
           name="coachingSlug"
           value="<%= coachingHint || '' %>"
           placeholder="e.g. alpha-jee-academy"
+          required
         />
         <% if (coaching) { %>
-          <p class="muted">Opening portal for <strong><%= coaching.name %></strong> (<%= coaching.slug %>)</p>
+          <p class="muted">Opening portal for <strong><%= branding?.brandName || coaching.name %></strong> (<%= coaching.slug %>)</p>
         <% } %>
       </div>
 
-      <label id="usernameLabel">Owner Username</label>
+      <label id="usernameLabel">Admin Username</label>
       <input type="text" id="usernameInput" name="username" placeholder="Enter username" required />
 
       <label id="passwordLabel">Password</label>
@@ -53,7 +66,6 @@
 
   <script>
     const roleSelect = document.getElementById('role');
-    const coachingField = document.getElementById('coachingField');
     const usernameLabel = document.getElementById('usernameLabel');
     const usernameInput = document.getElementById('usernameInput');
     const passwordLabel = document.getElementById('passwordLabel');
@@ -62,19 +74,6 @@
 
     function toggleLoginForm() {
       const role = roleSelect.value;
-
-      if (role === 'owner') {
-        coachingField.style.display = 'none';
-        usernameLabel.textContent = 'Owner Username';
-        usernameInput.placeholder = 'Enter owner username';
-        passwordLabel.textContent = 'Password';
-        passwordInput.placeholder = 'Enter owner password';
-        passwordInput.required = true;
-        passwordHelp.textContent = '';
-        return;
-      }
-
-      coachingField.style.display = 'block';
 
       if (role === 'admin') {
         usernameLabel.textContent = 'Admin Username';
@@ -96,6 +95,14 @@
 
     roleSelect.addEventListener('change', toggleLoginForm);
     toggleLoginForm();
+
+    document.addEventListener('keydown', (event) => {
+      const isOwnerShortcut = (event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'o';
+      if (!isOwnerShortcut) return;
+
+      event.preventDefault();
+      window.location.href = '/owner/login';
+    });
   </script>
 </body>
 </html>

@@ -3,16 +3,22 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Student Dashboard</title>
+  <title><%= branding?.brandName || coaching?.name || 'Coaching Portal' %> - Student Dashboard</title>
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
-<body>
+<body style="<%= branding?.cssVars || '' %>">
   <div class="container wide">
     <div class="topbar card">
-      <div>
-        <p class="eyebrow">Student Panel</p>
+      <div class="brand-lockup">
+        <% if (branding?.logoUrl) { %>
+          <img src="<%= branding.logoUrl %>" alt="<%= branding.brandName %> logo" class="brand-logo" />
+        <% } %>
+        <div>
+        <p class="eyebrow"><%= branding?.brandName || 'Student Panel' %></p>
         <h1>Welcome, <%= profile?.name || user.name %></h1>
         <p class="muted">Roll No: <%= profile?.roll_no || user.rollNo %> | Coaching: <%= coaching?.name || user.coachingName || '-' %></p>
+        <p class="muted">Phone: <%= profile?.contact_phone || '-' %> | Email: <%= profile?.email || '-' %></p>
+        </div>
       </div>
       <form method="post" action="/logout"><button type="submit" class="btn secondary">Logout</button></form>
     </div>
@@ -45,6 +51,87 @@
       <div class="stat-card">
         <p>Marks Progress</p>
         <h3><%= marksSummary.marksPercent %>%</h3>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <div class="card">
+        <h2>Upload My Paper</h2>
+        <p class="muted">You can upload your own paper, worksheet, or result. If you add marks, your progress chart updates too.</p>
+        <form method="post" action="/student/upload-paper" enctype="multipart/form-data" data-single-submit>
+          <label>Test Title</label>
+          <input type="text" name="testLabel" placeholder="Mock Test 7" />
+
+          <div class="grid two compact-grid">
+            <div>
+              <label>Marks Obtained (optional)</label>
+              <input type="number" name="marksObtained" step="0.01" min="0" />
+            </div>
+            <div>
+              <label>Max Marks (optional)</label>
+              <input type="number" name="maxMarks" step="0.01" min="0" />
+            </div>
+          </div>
+
+          <label>Select File</label>
+          <input type="file" name="paper" required />
+          <button type="submit" class="btn">Upload Paper</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>24 Hour Upload Windows</h2>
+        <% if (!answerRequestCards.length) { %>
+          <p class="muted">No active or recent answer upload windows for your batch.</p>
+        <% } %>
+        <% answerRequestCards.forEach((request) => { %>
+          <div class="tracker-card student-tracker-card">
+            <div class="tracker-head">
+              <div>
+                <h3><%= request.title %></h3>
+                <% if (request.description) { %>
+                  <p class="muted"><%= request.description %></p>
+                <% } %>
+              </div>
+              <div class="tracker-meta">
+                <span class="status <%= request.state.isActive ? 'paid' : request.state.isUpcoming ? 'pending' : 'overdue' %>"><%= request.state.phase %></span>
+                <div class="tiny-note">Start: <%= request.state.startsAtLabel %></div>
+                <div class="tiny-note">End: <%= request.state.endsAtLabel %></div>
+              </div>
+            </div>
+
+            <% if (request.mySubmission) { %>
+              <p class="muted">✅ Uploaded: <strong><%= request.mySubmission.original_name %></strong> on <%= request.mySubmission.upload_date %></p>
+              <div class="inline-actions">
+                <a href="/papers/<%= request.mySubmission.id %>/view" target="_blank" rel="noopener">Open</a>
+                <form method="post" action="/papers/<%= request.mySubmission.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this uploaded paper?');">
+                  <input type="hidden" name="redirectTo" value="/student/dashboard" />
+                  <button type="submit" class="btn danger compact">Delete</button>
+                </form>
+              </div>
+            <% } else { %>
+              <p class="muted">You have not uploaded for this window yet.</p>
+            <% } %>
+
+            <% if (request.state.isActive) { %>
+              <form method="post" action="/student/answer-requests/<%= request.id %>/upload" enctype="multipart/form-data" data-single-submit>
+                <div class="grid two compact-grid">
+                  <div>
+                    <label>Marks Obtained (optional)</label>
+                    <input type="number" name="marksObtained" step="0.01" min="0" />
+                  </div>
+                  <div>
+                    <label>Max Marks (optional)</label>
+                    <input type="number" name="maxMarks" step="0.01" min="0" />
+                  </div>
+                </div>
+                <label>Select Answer Paper</label>
+                <input type="file" name="paper" required />
+                <button type="submit" class="btn">Upload for This Window</button>
+              </form>
+            <% } %>
+          </div>
+        <% }) %>
       </div>
     </section>
 
@@ -88,10 +175,12 @@
     <section class="card">
       <h2>My Test Papers</h2>
       <table>
-        <tr><th>Test</th><th>Marks</th><th>Upload Date</th><th>Actions</th></tr>
+        <tr><th>Test</th><th>Type</th><th>Uploaded By</th><th>Marks</th><th>Upload Date</th><th>Actions</th></tr>
         <% papers.forEach((p) => { %>
           <tr>
             <td><%= p.test_label || p.original_name %></td>
+            <td><%= p.paper_type === 'answer_submission' ? 'Answer Upload' : 'General' %></td>
+            <td><%= p.uploaded_by_name || '-' %> (<%= p.uploaded_by_role || '-' %>)</td>
             <td>
               <% if (p.marks_obtained !== null && p.max_marks !== null) { %>
                 <%= p.marks_obtained %>/<%= p.max_marks %>
@@ -103,6 +192,12 @@
             <td>
               <a href="/papers/<%= p.id %>/view" target="_blank" rel="noopener">Open in New Tab</a>
               <a href="/papers/<%= p.id %>/download">Download</a>
+              <% if (p.uploaded_by_id === user.id) { %>
+                <form method="post" action="/papers/<%= p.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this uploaded paper?');">
+                  <input type="hidden" name="redirectTo" value="/student/dashboard" />
+                  <button type="submit" class="btn danger compact">Delete</button>
+                </form>
+              <% } %>
             </td>
           </tr>
         <% }) %>
@@ -161,21 +256,42 @@
   <script>
     const progressData = <%- JSON.stringify(progressSeries || []) %>;
     const canvas = document.getElementById('progressChart');
+    const singleSubmitForms = document.querySelectorAll('form[data-single-submit]');
+
+    singleSubmitForms.forEach((form) => {
+      form.addEventListener('submit', () => {
+        const submitButtons = form.querySelectorAll('button[type="submit"]');
+        submitButtons.forEach((button) => {
+          button.disabled = true;
+          button.textContent = 'Uploading...';
+        });
+      });
+    });
 
     if (canvas && progressData.length) {
+      const styles = getComputedStyle(document.body);
+      const brandColor = styles.getPropertyValue('--brand').trim() || '#1769aa';
+      const lineColor = styles.getPropertyValue('--line').trim() || '#d6e0eb';
+      const textColor = styles.getPropertyValue('--muted').trim() || '#556070';
+      const surfaceColor = styles.getPropertyValue('--card').trim() || '#ffffff';
       const ctx = canvas.getContext('2d');
-      const width = canvas.width = canvas.clientWidth;
-      const height = canvas.height = 260;
-      const pad = { left: 42, right: 18, top: 18, bottom: 34 };
+      const dpr = window.devicePixelRatio || 1;
+      const width = canvas.clientWidth;
+      const height = 300;
+      canvas.style.height = `${height}px`;
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const pad = { left: 44, right: 22, top: 24, bottom: 42 };
       const chartW = width - pad.left - pad.right;
       const chartH = height - pad.top - pad.bottom;
       const maxY = 100;
 
       ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = '#ffffff';
+      ctx.fillStyle = surfaceColor;
       ctx.fillRect(0, 0, width, height);
 
-      ctx.strokeStyle = '#d6e0eb';
+      ctx.strokeStyle = lineColor;
       ctx.lineWidth = 1;
       for (let i = 0; i <= 5; i += 1) {
         const y = pad.top + (chartH / 5) * i;
@@ -185,8 +301,9 @@
         ctx.stroke();
       }
 
-      ctx.fillStyle = '#556070';
+      ctx.fillStyle = textColor;
       ctx.font = '12px sans-serif';
+      ctx.textAlign = 'left';
       for (let i = 0; i <= 5; i += 1) {
         const val = maxY - (maxY / 5) * i;
         const y = pad.top + (chartH / 5) * i + 4;
@@ -198,9 +315,26 @@
         const y = pad.top + chartH - (d.percent / maxY) * chartH;
         return { x, y, d };
       });
+      const labelStep = Math.max(1, Math.ceil(points.length / 6));
+      const valueStep = Math.max(1, Math.ceil(points.length / 8));
 
-      ctx.strokeStyle = '#1769aa';
-      ctx.lineWidth = 2;
+      if (points.length > 1) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, height - pad.bottom);
+        points.forEach((p) => ctx.lineTo(p.x, p.y));
+        ctx.lineTo(points[points.length - 1].x, height - pad.bottom);
+        ctx.closePath();
+        ctx.globalAlpha = 0.12;
+        ctx.fillStyle = brandColor;
+        ctx.fill();
+        ctx.restore();
+      }
+
+      ctx.strokeStyle = brandColor;
+      ctx.lineWidth = 3;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
       ctx.beginPath();
       points.forEach((p, idx) => {
         if (idx === 0) ctx.moveTo(p.x, p.y);
@@ -208,21 +342,31 @@
       });
       ctx.stroke();
 
-      points.forEach((p) => {
-        ctx.fillStyle = '#1769aa';
+      points.forEach((p, idx) => {
+        ctx.fillStyle = brandColor;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
         ctx.fill();
 
-        ctx.fillStyle = '#2f3b4c';
-        ctx.fillText(`${p.d.percent}%`, p.x - 14, p.y - 10);
-      });
+        ctx.fillStyle = surfaceColor;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+        ctx.fill();
 
-      ctx.fillStyle = '#556070';
-      ctx.font = '11px sans-serif';
-      points.forEach((p, idx) => {
-        const text = `T${idx + 1}`;
-        ctx.fillText(text, p.x - 8, height - 10);
+        ctx.fillStyle = textColor;
+        const showValue = idx === points.length - 1 || idx === 0 || idx % valueStep === 0;
+        if (showValue) {
+          ctx.textAlign = 'center';
+          ctx.fillText(`${p.d.percent}%`, p.x, p.y - 12);
+        }
+
+        const showLabel = idx === 0 || idx === points.length - 1 || idx % labelStep === 0;
+        if (showLabel) {
+          const rawLabel = progressData[idx].label || `Test ${idx + 1}`;
+          const label = rawLabel.length > 12 ? `T${idx + 1}` : rawLabel;
+          ctx.textAlign = 'center';
+          ctx.fillText(label, p.x, height - 10);
+        }
       });
     }
   </script>

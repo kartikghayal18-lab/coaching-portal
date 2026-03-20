@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Owner Login</title>
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body>
+  <div class="container small">
+    <div class="card login-hero">
+      <p class="eyebrow">Private Owner Access</p>
+      <h1>Owner Control Room</h1>
+      <p class="muted">Use your owner credentials to manage plans, branding, subscriptions, and coaching tenants.</p>
+    </div>
+
+    <% if (flash) { %>
+      <div class="alert <%= flash.type %>"><%= flash.text %></div>
+    <% } %>
+
+    <form method="post" action="/owner/login" class="card">
+      <label>Owner Username</label>
+      <input type="text" name="username" placeholder="Enter owner username" required />
+
+      <label>Password</label>
+      <input type="password" name="password" placeholder="Enter owner password" required />
+
+      <button type="submit" class="btn">Login</button>
+      <a href="/login" class="mini-link">Back to coaching login</a>
+    </form>
+  </div>
+</body>
+</html>

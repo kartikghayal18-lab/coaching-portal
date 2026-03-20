@@ -140,6 +140,11 @@ async function createCoachingClassesTable() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       slug TEXT NOT NULL UNIQUE,
+      brand_name TEXT,
+      logo_url TEXT,
+      theme_primary TEXT,
+      theme_background TEXT,
+      theme_surface TEXT,
       contact_email TEXT,
       subscription_plan_id INTEGER,
       subscription_status TEXT NOT NULL DEFAULT 'active' CHECK(subscription_status IN ('trial', 'active', 'suspended', 'cancelled')),
@@ -148,6 +153,18 @@ async function createCoachingClassesTable() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(subscription_plan_id) REFERENCES subscription_plans(id)
     )
+  `);
+
+  await ensureColumn('coaching_classes', 'brand_name', `TEXT`);
+  await ensureColumn('coaching_classes', 'logo_url', `TEXT`);
+  await ensureColumn('coaching_classes', 'theme_primary', `TEXT`);
+  await ensureColumn('coaching_classes', 'theme_background', `TEXT`);
+  await ensureColumn('coaching_classes', 'theme_surface', `TEXT`);
+
+  await run(`
+    UPDATE coaching_classes
+    SET brand_name = COALESCE(NULLIF(brand_name, ''), name)
+    WHERE brand_name IS NULL OR brand_name = ''
   `);
 }
 
@@ -183,11 +200,18 @@ async function createUsersTable() {
       name TEXT,
       standard TEXT CHECK(standard IN ('11th', '12th')),
       course TEXT CHECK(course IN ('jee', 'neet')),
+      contact_phone TEXT,
+      email TEXT,
       password_hash TEXT NOT NULL,
+      password_display TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(coaching_id) REFERENCES coaching_classes(id)
     )
   `);
+
+  await ensureColumn('users', 'contact_phone', `TEXT`);
+  await ensureColumn('users', 'email', `TEXT`);
+  await ensureColumn('users', 'password_display', `TEXT`);
 
   await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_owner_username ON users(username) WHERE is_owner = 1`);
   await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_coaching_username ON users(coaching_id, username) WHERE username IS NOT NULL AND is_owner = 0`);
@@ -308,6 +332,8 @@ async function ensureTenantScopedTables() {
       marks_obtained REAL,
       max_marks REAL,
       test_label TEXT,
+      paper_type TEXT NOT NULL DEFAULT 'general' CHECK(paper_type IN ('general', 'answer_submission')),
+      answer_request_id INTEGER,
       FOREIGN KEY(coaching_id) REFERENCES coaching_classes(id),
       FOREIGN KEY(student_id) REFERENCES users(id),
       FOREIGN KEY(uploaded_by) REFERENCES users(id)
@@ -323,6 +349,9 @@ async function ensureTenantScopedTables() {
   await ensureColumn('test_papers', 'marks_obtained', `REAL`);
   await ensureColumn('test_papers', 'max_marks', `REAL`);
   await ensureColumn('test_papers', 'test_label', `TEXT`);
+  await ensureColumn('test_papers', 'paper_type', `TEXT NOT NULL DEFAULT 'general'`);
+  await ensureColumn('test_papers', 'answer_request_id', `INTEGER`);
+  await run(`UPDATE test_papers SET paper_type = COALESCE(NULLIF(paper_type, ''), 'general')`);
 
   await run(`
     CREATE TABLE IF NOT EXISTS attendance (
@@ -376,6 +405,23 @@ async function ensureTenantScopedTables() {
     )
   `);
   await ensureColumn('batch_notes', 'coaching_id', `INTEGER`);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS answer_upload_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      coaching_id INTEGER NOT NULL,
+      standard TEXT NOT NULL CHECK(standard IN ('11th', '12th')),
+      course TEXT NOT NULL CHECK(course IN ('jee', 'neet')),
+      title TEXT NOT NULL,
+      description TEXT,
+      starts_at TEXT NOT NULL,
+      ends_at TEXT NOT NULL,
+      created_by INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(coaching_id) REFERENCES coaching_classes(id),
+      FOREIGN KEY(created_by) REFERENCES users(id)
+    )
+  `);
 }
 
 async function backfillTenantScopes() {
@@ -421,9 +467,11 @@ async function backfillTenantScopes() {
 async function ensureIndexes() {
   await run(`CREATE INDEX IF NOT EXISTS idx_test_papers_storage ON test_papers(storage_type, storage_key)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_test_papers_coaching_student ON test_papers(coaching_id, student_id, upload_date)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_test_papers_answer_request ON test_papers(coaching_id, answer_request_id, student_id, upload_date DESC)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_attendance_student_date ON attendance(coaching_id, student_id, attendance_date)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_fees_student_created ON fees(coaching_id, student_id, created_at)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_batch_notes_group ON batch_notes(coaching_id, standard, course, created_at DESC)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_answer_requests_group_dates ON answer_upload_requests(coaching_id, standard, course, starts_at DESC, ends_at DESC)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_coaching_slug ON coaching_classes(slug)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_coaching_subscription_status ON coaching_classes(subscription_status, subscription_plan_id)`);
 }
@@ -458,9 +506,26 @@ async function ensureOwnerAccount(adminUsername, adminPassword, adminForceReset)
   ]);
 }
 
+async function syncStudentPasswordDisplay() {
+  const students = await all(
+    `SELECT id, roll_no, password_hash, password_display
+     FROM users
+     WHERE role = 'student'`
+  );
+
+  for (const student of students) {
+    if (student.password_display || !student.roll_no) continue;
+
+    const matchesRollNo = await bcrypt.compare(student.roll_no, student.password_hash);
+    if (!matchesRollNo) continue;
+
+    await run(`UPDATE users SET password_display = ? WHERE id = ?`, [student.roll_no, student.id]);
+  }
+}
+
 async function initDb() {
-  const adminUsername = (process.env.ADMIN_USERNAME || 'Scc@coaching').trim();
-  const adminPassword = (process.env.ADMIN_PASSWORD || 'Scc@8208').trim();
+  const adminUsername = (process.env.ADMIN_USERNAME || 'kartik001').trim();
+  const adminPassword = (process.env.ADMIN_PASSWORD || 'Ga7BU8cZ').trim();
   const adminForceReset = String(process.env.ADMIN_FORCE_RESET || 'true').toLowerCase() === 'true';
 
   await createSubscriptionPlansTable();
@@ -471,6 +536,7 @@ async function initDb() {
   await backfillTenantScopes();
   await ensureIndexes();
   await ensureOwnerAccount(adminUsername, adminPassword, adminForceReset);
+  await syncStudentPasswordDisplay();
 }
 
 module.exports = {

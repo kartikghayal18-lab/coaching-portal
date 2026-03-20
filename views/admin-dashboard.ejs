@@ -3,16 +3,21 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Admin Dashboard</title>
+  <title><%= branding?.brandName || coaching?.name || 'Coaching Portal' %> - Admin Dashboard</title>
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
-<body>
+<body style="<%= branding?.cssVars || '' %>">
   <div class="container wide">
     <div class="topbar card">
-      <div>
-        <p class="eyebrow">Coaching Management</p>
+      <div class="brand-lockup">
+        <% if (branding?.logoUrl) { %>
+          <img src="<%= branding.logoUrl %>" alt="<%= branding.brandName %> logo" class="brand-logo" />
+        <% } %>
+        <div>
+        <p class="eyebrow"><%= branding?.brandName || 'Coaching Management' %></p>
         <h1>Admin Dashboard</h1>
         <p class="muted">Welcome, <%= user.name %> | <strong><%= coaching?.name || user.coachingName || '-' %></strong> | Plan: <%= coaching?.plan_name || user.coachingPlan || '-' %></p>
+        </div>
       </div>
       <form method="post" action="/logout"><button type="submit" class="btn secondary">Logout</button></form>
     </div>
@@ -49,16 +54,161 @@
         <div class="stat-card"><p>Pending/Overdue Fees</p><h3><%= stats.pendingFees %></h3></div>
         <div class="stat-card"><p>Absent Entries</p><h3><%= stats.absentEntries %></h3></div>
         <div class="stat-card"><p>Batch Notes</p><h3><%= stats.notesCount %></h3></div>
+        <div class="stat-card"><p>Active Upload Windows</p><h3><%= stats.activeAnswerRequests %></h3></div>
         <div class="stat-card"><p>File Storage</p><h3><%= (storageMode || 'local').toUpperCase() %></h3></div>
         <div class="stat-card"><p>Student Limit</p><h3><%= studentUsage.limit === null ? 'Unlimited' : `${studentUsage.count}/${studentUsage.limit}` %></h3></div>
       </section>
 
+      <section class="grid two">
+        <div class="card">
+          <h2>Quick Access</h2>
+          <p class="muted">Use the top buttons to open Attendance, Student List, Fees Management, Papers, and Batch Notes.</p>
+          <% if (studentUsage.limit !== null) { %>
+            <p class="muted">Remaining student seats on this plan: <strong><%= studentUsage.remaining %></strong></p>
+          <% } %>
+          <p class="muted">The overview below now shows student contacts, uploaded papers, progress snapshot, and the 24-hour answer upload tracker.</p>
+        </div>
+
+        <div class="card">
+          <h2>Announce Answer Upload</h2>
+          <p class="muted">Create a 24-hour upload window. Students in that batch can upload their answer paper from their dashboard.</p>
+          <form method="post" action="/admin/answer-requests" data-single-submit>
+            <label>Title</label>
+            <input type="text" name="title" placeholder="Physics Test 5 Answer Upload" required />
+
+            <label>Standard</label>
+            <select name="standard" required>
+              <option value="11th">11th</option>
+              <option value="12th">12th</option>
+            </select>
+
+            <label>Course</label>
+            <select name="course" required>
+              <option value="jee">JEE</option>
+              <option value="neet">NEET</option>
+            </select>
+
+            <label>Start Time</label>
+            <input type="datetime-local" name="startsAt" value="<%= defaultAnswerRequestStart %>" required />
+
+            <label>Description (optional)</label>
+            <textarea name="description" rows="3" placeholder="Upload today's handwritten answer paper."></textarea>
+
+            <button type="submit" class="btn">Create 24 Hour Window</button>
+          </form>
+        </div>
+      </section>
+
       <section class="card">
-        <h2>Quick Access</h2>
-        <p class="muted">Use the top buttons to open Attendance, Student List, Fees Management, Papers, and Batch Notes.</p>
-        <% if (studentUsage.limit !== null) { %>
-          <p class="muted">Remaining student seats on this plan: <strong><%= studentUsage.remaining %></strong></p>
+        <h2>Student Overview</h2>
+        <p class="muted">Admin can open a full student dashboard view, see uploaded papers, progress, contact details, and latest upload activity.</p>
+        <table>
+          <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Phone</th><th>Email</th><th>Papers</th><th>Latest Score</th><th>Last Upload</th><th>Dashboard</th></tr>
+          <% overviewStudents.forEach((student) => { %>
+            <tr>
+              <td><%= student.roll_no %></td>
+              <td><%= student.name %></td>
+              <td><%= student.standard || '-' %> - <%= student.course ? student.course.toUpperCase() : '-' %></td>
+              <td><%= student.contact_phone || '-' %></td>
+              <td><%= student.email || '-' %></td>
+              <td><%= student.paperCount %></td>
+              <td>
+                <% if (student.latestPercent !== null) { %>
+                  <%= student.latestPercent %>%
+                  <div class="tiny-note"><%= student.latestMarkedLabel || '-' %></div>
+                <% } else { %>
+                  -
+                <% } %>
+              </td>
+              <td><%= student.lastUpload || '-' %></td>
+              <td><a href="/admin/students/<%= student.id %>/overview">View Dashboard</a></td>
+            </tr>
+          <% }) %>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>24 Hour Upload Tracker</h2>
+        <% if (!answerRequestSummaries.length) { %>
+          <p class="muted">No answer upload windows created yet.</p>
         <% } %>
+
+        <% answerRequestSummaries.forEach((request) => { %>
+          <div class="tracker-card">
+            <div class="tracker-head">
+              <div>
+                <h3><%= request.title %></h3>
+                <p class="muted"><%= request.standard %> - <%= request.course ? request.course.toUpperCase() : '-' %></p>
+                <% if (request.description) { %>
+                  <p class="muted"><%= request.description %></p>
+                <% } %>
+              </div>
+              <div class="tracker-meta">
+                <span class="status <%= request.state.isActive ? 'paid' : request.state.isUpcoming ? 'pending' : 'overdue' %>"><%= request.state.phase %></span>
+                <div class="tiny-note">Start: <%= request.state.startsAtLabel %></div>
+                <div class="tiny-note">End: <%= request.state.endsAtLabel %></div>
+              </div>
+            </div>
+
+            <div class="stats-grid compact-grid">
+              <div class="stat-card"><p>Total Students</p><h3><%= request.totalStudents %></h3></div>
+              <div class="stat-card"><p>Uploaded</p><h3><%= request.uploadedCount %></h3></div>
+              <div class="stat-card"><p>Pending</p><h3><%= request.pendingCount %></h3></div>
+              <div class="stat-card"><p>Time Left</p><h3><%= request.state.isActive ? `${request.state.remainingHours} hrs` : '-' %></h3></div>
+            </div>
+
+            <div class="tracker-filter-row">
+              <label for="trackerFilter-<%= request.id %>">Show</label>
+              <select id="trackerFilter-<%= request.id %>" class="tracker-filter" data-tracker-id="<%= request.id %>">
+                <option value="uploaded">Students who submit</option>
+                <option value="pending">Students who don't submit</option>
+              </select>
+            </div>
+
+            <div class="card embedded-card tracker-panel active" data-tracker-panel="<%= request.id %>" data-tracker-mode="uploaded">
+              <h3>Students who submit</h3>
+              <% if (!request.uploadedStudents.length) { %>
+                <p class="muted">No student has uploaded yet.</p>
+              <% } %>
+              <table>
+                <tr><th>Status</th><th>Roll</th><th>Name</th><th>Uploaded At</th><th>Actions</th></tr>
+                <% request.uploadedStudents.forEach((student) => { %>
+                  <tr>
+                    <td>✅</td>
+                    <td><%= student.roll_no %></td>
+                    <td><%= student.name %></td>
+                    <td><%= student.submission.upload_date %></td>
+                    <td>
+                      <a href="/papers/<%= student.submission.id %>/view" target="_blank" rel="noopener">Open</a>
+                      <form method="post" action="/papers/<%= student.submission.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this uploaded paper?');">
+                        <input type="hidden" name="redirectTo" value="/admin/dashboard?section=overview" />
+                        <button type="submit" class="btn danger compact">Delete</button>
+                      </form>
+                    </td>
+                  </tr>
+                <% }) %>
+              </table>
+            </div>
+
+            <div class="card embedded-card tracker-panel" data-tracker-panel="<%= request.id %>" data-tracker-mode="pending">
+              <h3>Students who don't submit</h3>
+              <% if (!request.pendingStudents.length) { %>
+                <p class="muted">All students in this batch have uploaded.</p>
+              <% } %>
+              <table>
+                <tr><th>Roll</th><th>Name</th><th>Contact</th><th>Email</th></tr>
+                <% request.pendingStudents.forEach((student) => { %>
+                  <tr>
+                    <td><%= student.roll_no %></td>
+                    <td><%= student.name %></td>
+                    <td><%= student.contact_phone || '-' %></td>
+                    <td><%= student.email || '-' %></td>
+                  </tr>
+                <% }) %>
+              </table>
+            </div>
+          </div>
+        <% }) %>
       </section>
     <% } %>
 
@@ -76,6 +226,12 @@
 
             <label>Name</label>
             <input type="text" name="name" />
+
+            <label>Contact Number</label>
+            <input type="text" name="contactPhone" placeholder="9876543210" />
+
+            <label>Email ID</label>
+            <input type="email" name="email" placeholder="student@example.com" />
 
             <label>Standard</label>
             <select name="standard" required>
@@ -114,12 +270,16 @@
           <div>
             <h3>11th - JEE</h3>
             <table>
-              <tr><th>Roll</th><th>Name</th><th>Action</th></tr>
+              <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Password</th><th>Action</th></tr>
               <% (studentGroups['11th-jee'] || []).forEach((s) => { %>
                 <tr>
                   <td><%= s.roll_no %></td>
                   <td><%= s.name %></td>
+                  <td><%= s.contact_phone || '-' %></td>
+                  <td><%= s.email || '-' %></td>
+                  <td><span class="password-pill"><%= s.password_display || 'Hidden' %></span></td>
                   <td>
+                    <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
                     <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
                       <button type="submit" class="btn secondary compact">Reset Password</button>
                     </form>
@@ -135,12 +295,16 @@
           <div>
             <h3>11th - NEET</h3>
             <table>
-              <tr><th>Roll</th><th>Name</th><th>Action</th></tr>
+              <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Password</th><th>Action</th></tr>
               <% (studentGroups['11th-neet'] || []).forEach((s) => { %>
                 <tr>
                   <td><%= s.roll_no %></td>
                   <td><%= s.name %></td>
+                  <td><%= s.contact_phone || '-' %></td>
+                  <td><%= s.email || '-' %></td>
+                  <td><span class="password-pill"><%= s.password_display || 'Hidden' %></span></td>
                   <td>
+                    <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
                     <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
                       <button type="submit" class="btn secondary compact">Reset Password</button>
                     </form>
@@ -156,12 +320,16 @@
           <div>
             <h3>12th - JEE</h3>
             <table>
-              <tr><th>Roll</th><th>Name</th><th>Action</th></tr>
+              <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Password</th><th>Action</th></tr>
               <% (studentGroups['12th-jee'] || []).forEach((s) => { %>
                 <tr>
                   <td><%= s.roll_no %></td>
                   <td><%= s.name %></td>
+                  <td><%= s.contact_phone || '-' %></td>
+                  <td><%= s.email || '-' %></td>
+                  <td><span class="password-pill"><%= s.password_display || 'Hidden' %></span></td>
                   <td>
+                    <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
                     <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
                       <button type="submit" class="btn secondary compact">Reset Password</button>
                     </form>
@@ -177,12 +345,16 @@
           <div>
             <h3>12th - NEET</h3>
             <table>
-              <tr><th>Roll</th><th>Name</th><th>Action</th></tr>
+              <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Password</th><th>Action</th></tr>
               <% (studentGroups['12th-neet'] || []).forEach((s) => { %>
                 <tr>
                   <td><%= s.roll_no %></td>
                   <td><%= s.name %></td>
+                  <td><%= s.contact_phone || '-' %></td>
+                  <td><%= s.email || '-' %></td>
+                  <td><span class="password-pill"><%= s.password_display || 'Hidden' %></span></td>
                   <td>
+                    <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
                     <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
                       <button type="submit" class="btn secondary compact">Reset Password</button>
                     </form>
@@ -199,13 +371,17 @@
         <% if ((studentGroups.unassigned || []).length) { %>
           <h3 style="margin-top: 16px;">Unassigned (old records)</h3>
           <table>
-            <tr><th>Roll</th><th>Name</th><th>Created</th><th>Action</th></tr>
+            <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Password</th><th>Created</th><th>Action</th></tr>
             <% studentGroups.unassigned.forEach((s) => { %>
               <tr>
                 <td><%= s.roll_no %></td>
                 <td><%= s.name %></td>
+                <td><%= s.contact_phone || '-' %></td>
+                <td><%= s.email || '-' %></td>
+                <td><span class="password-pill"><%= s.password_display || 'Hidden' %></span></td>
                 <td><%= s.created_at %></td>
                 <td>
+                  <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
                   <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
                     <button type="submit" class="btn secondary compact">Reset Password</button>
                   </form>
@@ -364,44 +540,85 @@
     <% if (!subscriptionState.accessBlocked && activeSection === 'papers') { %>
       <section class="grid two">
         <div class="card">
+          <h2>Assign Paper to Student</h2>
+          <p class="muted">Admins can upload a student paper directly. Optional marks update the progress chart immediately.</p>
+          <form method="post" action="/admin/upload-paper-single" enctype="multipart/form-data" data-single-submit>
+            <label>Student Roll Number</label>
+            <input type="text" name="rollNo" required />
+
+            <label>Test Title</label>
+            <input type="text" name="testLabel" placeholder="Weekly Chemistry Test" />
+
+            <div class="grid two compact-grid">
+              <div>
+                <label>Marks Obtained</label>
+                <input type="number" name="marksObtained" step="0.01" min="0" />
+              </div>
+              <div>
+                <label>Max Marks</label>
+                <input type="number" name="maxMarks" step="0.01" min="0" />
+              </div>
+            </div>
+
+            <label>Link to Upload Window (optional)</label>
+            <select name="answerRequestId">
+              <option value="">General Paper</option>
+              <% answerRequestSummaries.forEach((request) => { %>
+                <option value="<%= request.id %>"><%= request.title %> | <%= request.standard %> - <%= request.course.toUpperCase() %></option>
+              <% }) %>
+            </select>
+
+            <label>Select File</label>
+            <input type="file" name="paper" required />
+            <button type="submit" class="btn">Upload for Student</button>
+          </form>
+        </div>
+
+        <div class="card">
           <h2>Bulk Upload Test Papers</h2>
           <p class="muted">Filename rules:</p>
           <p class="muted"><code>101.pdf</code> (only assign paper)</p>
           <p class="muted"><code>101_78_100.pdf</code> (auto-save marks 78/100)</p>
           <p class="muted">Pattern: <code>rollno_marks_max.ext</code></p>
-          <form method="post" action="/admin/upload-papers" enctype="multipart/form-data">
+          <form method="post" action="/admin/upload-papers" enctype="multipart/form-data" data-single-submit>
             <label>Select Files</label>
             <input type="file" name="papers" multiple required />
             <button type="submit" class="btn">Upload and Assign</button>
           </form>
         </div>
+      </section>
 
-        <div class="card">
-          <h2>All Test Papers</h2>
-          <table>
-            <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Test</th><th>Marks</th><th>Upload Date</th><th>Actions</th></tr>
-            <% papers.forEach((p) => { %>
-              <tr>
-                <td><%= p.roll_no %></td>
-                <td><%= p.name %></td>
-                <td><%= p.standard || '-' %> - <%= p.course ? p.course.toUpperCase() : '-' %></td>
-                <td><%= p.test_label || p.original_name %></td>
-                <td>
-                  <% if (p.marks_obtained !== null && p.max_marks !== null) { %>
-                    <%= p.marks_obtained %>/<%= p.max_marks %>
-                  <% } else { %>
-                    -
-                  <% } %>
-                </td>
-                <td><%= p.upload_date %></td>
-                <td>
-                  <a href="/papers/<%= p.id %>/view" target="_blank" rel="noopener">Open</a>
-                  <a href="/papers/<%= p.id %>/download">Download</a>
-                </td>
-              </tr>
-            <% }) %>
-          </table>
-        </div>
+      <section class="card">
+        <h2>All Test Papers</h2>
+        <table>
+          <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Test</th><th>Type</th><th>Uploaded By</th><th>Marks</th><th>Upload Date</th><th>Actions</th></tr>
+          <% papers.forEach((p) => { %>
+            <tr>
+              <td><%= p.roll_no %></td>
+              <td><%= p.name %></td>
+              <td><%= p.standard || '-' %> - <%= p.course ? p.course.toUpperCase() : '-' %></td>
+              <td><%= p.test_label || p.original_name %></td>
+              <td><%= p.paper_type === 'answer_submission' ? 'Answer Upload' : 'General' %></td>
+              <td><%= p.uploaded_by_name || '-' %> (<%= p.uploaded_by_role || '-' %>)</td>
+              <td>
+                <% if (p.marks_obtained !== null && p.max_marks !== null) { %>
+                  <%= p.marks_obtained %>/<%= p.max_marks %>
+                <% } else { %>
+                  -
+                <% } %>
+              </td>
+              <td><%= p.upload_date %></td>
+              <td>
+                <a href="/papers/<%= p.id %>/view" target="_blank" rel="noopener">Open</a>
+                <a href="/papers/<%= p.id %>/download">Download</a>
+                <form method="post" action="/papers/<%= p.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this paper?');">
+                  <input type="hidden" name="redirectTo" value="/admin/dashboard?section=papers" />
+                  <button type="submit" class="btn danger compact">Delete</button>
+                </form>
+              </td>
+            </tr>
+          <% }) %>
+        </table>
       </section>
     <% } %>
 
@@ -457,6 +674,8 @@
   <script>
     const tabButtons = document.querySelectorAll('.tab-btn');
     const tabPanels = document.querySelectorAll('.tab-panel');
+    const trackerFilters = document.querySelectorAll('.tracker-filter');
+    const singleSubmitForms = document.querySelectorAll('form[data-single-submit]');
 
     tabButtons.forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -465,6 +684,29 @@
         tabPanels.forEach((p) => p.classList.remove('active'));
         btn.classList.add('active');
         document.getElementById(`tab-${tab}`).classList.add('active');
+      });
+    });
+
+    trackerFilters.forEach((select) => {
+      select.addEventListener('change', () => {
+        const trackerId = select.dataset.trackerId;
+        const mode = select.value;
+        document.querySelectorAll(`[data-tracker-panel="${trackerId}"]`).forEach((panel) => {
+          panel.classList.toggle('active', panel.dataset.trackerMode === mode);
+        });
+      });
+    });
+
+    singleSubmitForms.forEach((form) => {
+      form.addEventListener('submit', () => {
+        const submitButtons = form.querySelectorAll('button[type="submit"]');
+        submitButtons.forEach((button) => {
+          button.disabled = true;
+          if (!button.dataset.originalText) {
+            button.dataset.originalText = button.textContent;
+          }
+          button.textContent = 'Saving...';
+        });
       });
     });
   </script>

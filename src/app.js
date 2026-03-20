@@ -10,12 +10,37 @@ const { initDb, run, get, all } = require('./db');
 const { initStorage, getStorageMode, uploadPaperFile, getPaperAccess, deleteStoredPaper } = require('./storage');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+function resolvePort(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 3000;
+
+  if (/^\d+$/.test(raw)) {
+    const numericPort = Number(raw);
+    if (Number.isInteger(numericPort) && numericPort > 0 && numericPort < 65536) {
+      return numericPort;
+    }
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isInteger(parsed) && parsed > 0 && parsed < 65536) {
+    return parsed;
+  }
+
+  return 3000;
+}
+
+const PORT = resolvePort(process.env.PORT);
 const VALID_STANDARDS = new Set(['11th', '12th']);
 const VALID_COURSES = new Set(['jee', 'neet']);
 const OWNER_SECTIONS = new Set(['overview', 'plans', 'coachings']);
 const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes']);
 const ALLOWED_UPLOAD_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/jpg']);
+const ANSWER_UPLOAD_WINDOW_HOURS = 24;
+const DEFAULT_THEME = {
+  brand: '#1769aa',
+  background: '#f3f6fb',
+  surface: '#ffffff',
+};
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -54,7 +79,7 @@ function requireAuth(req, res, next) {
 }
 
 function requireOwner(req, res, next) {
-  if (!req.session.user) return res.redirect('/login');
+  if (!req.session.user) return res.redirect('/owner/login');
   if (!req.session.user.isOwner) return res.status(403).send('Forbidden');
   return next();
 }
@@ -179,6 +204,45 @@ function formatDateLabel(value) {
   });
 }
 
+function parseDateTimeLocal(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function formatDateTimeLabel(value) {
+  const parsed = parseDateTimeLocal(value);
+  if (!parsed) return value || '-';
+
+  return parsed.toLocaleString('en-IN', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+function toDateTimeLocalInput(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function addHours(date, hours) {
+  return new Date(date.getTime() + (hours * 60 * 60 * 1000));
+}
+
+function parseOptionalNumber(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function getStudentLimitValue(coaching) {
   if (coaching?.max_students === null || coaching?.max_students === undefined || coaching?.max_students === '') {
     return null;
@@ -195,6 +259,495 @@ function getStudentUsage(count, coaching) {
     limit,
     remaining: limit === null ? null : Math.max(limit - count, 0),
     atLimit: limit !== null && count >= limit,
+  };
+}
+
+function normalizeHexColor(value, fallback) {
+  const input = String(value || '').trim();
+  if (!input) return fallback;
+
+  const normalized = input.startsWith('#') ? input : `#${input}`;
+  if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(normalized)) {
+    return fallback;
+  }
+
+  if (normalized.length === 4) {
+    return `#${normalized[1]}${normalized[1]}${normalized[2]}${normalized[2]}${normalized[3]}${normalized[3]}`.toLowerCase();
+  }
+
+  return normalized.toLowerCase();
+}
+
+function hexToRgb(hex) {
+  const safeHex = normalizeHexColor(hex, DEFAULT_THEME.brand).slice(1);
+  return {
+    r: Number.parseInt(safeHex.slice(0, 2), 16),
+    g: Number.parseInt(safeHex.slice(2, 4), 16),
+    b: Number.parseInt(safeHex.slice(4, 6), 16),
+  };
+}
+
+function rgbaFromHex(hex, alpha) {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function darkenHex(hex, amount = 22) {
+  const { r, g, b } = hexToRgb(hex);
+  const next = [r, g, b]
+    .map((value) => Math.max(0, Math.min(255, value - amount)))
+    .map((value) => value.toString(16).padStart(2, '0'))
+    .join('');
+  return `#${next}`;
+}
+
+function buildBranding(coaching = null) {
+  const themePrimary = normalizeHexColor(coaching?.theme_primary, DEFAULT_THEME.brand);
+  const themeBackground = normalizeHexColor(coaching?.theme_background, DEFAULT_THEME.background);
+  const themeSurface = normalizeHexColor(coaching?.theme_surface, DEFAULT_THEME.surface);
+  const brandName = String(coaching?.brand_name || coaching?.name || 'Coaching Classes Portal').trim();
+
+  return {
+    brandName,
+    coachingName: coaching?.name || brandName,
+    logoUrl: String(coaching?.logo_url || '').trim(),
+    themePrimary,
+    themeBackground,
+    themeSurface,
+    cssVars: [
+      `--brand:${themePrimary}`,
+      `--brand-dark:${darkenHex(themePrimary, 26)}`,
+      `--bg:${themeBackground}`,
+      `--card:${themeSurface}`,
+      `--line:${rgbaFromHex(themePrimary, 0.14)}`,
+      `--bg-accent-a:${rgbaFromHex(themePrimary, 0.18)}`,
+      `--bg-accent-b:${rgbaFromHex(themePrimary, 0.08)}`,
+      `--surface-glow:${rgbaFromHex(themePrimary, 0.1)}`,
+      `--shadow:0 12px 30px ${rgbaFromHex(themePrimary, 0.08)}`,
+    ].join(';'),
+  };
+}
+
+function buildProgressSummaryFromPapers(papers) {
+  const markedPapers = (papers || [])
+    .filter((paper) => paper.marks_obtained !== null && paper.max_marks !== null && Number(paper.max_marks) > 0)
+    .slice()
+    .reverse();
+
+  const totalMarksObtained = markedPapers.reduce((sum, paper) => sum + Number(paper.marks_obtained || 0), 0);
+  const totalMaxMarks = markedPapers.reduce((sum, paper) => sum + Number(paper.max_marks || 0), 0);
+  const marksPercent = totalMaxMarks
+    ? ((totalMarksObtained / totalMaxMarks) * 100).toFixed(1)
+    : '0.0';
+
+  const progressSeries = markedPapers.map((paper, index) => ({
+    label: paper.test_label || path.parse(paper.original_name || 'Test').name,
+    marks: Number(paper.marks_obtained),
+    max: Number(paper.max_marks),
+    percent: Number(((Number(paper.marks_obtained) / Number(paper.max_marks)) * 100).toFixed(1)),
+    testNo: index + 1,
+  }));
+
+  return {
+    markedPapers,
+    progressSeries,
+    marksSummary: {
+      testsCount: markedPapers.length,
+      totalMarksObtained,
+      totalMaxMarks,
+      marksPercent,
+    },
+  };
+}
+
+function getAnswerRequestState(request) {
+  const now = new Date();
+  const startsAt = parseDateTimeLocal(request.starts_at);
+  const endsAt = parseDateTimeLocal(request.ends_at);
+  const startsAtLabel = formatDateTimeLabel(request.starts_at);
+  const endsAtLabel = formatDateTimeLabel(request.ends_at);
+  const remainingMs = endsAt ? endsAt.getTime() - now.getTime() : null;
+  const remainingHours = remainingMs !== null ? Math.max(0, Math.round((remainingMs / 3600000) * 10) / 10) : null;
+
+  let phase = 'expired';
+  if (startsAt && now < startsAt) phase = 'upcoming';
+  else if (startsAt && endsAt && now >= startsAt && now <= endsAt) phase = 'active';
+
+  return {
+    phase,
+    startsAt,
+    endsAt,
+    startsAtLabel,
+    endsAtLabel,
+    isUpcoming: phase === 'upcoming',
+    isActive: phase === 'active',
+    isExpired: phase === 'expired',
+    remainingHours,
+  };
+}
+
+async function buildAnswerRequestSummaries(coachingId, requests) {
+  const summaries = [];
+
+  for (const request of requests) {
+    const targetStudents = await all(
+      `SELECT id, roll_no, name, contact_phone, email
+       FROM users
+       WHERE coaching_id = ? AND role = 'student' AND standard = ? AND course = ?
+       ORDER BY roll_no ASC`,
+      [coachingId, request.standard, request.course]
+    );
+
+    const submissions = await all(
+      `SELECT tp.id, tp.student_id, tp.upload_date, tp.original_name, tp.test_label, tp.content_type,
+              uploader.name AS uploaded_by_name, uploader.role AS uploaded_by_role
+       FROM test_papers tp
+       LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
+       WHERE tp.coaching_id = ? AND tp.answer_request_id = ?
+       ORDER BY tp.upload_date DESC`,
+      [coachingId, request.id]
+    );
+
+    const latestSubmissionByStudent = new Map();
+    submissions.forEach((submission) => {
+      if (!latestSubmissionByStudent.has(submission.student_id)) {
+        latestSubmissionByStudent.set(submission.student_id, submission);
+      }
+    });
+
+    const uploadedStudents = [];
+    const pendingStudents = [];
+
+    for (const student of targetStudents) {
+      const submission = latestSubmissionByStudent.get(student.id);
+      if (submission) {
+        uploadedStudents.push({
+          ...student,
+          submission,
+        });
+      } else {
+        pendingStudents.push(student);
+      }
+    }
+
+    summaries.push({
+      ...request,
+      state: getAnswerRequestState(request),
+      totalStudents: targetStudents.length,
+      uploadedCount: uploadedStudents.length,
+      pendingCount: pendingStudents.length,
+      uploadedStudents,
+      pendingStudents,
+    });
+  }
+
+  return summaries;
+}
+
+async function findRecentDuplicatePaper({
+  coachingId,
+  studentId,
+  originalName,
+  testLabel,
+  marksObtained,
+  maxMarks,
+  uploadedBy,
+  answerRequestId = null,
+}) {
+  if (answerRequestId === null) {
+    return get(
+      `SELECT id
+       FROM test_papers
+       WHERE coaching_id = ?
+         AND student_id = ?
+         AND uploaded_by = ?
+         AND answer_request_id IS NULL
+         AND original_name = ?
+         AND COALESCE(test_label, '') = COALESCE(?, '')
+         AND COALESCE(marks_obtained, -999999) = COALESCE(?, -999999)
+         AND COALESCE(max_marks, -999999) = COALESCE(?, -999999)
+         AND upload_date >= datetime('now', '-20 seconds')
+       ORDER BY upload_date DESC, id DESC
+       LIMIT 1`,
+      [coachingId, studentId, uploadedBy, originalName, testLabel || null, marksObtained, maxMarks]
+    );
+  }
+
+  return get(
+    `SELECT id
+     FROM test_papers
+     WHERE coaching_id = ?
+       AND student_id = ?
+       AND uploaded_by = ?
+       AND answer_request_id = ?
+       AND original_name = ?
+       AND COALESCE(test_label, '') = COALESCE(?, '')
+       AND COALESCE(marks_obtained, -999999) = COALESCE(?, -999999)
+       AND COALESCE(max_marks, -999999) = COALESCE(?, -999999)
+       AND upload_date >= datetime('now', '-20 seconds')
+     ORDER BY upload_date DESC, id DESC
+     LIMIT 1`,
+    [coachingId, studentId, uploadedBy, answerRequestId, originalName, testLabel || null, marksObtained, maxMarks]
+  );
+}
+
+async function deletePaperRecord(paper) {
+  await run(`DELETE FROM test_papers WHERE id = ?`, [paper.id]);
+  try {
+    await deleteStoredPaper(paper);
+  } catch (error) {
+    console.error('Failed deleting stored paper asset', error);
+  }
+}
+
+async function savePaperUpload({
+  coachingId,
+  studentId,
+  file,
+  uploadedBy,
+  testLabel,
+  marksObtained,
+  maxMarks,
+  answerRequestId = null,
+}) {
+  const duplicate = await findRecentDuplicatePaper({
+    coachingId,
+    studentId,
+    originalName: file.originalname,
+    testLabel,
+    marksObtained,
+    maxMarks,
+    uploadedBy,
+    answerRequestId,
+  });
+
+  if (duplicate) {
+    return { status: 'duplicate', paperId: duplicate.id };
+  }
+
+  const stored = await uploadPaperFile(file);
+
+  if (answerRequestId !== null) {
+    const existing = await get(
+      `SELECT id, stored_name, storage_type, storage_key, public_url, content_type
+       FROM test_papers
+       WHERE coaching_id = ? AND student_id = ? AND answer_request_id = ?
+       ORDER BY upload_date DESC, id DESC
+       LIMIT 1`,
+      [coachingId, studentId, answerRequestId]
+    );
+
+    if (existing) {
+      await run(
+        `UPDATE test_papers
+         SET original_name = ?, stored_name = ?, uploaded_by = ?,
+             storage_type = ?, storage_key = ?, public_url = ?, content_type = ?, size_bytes = ?,
+             marks_obtained = ?, max_marks = ?, test_label = ?, paper_type = 'answer_submission',
+             upload_date = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [
+          file.originalname,
+          stored.storedName,
+          uploadedBy,
+          stored.storageType,
+          stored.storageKey,
+          stored.publicUrl,
+          stored.contentType,
+          stored.sizeBytes,
+          marksObtained,
+          maxMarks,
+          testLabel || file.originalname,
+          existing.id,
+        ]
+      );
+
+      if (existing.storage_key !== stored.storageKey || existing.storage_type !== stored.storageType) {
+        try {
+          await deleteStoredPaper(existing);
+        } catch (error) {
+          console.error('Failed deleting replaced answer submission asset', error);
+        }
+      }
+
+      return { status: 'replaced', paperId: existing.id };
+    }
+  }
+
+  const result = await run(
+    `INSERT INTO test_papers (
+      coaching_id, student_id, original_name, stored_name, uploaded_by,
+      storage_type, storage_key, public_url, content_type, size_bytes,
+      marks_obtained, max_marks, test_label, paper_type, answer_request_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      coachingId,
+      studentId,
+      file.originalname,
+      stored.storedName,
+      uploadedBy,
+      stored.storageType,
+      stored.storageKey,
+      stored.publicUrl,
+      stored.contentType,
+      stored.sizeBytes,
+      marksObtained,
+      maxMarks,
+      testLabel || file.originalname,
+      answerRequestId !== null ? 'answer_submission' : 'general',
+      answerRequestId,
+    ]
+  );
+
+  return { status: 'inserted', paperId: result.lastID };
+}
+
+async function getPaperForDelete(id, sessionUser) {
+  const paper = await get(
+    `SELECT tp.*, u.coaching_id AS student_coaching_id
+     FROM test_papers tp
+     JOIN users u ON u.id = tp.student_id
+     WHERE tp.id = ?`,
+    [id]
+  );
+
+  if (!paper) return null;
+  if (sessionUser.isOwner) return null;
+
+  if (sessionUser.role === 'admin' && paper.coaching_id === sessionUser.coachingId) {
+    return paper;
+  }
+
+  if (
+    sessionUser.role === 'student' &&
+    paper.student_id === sessionUser.id &&
+    paper.coaching_id === sessionUser.coachingId &&
+    paper.uploaded_by === sessionUser.id
+  ) {
+    return paper;
+  }
+
+  return null;
+}
+
+async function cleanupDuplicateAnswerSubmissions() {
+  const duplicateGroups = await all(
+    `SELECT coaching_id, student_id, answer_request_id, COUNT(*) AS duplicate_count
+     FROM test_papers
+     WHERE answer_request_id IS NOT NULL
+     GROUP BY coaching_id, student_id, answer_request_id
+     HAVING COUNT(*) > 1`
+  );
+
+  for (const group of duplicateGroups) {
+    const rows = await all(
+      `SELECT id, stored_name, storage_type, storage_key, public_url, content_type
+       FROM test_papers
+       WHERE coaching_id = ? AND student_id = ? AND answer_request_id = ?
+       ORDER BY upload_date DESC, id DESC`,
+      [group.coaching_id, group.student_id, group.answer_request_id]
+    );
+
+    const [, ...duplicates] = rows;
+    for (const paper of duplicates) {
+      await deletePaperRecord(paper);
+    }
+  }
+}
+
+async function getStudentDashboardPayload(coachingId, studentId) {
+  const profile = await get(
+    `SELECT id, roll_no, name, standard, course, contact_phone, email
+     FROM users
+     WHERE id = ? AND coaching_id = ? AND role = 'student'`,
+    [studentId, coachingId]
+  );
+
+  const papers = await all(
+    `SELECT tp.id, tp.original_name, tp.stored_name, tp.upload_date, tp.storage_type, tp.storage_key, tp.content_type,
+            tp.marks_obtained, tp.max_marks, tp.test_label, tp.paper_type, tp.answer_request_id, tp.uploaded_by AS uploaded_by_id,
+            uploader.name AS uploaded_by_name, uploader.role AS uploaded_by_role
+     FROM test_papers tp
+     LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
+     WHERE tp.coaching_id = ? AND tp.student_id = ?
+     ORDER BY tp.upload_date DESC`,
+    [coachingId, studentId]
+  );
+
+  const attendance = await all(
+    `SELECT attendance_date, status, notes
+     FROM attendance
+     WHERE coaching_id = ? AND student_id = ?
+     ORDER BY attendance_date DESC, id DESC`,
+    [coachingId, studentId]
+  );
+
+  const fees = await all(
+    `SELECT amount, due_date, payment_date, status, notes
+     FROM fees
+     WHERE coaching_id = ? AND student_id = ?
+     ORDER BY created_at DESC`,
+    [coachingId, studentId]
+  );
+
+  const notes = profile?.standard && profile?.course
+    ? await all(
+      `SELECT title, resource_url, description, created_at
+       FROM batch_notes
+       WHERE coaching_id = ? AND standard = ? AND course = ?
+       ORDER BY created_at DESC`,
+      [coachingId, profile.standard, profile.course]
+    )
+    : [];
+
+  const attendanceSummary = await get(
+    `SELECT
+       COUNT(*) AS total,
+       SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) AS present_count,
+       SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) AS absent_count,
+       SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) AS late_count
+     FROM attendance
+     WHERE coaching_id = ? AND student_id = ?`,
+    [coachingId, studentId]
+  );
+
+  const feeSummary = await get(
+    `SELECT
+       COUNT(*) AS total_fees,
+       SUM(CASE WHEN status IN ('pending', 'overdue') THEN 1 ELSE 0 END) AS pending_count,
+       SUM(CASE WHEN status IN ('pending', 'overdue') THEN amount ELSE 0 END) AS pending_amount
+     FROM fees
+     WHERE coaching_id = ? AND student_id = ?`,
+    [coachingId, studentId]
+  );
+
+  const totalAttendance = Number(attendanceSummary?.total || 0);
+  const presentCount = Number(attendanceSummary?.present_count || 0);
+  const attendancePercent = totalAttendance
+    ? ((presentCount / totalAttendance) * 100).toFixed(1)
+    : '0.0';
+
+  const { progressSeries, marksSummary } = buildProgressSummaryFromPapers(papers);
+
+  return {
+    profile,
+    papers,
+    attendance,
+    fees,
+    notes,
+    attendanceSummary: {
+      total: totalAttendance,
+      presentCount,
+      absentCount: Number(attendanceSummary?.absent_count || 0),
+      lateCount: Number(attendanceSummary?.late_count || 0),
+      attendancePercent,
+    },
+    feeSummary: {
+      totalFees: Number(feeSummary?.total_fees || 0),
+      pendingCount: Number(feeSummary?.pending_count || 0),
+      pendingAmount: Number(feeSummary?.pending_amount || 0),
+    },
+    marksSummary,
+    progressSeries,
   };
 }
 
@@ -306,7 +859,54 @@ async function renderLoginPage(req, res, flash = null) {
     flash: nextFlash,
     coaching,
     coachingHint,
+    branding: buildBranding(coaching),
   });
+}
+
+async function renderOwnerLoginPage(req, res, flash = null) {
+  const nextFlash = flash || req.session?.flash || null;
+  if (req.session) req.session.flash = null;
+
+  return renderWithMessage(res, 'owner-login', {
+    flash: nextFlash,
+  });
+}
+
+async function deleteCoachingData(coachingId) {
+  const papers = await all(
+    `SELECT stored_name, storage_type, storage_key, public_url, content_type
+     FROM test_papers
+     WHERE coaching_id = ?`,
+    [coachingId]
+  );
+
+  await run('BEGIN TRANSACTION');
+
+  try {
+    await run(`DELETE FROM attendance WHERE coaching_id = ?`, [coachingId]);
+    await run(`DELETE FROM fees WHERE coaching_id = ?`, [coachingId]);
+    await run(`DELETE FROM batch_notes WHERE coaching_id = ?`, [coachingId]);
+    await run(`DELETE FROM answer_upload_requests WHERE coaching_id = ?`, [coachingId]);
+    await run(`DELETE FROM test_papers WHERE coaching_id = ?`, [coachingId]);
+    await run(`DELETE FROM users WHERE coaching_id = ?`, [coachingId]);
+    await run(`DELETE FROM coaching_classes WHERE id = ?`, [coachingId]);
+    await run('COMMIT');
+  } catch (error) {
+    try {
+      await run('ROLLBACK');
+    } catch (rollbackError) {
+      console.error('Failed to rollback coaching delete transaction', rollbackError);
+    }
+    throw error;
+  }
+
+  for (const paper of papers) {
+    try {
+      await deleteStoredPaper(paper);
+    } catch (error) {
+      console.error('Failed deleting coaching paper asset', error);
+    }
+  }
 }
 
 async function getPaperForUser(id, sessionUser) {
@@ -381,6 +981,12 @@ app.get('/login', async (req, res) => {
   return renderLoginPage(req, res);
 });
 
+app.get('/owner/login', async (req, res) => {
+  if (req.session.user?.isOwner) return res.redirect('/owner/dashboard');
+  if (req.session.user) return res.redirect('/');
+  return renderOwnerLoginPage(req, res);
+});
+
 app.post('/login', async (req, res) => {
   const role = (req.body.role || '').trim();
   const username = (req.body.username || '').trim();
@@ -394,12 +1000,7 @@ app.post('/login', async (req, res) => {
   let user = null;
   let coaching = null;
 
-  if (role === 'owner') {
-    user = await get(
-      `SELECT * FROM users WHERE is_owner = 1 AND username = ? LIMIT 1`,
-      [username]
-    );
-  } else if (role === 'admin' || role === 'student') {
+  if (role === 'admin' || role === 'student') {
     coaching = await getCoachingBySlug(coachingSlug);
 
     if (!coaching) {
@@ -421,6 +1022,10 @@ app.post('/login', async (req, res) => {
         [coaching.id, username]
       );
     }
+  }
+
+  if (!['admin', 'student'].includes(role)) {
+    return renderLoginPage(req, res, { type: 'error', text: 'Select a valid login type' });
   }
 
   if (!user) {
@@ -447,6 +1052,28 @@ app.post('/login', async (req, res) => {
   return res.redirect('/student/dashboard');
 });
 
+app.post('/owner/login', async (req, res) => {
+  const username = (req.body.username || '').trim();
+  const password = req.body.password || '';
+
+  const user = await get(
+    `SELECT * FROM users WHERE is_owner = 1 AND username = ? LIMIT 1`,
+    [username]
+  );
+
+  if (!user) {
+    return renderOwnerLoginPage(req, res, { type: 'error', text: 'Invalid owner credentials' });
+  }
+
+  const ok = await bcrypt.compare(password, user.password_hash);
+  if (!ok) {
+    return renderOwnerLoginPage(req, res, { type: 'error', text: 'Invalid owner credentials' });
+  }
+
+  req.session.user = buildSessionUser(user);
+  return res.redirect('/owner/dashboard');
+});
+
 app.post('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
 });
@@ -463,6 +1090,7 @@ app.get('/subscription-status', requireAuth, async (req, res) => {
     user: req.session.user,
     coaching,
     subscriptionState,
+    branding: buildBranding(coaching),
   });
 });
 
@@ -480,6 +1108,11 @@ app.get('/owner/dashboard', requireOwner, async (req, res) => {
        cc.id,
        cc.name,
        cc.slug,
+       cc.brand_name,
+       cc.logo_url,
+       cc.theme_primary,
+       cc.theme_background,
+       cc.theme_surface,
        cc.contact_email,
        cc.subscription_status,
        cc.subscription_started_at,
@@ -596,9 +1229,9 @@ app.post('/owner/coachings', requireOwner, async (req, res) => {
 
   const coachingInsert = await run(
     `INSERT INTO coaching_classes (
-      name, slug, contact_email, subscription_plan_id, subscription_status, subscription_started_at, subscription_ends_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [name, slug, contactEmail, planId, subscriptionStatus, subscriptionStartedAt, subscriptionEndsAt]
+      name, brand_name, slug, contact_email, subscription_plan_id, subscription_status, subscription_started_at, subscription_ends_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [name, name, slug, contactEmail, planId, subscriptionStatus, subscriptionStartedAt, subscriptionEndsAt]
   );
 
   const coachingId = coachingInsert.lastID;
@@ -642,6 +1275,60 @@ app.post('/owner/coachings/:id/subscription', requireOwner, async (req, res) => 
   return res.redirect('/owner/dashboard?section=coachings');
 });
 
+app.post('/owner/coachings/:id/branding', requireOwner, async (req, res) => {
+  const coachingId = Number(req.params.id);
+  const coaching = await get(`SELECT id FROM coaching_classes WHERE id = ? LIMIT 1`, [coachingId]);
+  if (!coaching) {
+    req.session.flash = { type: 'error', text: 'Coaching not found' };
+    return res.redirect('/owner/dashboard?section=coachings');
+  }
+
+  const name = (req.body.name || '').trim();
+  const brandName = (req.body.brandName || '').trim() || name;
+  const logoUrl = (req.body.logoUrl || '').trim();
+  const contactEmail = (req.body.contactEmail || '').trim();
+  const themePrimary = normalizeHexColor(req.body.themePrimary, DEFAULT_THEME.brand);
+  const themeBackground = normalizeHexColor(req.body.themeBackground, DEFAULT_THEME.background);
+  const themeSurface = normalizeHexColor(req.body.themeSurface, DEFAULT_THEME.surface);
+
+  if (!name) {
+    req.session.flash = { type: 'error', text: 'Coaching name is required for branding' };
+    return res.redirect('/owner/dashboard?section=coachings');
+  }
+
+  if (logoUrl && !isValidHttpUrl(logoUrl)) {
+    req.session.flash = { type: 'error', text: 'Logo URL must be a valid http/https link' };
+    return res.redirect('/owner/dashboard?section=coachings');
+  }
+
+  await run(
+    `UPDATE coaching_classes
+     SET name = ?, brand_name = ?, logo_url = ?, contact_email = ?, theme_primary = ?, theme_background = ?, theme_surface = ?
+     WHERE id = ?`,
+    [name, brandName, logoUrl || null, contactEmail || null, themePrimary, themeBackground, themeSurface, coachingId]
+  );
+
+  req.session.flash = { type: 'success', text: 'Branding updated for coaching portal' };
+  return res.redirect('/owner/dashboard?section=coachings');
+});
+
+app.post('/owner/coachings/:id/delete', requireOwner, async (req, res) => {
+  const coachingId = Number(req.params.id);
+  const coaching = await get(`SELECT id, name FROM coaching_classes WHERE id = ? LIMIT 1`, [coachingId]);
+  if (!coaching) {
+    req.session.flash = { type: 'error', text: 'Coaching not found' };
+    return res.redirect('/owner/dashboard?section=coachings');
+  }
+
+  await deleteCoachingData(coachingId);
+
+  req.session.flash = {
+    type: 'success',
+    text: `${coaching.name} deleted permanently with all students, notes, papers, attendance, and fees data.`,
+  };
+  return res.redirect('/owner/dashboard?section=coachings');
+});
+
 app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const subscriptionState = req.subscriptionState || getSubscriptionState(req.currentCoaching);
   const activeSection = subscriptionState.accessBlocked ? 'overview' : getAdminSection(req.query.section);
@@ -650,7 +1337,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
 
   const students = await all(
-    `SELECT id, roll_no, name, standard, course, created_at
+    `SELECT id, roll_no, name, standard, course, contact_phone, email, password_display, created_at
      FROM users
      WHERE role = 'student' AND coaching_id = ?
      ORDER BY standard DESC, course ASC, roll_no ASC`,
@@ -669,15 +1356,20 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
        tp.marks_obtained,
        tp.max_marks,
        tp.test_label,
+       tp.paper_type,
+       tp.answer_request_id,
        u.roll_no,
        u.name,
        u.standard,
-       u.course
+       u.course,
+       uploader.name AS uploaded_by_name,
+       uploader.role AS uploaded_by_role
      FROM test_papers tp
      JOIN users u ON u.id = tp.student_id
+     LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
      WHERE tp.coaching_id = ?
      ORDER BY tp.upload_date DESC
-     LIMIT 150`,
+     LIMIT 250`,
     [coachingId]
   );
 
@@ -723,18 +1415,79 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     [coachingId]
   );
 
+  const answerRequests = await all(
+    `SELECT id, standard, course, title, description, starts_at, ends_at, created_at
+     FROM answer_upload_requests
+     WHERE coaching_id = ?
+     ORDER BY created_at DESC
+     LIMIT 20`,
+    [coachingId]
+  );
+
+  const answerRequestSummaries = await buildAnswerRequestSummaries(coachingId, answerRequests);
+
+  const paperStats = await all(
+    `SELECT
+       student_id,
+       COUNT(*) AS paper_count,
+       MAX(upload_date) AS last_upload,
+       MAX(CASE WHEN marks_obtained IS NOT NULL AND max_marks IS NOT NULL AND max_marks > 0 THEN upload_date END) AS latest_marked_upload
+     FROM test_papers
+     WHERE coaching_id = ?
+     GROUP BY student_id`,
+    [coachingId]
+  );
+
+  const latestMarkedPapers = await all(
+    `SELECT student_id, marks_obtained, max_marks, upload_date, test_label, original_name
+     FROM test_papers
+     WHERE coaching_id = ? AND marks_obtained IS NOT NULL AND max_marks IS NOT NULL AND max_marks > 0
+     ORDER BY upload_date DESC`,
+    [coachingId]
+  );
+
+  const paperStatsByStudent = new Map();
+  paperStats.forEach((row) => paperStatsByStudent.set(row.student_id, row));
+
+  const latestMarkedByStudent = new Map();
+  latestMarkedPapers.forEach((paper) => {
+    if (!latestMarkedByStudent.has(paper.student_id)) {
+      latestMarkedByStudent.set(paper.student_id, paper);
+    }
+  });
+
+  const overviewStudents = students.map((student) => {
+    const paperRow = paperStatsByStudent.get(student.id);
+    const latestMarked = latestMarkedByStudent.get(student.id);
+    const latestPercent = latestMarked && Number(latestMarked.max_marks) > 0
+      ? ((Number(latestMarked.marks_obtained || 0) / Number(latestMarked.max_marks)) * 100).toFixed(1)
+      : null;
+
+    return {
+      ...student,
+      paperCount: Number(paperRow?.paper_count || 0),
+      lastUpload: paperRow?.last_upload || null,
+      latestPercent,
+      latestMarkedLabel: latestMarked?.test_label || latestMarked?.original_name || null,
+    };
+  });
+
+  const defaultAnswerRequestStart = toDateTimeLocalInput(new Date());
+
   const stats = {
     totalStudents: students.length,
     totalPapers: papers.length,
     pendingFees: fees.filter((item) => item.status === 'pending' || item.status === 'overdue').length,
     absentEntries: attendance.filter((item) => item.status === 'absent').length,
     notesCount: notes.length,
+    activeAnswerRequests: answerRequestSummaries.filter((item) => item.state.isActive).length,
   };
   const studentUsage = getStudentUsage(students.length, coaching);
 
   renderWithMessage(res, 'admin-dashboard', {
     user: req.session.user,
     coaching,
+    branding: buildBranding(coaching),
     subscriptionState,
     subscriptionNotice: subscriptionState.notice,
     students,
@@ -747,6 +1500,9 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     attendanceDateFilter,
     fees,
     notes,
+    answerRequestSummaries,
+    overviewStudents,
+    defaultAnswerRequestStart,
     stats,
     activeSection,
     storageMode: getStorageMode(),
@@ -760,6 +1516,8 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const rollNo = (req.body.rollNo || '').trim();
   const name = (req.body.name || '').trim() || rollNo;
+  const contactPhone = (req.body.contactPhone || '').trim();
+  const email = (req.body.email || '').trim().toLowerCase();
   const submittedPassword = (req.body.password || '').trim();
   const password = submittedPassword || rollNo;
   const standard = (req.body.standard || '').trim();
@@ -800,9 +1558,9 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const passwordHash = await bcrypt.hash(password, 10);
   await run(
     `INSERT INTO users (
-      coaching_id, role, is_owner, username, roll_no, name, standard, course, password_hash
-    ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?)`,
-    [coachingId, rollNo, name, standard, course, passwordHash]
+      coaching_id, role, is_owner, username, roll_no, name, standard, course, contact_phone, email, password_hash, password_display
+    ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [coachingId, rollNo, name, standard, course, contactPhone || null, email || null, passwordHash, password]
   );
 
   req.session.flash = {
@@ -812,6 +1570,35 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
       : `Student ${rollNo} created. Default password is the roll number`,
   };
   return res.redirect('/admin/dashboard?section=students');
+});
+
+app.get('/admin/students/:id/overview', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const studentId = Number(req.params.id);
+  const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
+  const dashboard = await getStudentDashboardPayload(coachingId, studentId);
+
+  if (!dashboard.profile) {
+    req.session.flash = { type: 'error', text: 'Student not found' };
+    return res.redirect('/admin/dashboard?section=overview');
+  }
+
+  renderWithMessage(res, 'admin-student-overview', {
+    user: req.session.user,
+    coaching,
+    branding: buildBranding(coaching),
+    student: dashboard.profile,
+    papers: dashboard.papers,
+    attendance: dashboard.attendance,
+    fees: dashboard.fees,
+    notes: dashboard.notes,
+    attendanceSummary: dashboard.attendanceSummary,
+    feeSummary: dashboard.feeSummary,
+    marksSummary: dashboard.marksSummary,
+    progressSeries: dashboard.progressSeries,
+    flash: req.session.flash,
+  });
+  req.session.flash = null;
 });
 
 app.post('/admin/students/:id/reset-password', requireCoachingAdmin, async (req, res) => {
@@ -830,7 +1617,7 @@ app.post('/admin/students/:id/reset-password', requireCoachingAdmin, async (req,
   }
 
   const passwordHash = await bcrypt.hash(student.roll_no, 10);
-  await run(`UPDATE users SET password_hash = ? WHERE id = ?`, [passwordHash, studentId]);
+  await run(`UPDATE users SET password_hash = ?, password_display = ? WHERE id = ?`, [passwordHash, student.roll_no, studentId]);
 
   req.session.flash = {
     type: 'success',
@@ -876,6 +1663,67 @@ app.post('/admin/students/:id/delete', requireCoachingAdmin, async (req, res) =>
   return res.redirect('/admin/dashboard?section=students');
 });
 
+app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('paper'), async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const file = req.file;
+  const rollNo = (req.body.rollNo || '').trim();
+  const testLabel = (req.body.testLabel || '').trim();
+  const marksObtained = parseOptionalNumber(req.body.marksObtained);
+  const maxMarks = parseOptionalNumber(req.body.maxMarks);
+  const answerRequestId = parseOptionalNumber(req.body.answerRequestId);
+
+  if (!file) {
+    req.session.flash = { type: 'error', text: 'Select a file to upload' };
+    return res.redirect('/admin/dashboard?section=papers');
+  }
+
+  const student = await get(
+    `SELECT id, roll_no FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
+    [coachingId, rollNo]
+  );
+
+  if (!student) {
+    req.session.flash = { type: 'error', text: 'Student roll number not found' };
+    return res.redirect('/admin/dashboard?section=papers');
+  }
+
+  if ((marksObtained === null) !== (maxMarks === null)) {
+    req.session.flash = { type: 'error', text: 'Enter both obtained marks and max marks, or leave both blank' };
+    return res.redirect('/admin/dashboard?section=papers');
+  }
+
+  let linkedAnswerRequest = null;
+  if (answerRequestId !== null) {
+    linkedAnswerRequest = await get(
+      `SELECT id FROM answer_upload_requests WHERE id = ? AND coaching_id = ?`,
+      [answerRequestId, coachingId]
+    );
+    if (!linkedAnswerRequest) {
+      req.session.flash = { type: 'error', text: 'Selected answer upload request was not found' };
+      return res.redirect('/admin/dashboard?section=papers');
+    }
+  }
+
+  const result = await savePaperUpload({
+    coachingId,
+    studentId: student.id,
+    file,
+    uploadedBy: req.session.user.id,
+    testLabel: testLabel || file.originalname,
+    marksObtained,
+    maxMarks,
+    answerRequestId: linkedAnswerRequest ? linkedAnswerRequest.id : null,
+  });
+
+  const textByStatus = {
+    inserted: `Paper uploaded for ${student.roll_no}`,
+    replaced: `Paper updated for ${student.roll_no}. Previous upload was replaced.`,
+    duplicate: `Duplicate click ignored. Latest paper for ${student.roll_no} is already saved.`,
+  };
+  req.session.flash = { type: 'success', text: textByStatus[result.status] || `Paper uploaded for ${student.roll_no}` };
+  return res.redirect('/admin/dashboard?section=papers');
+});
+
 app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 100), async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const files = req.files || [];
@@ -885,7 +1733,7 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
     return res.redirect('/admin/dashboard?section=papers');
   }
 
-  const report = { assigned: 0, skipped: 0, failed: 0 };
+  const report = { assigned: 0, skipped: 0, failed: 0, duplicates: 0 };
 
   for (const file of files) {
     const paperMeta = parsePaperMetaFromFileName(file.originalname);
@@ -900,30 +1748,22 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
     }
 
     try {
-      const stored = await uploadPaperFile(file);
-      await run(
-        `INSERT INTO test_papers (
-          coaching_id, student_id, original_name, stored_name, uploaded_by,
-          storage_type, storage_key, public_url, content_type, size_bytes,
-          marks_obtained, max_marks, test_label
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          coachingId,
-          student.id,
-          file.originalname,
-          stored.storedName,
-          req.session.user.id,
-          stored.storageType,
-          stored.storageKey,
-          stored.publicUrl,
-          stored.contentType,
-          stored.sizeBytes,
-          paperMeta.marksObtained,
-          paperMeta.maxMarks,
-          paperMeta.testLabel,
-        ]
-      );
-      report.assigned += 1;
+      const result = await savePaperUpload({
+        coachingId,
+        studentId: student.id,
+        file,
+        uploadedBy: req.session.user.id,
+        testLabel: paperMeta.testLabel || file.originalname,
+        marksObtained: paperMeta.marksObtained,
+        maxMarks: paperMeta.maxMarks,
+        answerRequestId: null,
+      });
+
+      if (result.status === 'duplicate') {
+        report.duplicates += 1;
+      } else {
+        report.assigned += 1;
+      }
     } catch (err) {
       console.error('Upload failed for', file.originalname, err);
       report.failed += 1;
@@ -932,9 +1772,58 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
 
   req.session.flash = {
     type: report.failed ? 'error' : 'success',
-    text: `Upload complete. Assigned: ${report.assigned}, Skipped: ${report.skipped}, Failed: ${report.failed}`,
+    text: `Upload complete. Assigned: ${report.assigned}, Duplicate ignored: ${report.duplicates}, Skipped: ${report.skipped}, Failed: ${report.failed}`,
   };
   return res.redirect('/admin/dashboard?section=papers');
+});
+
+app.post('/admin/answer-requests', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const standard = (req.body.standard || '').trim();
+  const course = (req.body.course || '').trim().toLowerCase();
+  const title = (req.body.title || '').trim();
+  const description = (req.body.description || '').trim();
+  const startsAtInput = (req.body.startsAt || '').trim() || toDateTimeLocalInput(new Date());
+
+  if (!VALID_STANDARDS.has(standard) || !VALID_COURSES.has(course)) {
+    req.session.flash = { type: 'error', text: 'Select a valid standard and course for answer upload request' };
+    return res.redirect('/admin/dashboard?section=overview');
+  }
+
+  if (!title) {
+    req.session.flash = { type: 'error', text: 'Title is required for answer upload request' };
+    return res.redirect('/admin/dashboard?section=overview');
+  }
+
+  const startsAt = parseDateTimeLocal(startsAtInput);
+  if (!startsAt) {
+    req.session.flash = { type: 'error', text: 'Enter a valid start date and time' };
+    return res.redirect('/admin/dashboard?section=overview');
+  }
+
+  const endsAt = addHours(startsAt, ANSWER_UPLOAD_WINDOW_HOURS);
+
+  await run(
+    `INSERT INTO answer_upload_requests (
+      coaching_id, standard, course, title, description, starts_at, ends_at, created_by
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      coachingId,
+      standard,
+      course,
+      title,
+      description || null,
+      toDateTimeLocalInput(startsAt),
+      toDateTimeLocalInput(endsAt),
+      req.session.user.id,
+    ]
+  );
+
+  req.session.flash = {
+    type: 'success',
+    text: `Answer upload request created for ${standard} ${course.toUpperCase()} students. Window stays open for ${ANSWER_UPLOAD_WINDOW_HOURS} hours.`,
+  };
+  return res.redirect('/admin/dashboard?section=overview');
 });
 
 app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
@@ -1096,124 +1985,190 @@ app.post('/admin/notes', requireCoachingAdmin, async (req, res) => {
   return res.redirect('/admin/dashboard?section=notes');
 });
 
+app.post('/student/upload-paper', requireStudent, upload.single('paper'), async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const studentId = req.session.user.id;
+  const file = req.file;
+  const testLabel = (req.body.testLabel || '').trim();
+  const marksObtained = parseOptionalNumber(req.body.marksObtained);
+  const maxMarks = parseOptionalNumber(req.body.maxMarks);
+
+  if (!file) {
+    req.session.flash = { type: 'error', text: 'Select a file to upload' };
+    return res.redirect('/student/dashboard');
+  }
+
+  if ((marksObtained === null) !== (maxMarks === null)) {
+    req.session.flash = { type: 'error', text: 'Enter both obtained marks and max marks, or leave both blank' };
+    return res.redirect('/student/dashboard');
+  }
+
+  const result = await savePaperUpload({
+    coachingId,
+    studentId,
+    file,
+    uploadedBy: studentId,
+    testLabel: testLabel || file.originalname,
+    marksObtained,
+    maxMarks,
+    answerRequestId: null,
+  });
+
+  const studentUploadText = {
+    inserted: 'Your paper was uploaded successfully',
+    replaced: 'Your paper was updated successfully',
+    duplicate: 'Duplicate click ignored. Your paper is already saved.',
+  };
+  req.session.flash = { type: 'success', text: studentUploadText[result.status] || 'Your paper was uploaded successfully' };
+  return res.redirect('/student/dashboard');
+});
+
+app.post('/student/answer-requests/:id/upload', requireStudent, upload.single('paper'), async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const studentId = req.session.user.id;
+  const requestId = Number(req.params.id);
+  const file = req.file;
+  const marksObtained = parseOptionalNumber(req.body.marksObtained);
+  const maxMarks = parseOptionalNumber(req.body.maxMarks);
+
+  if (!file) {
+    req.session.flash = { type: 'error', text: 'Select a file to upload for this answer request' };
+    return res.redirect('/student/dashboard');
+  }
+
+  if ((marksObtained === null) !== (maxMarks === null)) {
+    req.session.flash = { type: 'error', text: 'Enter both obtained marks and max marks, or leave both blank' };
+    return res.redirect('/student/dashboard');
+  }
+
+  const student = await get(
+    `SELECT id, standard, course FROM users WHERE id = ? AND coaching_id = ? AND role = 'student'`,
+    [studentId, coachingId]
+  );
+  if (!student) {
+    req.session.flash = { type: 'error', text: 'Student account not found' };
+    return res.redirect('/student/dashboard');
+  }
+
+  const answerRequest = await get(
+    `SELECT id, title, standard, course, starts_at, ends_at
+     FROM answer_upload_requests
+     WHERE id = ? AND coaching_id = ?`,
+    [requestId, coachingId]
+  );
+  if (!answerRequest) {
+    req.session.flash = { type: 'error', text: 'Answer upload request not found' };
+    return res.redirect('/student/dashboard');
+  }
+
+  if (answerRequest.standard !== student.standard || answerRequest.course !== student.course) {
+    req.session.flash = { type: 'error', text: 'This answer upload request does not belong to your batch' };
+    return res.redirect('/student/dashboard');
+  }
+
+  const requestState = getAnswerRequestState(answerRequest);
+  if (!requestState.isActive) {
+    req.session.flash = { type: 'error', text: 'This upload window is no longer active' };
+    return res.redirect('/student/dashboard');
+  }
+
+  const result = await savePaperUpload({
+    coachingId,
+    studentId,
+    file,
+    uploadedBy: studentId,
+    testLabel: answerRequest.title,
+    marksObtained,
+    maxMarks,
+    answerRequestId: answerRequest.id,
+  });
+
+  const answerUploadText = {
+    inserted: `Uploaded for ${answerRequest.title}`,
+    replaced: `Updated your upload for ${answerRequest.title}`,
+    duplicate: `Duplicate click ignored. Your upload for ${answerRequest.title} is already saved.`,
+  };
+  req.session.flash = { type: 'success', text: answerUploadText[result.status] || `Uploaded for ${answerRequest.title}` };
+  return res.redirect('/student/dashboard');
+});
+
+app.post('/papers/:id/delete', requireAuth, async (req, res) => {
+  const paper = await getPaperForDelete(req.params.id, req.session.user);
+  const redirectTo = String(req.body.redirectTo || '').startsWith('/')
+    ? String(req.body.redirectTo)
+    : req.session.user.role === 'admin'
+      ? '/admin/dashboard?section=papers'
+      : '/student/dashboard';
+
+  if (!paper) {
+    if (req.session) {
+      req.session.flash = { type: 'error', text: 'Paper not found or delete is not allowed' };
+    }
+    return res.redirect(redirectTo);
+  }
+
+  await deletePaperRecord(paper);
+  if (req.session) {
+    req.session.flash = { type: 'success', text: 'Paper deleted successfully' };
+  }
+  return res.redirect(redirectTo);
+});
+
 app.get('/student/dashboard', requireStudent, async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const subscriptionState = req.subscriptionState || getSubscriptionState(coaching);
-  const profile = await get(
-    `SELECT id, roll_no, name, standard, course
-     FROM users
-     WHERE id = ? AND coaching_id = ? AND role = 'student'`,
-    [req.session.user.id, coachingId]
-  );
+  const dashboard = await getStudentDashboardPayload(coachingId, req.session.user.id);
+  const profile = dashboard.profile;
 
-  const papers = await all(
-    `SELECT id, original_name, stored_name, upload_date, storage_type, storage_key, content_type, marks_obtained, max_marks, test_label
-     FROM test_papers
-     WHERE coaching_id = ? AND student_id = ?
-     ORDER BY upload_date DESC`,
-    [coachingId, req.session.user.id]
-  );
-
-  const attendance = await all(
-    `SELECT attendance_date, status, notes
-     FROM attendance
-     WHERE coaching_id = ? AND student_id = ?
-     ORDER BY attendance_date DESC, id DESC`,
-    [coachingId, req.session.user.id]
-  );
-
-  const fees = await all(
-    `SELECT amount, due_date, payment_date, status, notes
-     FROM fees
-     WHERE coaching_id = ? AND student_id = ?
-     ORDER BY created_at DESC`,
-    [coachingId, req.session.user.id]
-  );
-
-  const notes = profile?.standard && profile?.course
+  const answerRequests = profile?.standard && profile?.course
     ? await all(
-      `SELECT title, resource_url, description, created_at
-       FROM batch_notes
+      `SELECT id, title, description, starts_at, ends_at, created_at
+       FROM answer_upload_requests
        WHERE coaching_id = ? AND standard = ? AND course = ?
-       ORDER BY created_at DESC`,
+       ORDER BY created_at DESC
+       LIMIT 12`,
       [coachingId, profile.standard, profile.course]
     )
     : [];
 
-  const attendanceSummary = await get(
-    `SELECT
-       COUNT(*) AS total,
-       SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) AS present_count,
-       SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) AS absent_count,
-       SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) AS late_count
-     FROM attendance
-     WHERE coaching_id = ? AND student_id = ?`,
+  const submissions = await all(
+    `SELECT id, answer_request_id, upload_date, original_name
+     FROM test_papers
+     WHERE coaching_id = ? AND student_id = ? AND answer_request_id IS NOT NULL
+     ORDER BY upload_date DESC`,
     [coachingId, req.session.user.id]
   );
 
-  const feeSummary = await get(
-    `SELECT
-       COUNT(*) AS total_fees,
-       SUM(CASE WHEN status IN ('pending', 'overdue') THEN 1 ELSE 0 END) AS pending_count,
-       SUM(CASE WHEN status IN ('pending', 'overdue') THEN amount ELSE 0 END) AS pending_amount
-     FROM fees
-     WHERE coaching_id = ? AND student_id = ?`,
-    [coachingId, req.session.user.id]
-  );
+  const latestSubmissionByRequest = new Map();
+  submissions.forEach((submission) => {
+    if (!latestSubmissionByRequest.has(submission.answer_request_id)) {
+      latestSubmissionByRequest.set(submission.answer_request_id, submission);
+    }
+  });
 
-  const totalAttendance = Number(attendanceSummary?.total || 0);
-  const presentCount = Number(attendanceSummary?.present_count || 0);
-  const attendancePercent = totalAttendance
-    ? ((presentCount / totalAttendance) * 100).toFixed(1)
-    : '0.0';
-
-  const markedPapers = papers
-    .filter((paper) => paper.marks_obtained !== null && paper.max_marks !== null && Number(paper.max_marks) > 0)
-    .slice()
-    .reverse();
-  const totalMarksObtained = markedPapers.reduce((sum, paper) => sum + Number(paper.marks_obtained || 0), 0);
-  const totalMaxMarks = markedPapers.reduce((sum, paper) => sum + Number(paper.max_marks || 0), 0);
-  const marksPercent = totalMaxMarks
-    ? ((totalMarksObtained / totalMaxMarks) * 100).toFixed(1)
-    : '0.0';
-  const progressSeries = markedPapers.map((paper, index) => ({
-    label: paper.test_label || path.parse(paper.original_name).name,
-    marks: Number(paper.marks_obtained),
-    max: Number(paper.max_marks),
-    percent: Number(((Number(paper.marks_obtained) / Number(paper.max_marks)) * 100).toFixed(1)),
-    testNo: index + 1,
+  const answerRequestCards = answerRequests.map((request) => ({
+    ...request,
+    state: getAnswerRequestState(request),
+    mySubmission: latestSubmissionByRequest.get(request.id) || null,
   }));
 
   renderWithMessage(res, 'student-dashboard', {
     user: req.session.user,
     coaching,
+    branding: buildBranding(coaching),
     subscriptionState,
     subscriptionNotice: subscriptionState.notice,
     profile,
-    papers,
-    attendance,
-    fees,
-    notes,
-    attendanceSummary: {
-      total: totalAttendance,
-      presentCount,
-      absentCount: Number(attendanceSummary?.absent_count || 0),
-      lateCount: Number(attendanceSummary?.late_count || 0),
-      attendancePercent,
-    },
-    feeSummary: {
-      totalFees: Number(feeSummary?.total_fees || 0),
-      pendingCount: Number(feeSummary?.pending_count || 0),
-      pendingAmount: Number(feeSummary?.pending_amount || 0),
-    },
-    marksSummary: {
-      testsCount: markedPapers.length,
-      totalMarksObtained,
-      totalMaxMarks,
-      marksPercent,
-    },
-    progressSeries,
+    papers: dashboard.papers,
+    attendance: dashboard.attendance,
+    fees: dashboard.fees,
+    notes: dashboard.notes,
+    attendanceSummary: dashboard.attendanceSummary,
+    feeSummary: dashboard.feeSummary,
+    marksSummary: dashboard.marksSummary,
+    progressSeries: dashboard.progressSeries,
+    answerRequestCards,
     flash: req.session.flash,
   });
   req.session.flash = null;
@@ -1266,10 +2221,21 @@ Promise.resolve()
     initStorage();
     return initDb();
   })
+  .then(() => cleanupDuplicateAnswerSubmissions())
   .then(() => {
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`Server started on http://localhost:${PORT}`);
       console.log(`File storage mode: ${getStorageMode()}`);
+    });
+
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`Port ${PORT} is already in use. Start with another port, for example: PORT=3001 npm start`);
+        process.exit(1);
+      }
+
+      console.error('Startup server error', err);
+      process.exit(1);
     });
   })
   .catch((err) => {
