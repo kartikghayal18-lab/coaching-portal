@@ -76,16 +76,12 @@
             <label>Title</label>
             <input type="text" name="title" placeholder="Physics Test 5 Answer Upload" required />
 
-            <label>Standard</label>
-            <select name="standard" required>
-              <option value="11th">11th</option>
-              <option value="12th">12th</option>
-            </select>
-
-            <label>Course</label>
-            <select name="course" required>
-              <option value="jee">JEE</option>
-              <option value="neet">NEET</option>
+            <label>Batch</label>
+            <select name="batchId" required>
+              <option value="">Select batch</option>
+              <% batches.forEach((batch) => { %>
+                <option value="<%= batch.id %>"><%= batch.name %></option>
+              <% }) %>
             </select>
 
             <label>Start Time</label>
@@ -94,8 +90,11 @@
             <label>Description (optional)</label>
             <textarea name="description" rows="3" placeholder="Upload today's handwritten answer paper."></textarea>
 
-            <button type="submit" class="btn">Create 24 Hour Window</button>
+            <button type="submit" class="btn" <%= batches.length ? '' : 'disabled' %>>Create 24 Hour Window</button>
           </form>
+          <% if (!batches.length) { %>
+            <p class="muted">Create a custom batch first, then you can announce upload windows for it.</p>
+          <% } %>
         </div>
       </section>
 
@@ -108,7 +107,7 @@
             <tr>
               <td><%= student.roll_no %></td>
               <td><%= student.name %></td>
-              <td><%= student.standard || '-' %> - <%= student.course ? student.course.toUpperCase() : '-' %></td>
+              <td><%= student.batch_name || ((student.standard || student.course) ? `${student.standard || ''}${student.standard && student.course ? ' - ' : ''}${student.course ? student.course.toUpperCase() : ''}` : '-') %></td>
               <td><%= student.contact_phone || '-' %></td>
               <td><%= student.email || '-' %></td>
               <td><%= student.paperCount %></td>
@@ -138,7 +137,7 @@
             <div class="tracker-head">
               <div>
                 <h3><%= request.title %></h3>
-                <p class="muted"><%= request.standard %> - <%= request.course ? request.course.toUpperCase() : '-' %></p>
+                <p class="muted"><%= request.batch_name || ((request.standard || request.course) ? `${request.standard || ''}${request.standard && request.course ? ' - ' : ''}${request.course ? request.course.toUpperCase() : ''}` : '-') %></p>
                 <% if (request.description) { %>
                   <p class="muted"><%= request.description %></p>
                 <% } %>
@@ -233,166 +232,83 @@
             <label>Email ID</label>
             <input type="email" name="email" placeholder="student@example.com" />
 
-            <label>Standard</label>
-            <select name="standard" required>
-              <option value="11th">11th</option>
-              <option value="12th">12th</option>
-            </select>
-
-            <label>Course</label>
-            <select name="course" required>
-              <option value="jee">JEE</option>
-              <option value="neet">NEET</option>
+            <label>Batch</label>
+            <select name="batchId" required>
+              <option value="">Select batch</option>
+              <% batches.forEach((batch) => { %>
+                <option value="<%= batch.id %>"><%= batch.name %></option>
+              <% }) %>
             </select>
 
             <label>Password (optional, default = roll no)</label>
             <input type="text" name="password" />
 
-            <button type="submit" class="btn">Create Student</button>
+            <button type="submit" class="btn" <%= batches.length ? '' : 'disabled' %>>Create Student</button>
           </form>
+          <% if (!batches.length) { %>
+            <p class="muted">Create at least one batch first. Then you can add students into it.</p>
+          <% } %>
         </div>
 
         <div class="card">
-          <h2>Total Student Groups</h2>
+          <h2>Batch Setup</h2>
+          <form method="post" action="/admin/batches" data-single-submit>
+            <label>Custom Batch Name</label>
+            <input type="text" name="batchName" placeholder="11th-A, 11th-B, MHT-CET, Repeater Batch" required />
+            <button type="submit" class="btn">Create Batch</button>
+          </form>
+
+          <h3 style="margin-top: 20px;">Existing Batches</h3>
           <table>
             <tr><th>Batch</th><th>Count</th></tr>
-            <tr><td>11th - JEE</td><td><%= (studentGroups['11th-jee'] || []).length %></td></tr>
-            <tr><td>11th - NEET</td><td><%= (studentGroups['11th-neet'] || []).length %></td></tr>
-            <tr><td>12th - JEE</td><td><%= (studentGroups['12th-jee'] || []).length %></td></tr>
-            <tr><td>12th - NEET</td><td><%= (studentGroups['12th-neet'] || []).length %></td></tr>
+            <% batchSummaries.forEach((batch) => { %>
+              <tr>
+                <td><%= batch.name %></td>
+                <td><%= batch.count %></td>
+              </tr>
+            <% }) %>
           </table>
         </div>
       </section>
 
       <section class="card">
         <h2>Students by Batch</h2>
-        <div class="grid two">
-          <div>
-            <h3>11th - JEE</h3>
-            <table>
-              <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Password</th><th>Action</th></tr>
-              <% (studentGroups['11th-jee'] || []).forEach((s) => { %>
-                <tr>
-                  <td><%= s.roll_no %></td>
-                  <td><%= s.name %></td>
-                  <td><%= s.contact_phone || '-' %></td>
-                  <td><%= s.email || '-' %></td>
-                  <td><span class="password-pill"><%= s.password_display || 'Hidden' %></span></td>
-                  <td>
-                    <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
-                    <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
-                      <button type="submit" class="btn secondary compact">Reset Password</button>
-                    </form>
-                    <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
-                      <button type="submit" class="btn danger compact">Delete</button>
-                    </form>
-                  </td>
-                </tr>
-              <% }) %>
-            </table>
-          </div>
-
-          <div>
-            <h3>11th - NEET</h3>
-            <table>
-              <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Password</th><th>Action</th></tr>
-              <% (studentGroups['11th-neet'] || []).forEach((s) => { %>
-                <tr>
-                  <td><%= s.roll_no %></td>
-                  <td><%= s.name %></td>
-                  <td><%= s.contact_phone || '-' %></td>
-                  <td><%= s.email || '-' %></td>
-                  <td><span class="password-pill"><%= s.password_display || 'Hidden' %></span></td>
-                  <td>
-                    <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
-                    <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
-                      <button type="submit" class="btn secondary compact">Reset Password</button>
-                    </form>
-                    <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
-                      <button type="submit" class="btn danger compact">Delete</button>
-                    </form>
-                  </td>
-                </tr>
-              <% }) %>
-            </table>
-          </div>
-
-          <div>
-            <h3>12th - JEE</h3>
-            <table>
-              <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Password</th><th>Action</th></tr>
-              <% (studentGroups['12th-jee'] || []).forEach((s) => { %>
-                <tr>
-                  <td><%= s.roll_no %></td>
-                  <td><%= s.name %></td>
-                  <td><%= s.contact_phone || '-' %></td>
-                  <td><%= s.email || '-' %></td>
-                  <td><span class="password-pill"><%= s.password_display || 'Hidden' %></span></td>
-                  <td>
-                    <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
-                    <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
-                      <button type="submit" class="btn secondary compact">Reset Password</button>
-                    </form>
-                    <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
-                      <button type="submit" class="btn danger compact">Delete</button>
-                    </form>
-                  </td>
-                </tr>
-              <% }) %>
-            </table>
-          </div>
-
-          <div>
-            <h3>12th - NEET</h3>
-            <table>
-              <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Password</th><th>Action</th></tr>
-              <% (studentGroups['12th-neet'] || []).forEach((s) => { %>
-                <tr>
-                  <td><%= s.roll_no %></td>
-                  <td><%= s.name %></td>
-                  <td><%= s.contact_phone || '-' %></td>
-                  <td><%= s.email || '-' %></td>
-                  <td><span class="password-pill"><%= s.password_display || 'Hidden' %></span></td>
-                  <td>
-                    <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
-                    <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
-                      <button type="submit" class="btn secondary compact">Reset Password</button>
-                    </form>
-                    <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
-                      <button type="submit" class="btn danger compact">Delete</button>
-                    </form>
-                  </td>
-                </tr>
-              <% }) %>
-            </table>
-          </div>
-        </div>
-
-        <% if ((studentGroups.unassigned || []).length) { %>
-          <h3 style="margin-top: 16px;">Unassigned (old records)</h3>
-          <table>
-            <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Password</th><th>Created</th><th>Action</th></tr>
-            <% studentGroups.unassigned.forEach((s) => { %>
-              <tr>
-                <td><%= s.roll_no %></td>
-                <td><%= s.name %></td>
-                <td><%= s.contact_phone || '-' %></td>
-                <td><%= s.email || '-' %></td>
-                <td><span class="password-pill"><%= s.password_display || 'Hidden' %></span></td>
-                <td><%= s.created_at %></td>
-                <td>
-                  <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
-                  <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
-                    <button type="submit" class="btn secondary compact">Reset Password</button>
-                  </form>
-                  <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
-                    <button type="submit" class="btn danger compact">Delete</button>
-                  </form>
-                </td>
-              </tr>
-            <% }) %>
-          </table>
+        <% if (!studentBatchGroups.length) { %>
+          <p class="muted">No students available yet.</p>
         <% } %>
+        <div class="batch-accordion-list">
+          <% studentBatchGroups.forEach((group, index) => { %>
+            <details class="batch-accordion" <%= index === 0 ? 'open' : '' %>>
+              <summary class="batch-summary">
+                <span class="batch-summary-title"><%= group.label %></span>
+                <span class="batch-summary-count"><%= group.students.length %> students</span>
+              </summary>
+              <div class="batch-accordion-body">
+                <table>
+                  <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Password</th><th>Action</th></tr>
+                  <% group.students.forEach((s) => { %>
+                    <tr>
+                      <td><%= s.roll_no %></td>
+                      <td><%= s.name %></td>
+                      <td><%= s.contact_phone || '-' %></td>
+                      <td><%= s.email || '-' %></td>
+                      <td><span class="password-pill"><%= s.password_display || 'Hidden' %></span></td>
+                      <td>
+                        <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
+                        <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
+                          <button type="submit" class="btn secondary compact">Reset Password</button>
+                        </form>
+                        <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
+                          <button type="submit" class="btn danger compact">Delete</button>
+                        </form>
+                      </td>
+                    </tr>
+                  <% }) %>
+                </table>
+              </div>
+            </details>
+          <% }) %>
+        </div>
       </section>
     <% } %>
 
@@ -425,16 +341,12 @@
 
           <div id="tab-bulk" class="tab-panel">
             <form method="post" action="/admin/attendance-bulk">
-              <label>Standard</label>
-              <select name="standard" required>
-                <option value="11th">11th</option>
-                <option value="12th">12th</option>
-              </select>
-
-              <label>Course</label>
-              <select name="course" required>
-                <option value="jee">JEE</option>
-                <option value="neet">NEET</option>
+              <label>Batch</label>
+              <select name="batchId" required>
+                <option value="">Select batch</option>
+                <% batches.forEach((batch) => { %>
+                  <option value="<%= batch.id %>"><%= batch.name %></option>
+                <% }) %>
               </select>
 
               <label>Date</label>
@@ -481,7 +393,7 @@
               <tr>
                 <td><%= a.roll_no %></td>
                 <td><%= a.name %></td>
-                <td><%= a.standard || '-' %> - <%= a.course ? a.course.toUpperCase() : '-' %></td>
+                <td><%= a.batch_name || ((a.standard || a.course) ? `${a.standard || ''}${a.standard && a.course ? ' - ' : ''}${a.course ? a.course.toUpperCase() : ''}` : '-') %></td>
                 <td><span class="status <%= a.status %>"><%= a.status %></span></td>
                 <td><%= a.notes || '-' %></td>
               </tr>
@@ -524,7 +436,7 @@
               <tr>
                 <td><%= f.roll_no %></td>
                 <td><%= f.name %></td>
-                <td><%= f.standard || '-' %> - <%= f.course ? f.course.toUpperCase() : '-' %></td>
+                <td><%= f.batch_name || ((f.standard || f.course) ? `${f.standard || ''}${f.standard && f.course ? ' - ' : ''}${f.course ? f.course.toUpperCase() : ''}` : '-') %></td>
                 <td><%= f.amount %></td>
                 <td><%= f.due_date || '-' %></td>
                 <td><%= f.payment_date || '-' %></td>
@@ -564,7 +476,7 @@
             <select name="answerRequestId">
               <option value="">General Paper</option>
               <% answerRequestSummaries.forEach((request) => { %>
-                <option value="<%= request.id %>"><%= request.title %> | <%= request.standard %> - <%= request.course.toUpperCase() %></option>
+                <option value="<%= request.id %>"><%= request.title %> | <%= request.batch_name || ((request.standard || request.course) ? `${request.standard || ''}${request.standard && request.course ? ' - ' : ''}${request.course ? request.course.toUpperCase() : ''}` : '-') %></option>
               <% }) %>
             </select>
 
@@ -596,7 +508,7 @@
             <tr>
               <td><%= p.roll_no %></td>
               <td><%= p.name %></td>
-              <td><%= p.standard || '-' %> - <%= p.course ? p.course.toUpperCase() : '-' %></td>
+              <td><%= p.batch_name || ((p.standard || p.course) ? `${p.standard || ''}${p.standard && p.course ? ' - ' : ''}${p.course ? p.course.toUpperCase() : ''}` : '-') %></td>
               <td><%= p.test_label || p.original_name %></td>
               <td><%= p.paper_type === 'answer_submission' ? 'Answer Upload' : 'General' %></td>
               <td><%= p.uploaded_by_name || '-' %> (<%= p.uploaded_by_role || '-' %>)</td>
@@ -627,16 +539,12 @@
         <div class="card">
           <h2>Add Batch Note / Video Link</h2>
           <form method="post" action="/admin/notes">
-            <label>Standard</label>
-            <select name="standard" required>
-              <option value="11th">11th</option>
-              <option value="12th">12th</option>
-            </select>
-
-            <label>Course</label>
-            <select name="course" required>
-              <option value="jee">JEE</option>
-              <option value="neet">NEET</option>
+            <label>Batch</label>
+            <select name="batchId" required>
+              <option value="">Select batch</option>
+              <% batches.forEach((batch) => { %>
+                <option value="<%= batch.id %>"><%= batch.name %></option>
+              <% }) %>
             </select>
 
             <label>Title</label>
@@ -659,7 +567,7 @@
             <% notes.forEach((n) => { %>
               <tr>
                 <td><%= n.title %></td>
-                <td><%= n.standard || '-' %> - <%= n.course ? n.course.toUpperCase() : '-' %></td>
+                <td><%= n.batch_name || ((n.standard || n.course) ? `${n.standard || ''}${n.standard && n.course ? ' - ' : ''}${n.course ? n.course.toUpperCase() : ''}` : '-') %></td>
                 <td><a href="<%= n.resource_url %>" target="_blank" rel="noopener">Open Link</a></td>
                 <td><%= n.description || '-' %></td>
                 <td><%= n.created_at %></td>

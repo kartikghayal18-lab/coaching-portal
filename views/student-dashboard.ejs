@@ -17,6 +17,7 @@
         <p class="eyebrow"><%= branding?.brandName || 'Student Panel' %></p>
         <h1>Welcome, <%= profile?.name || user.name %></h1>
         <p class="muted">Roll No: <%= profile?.roll_no || user.rollNo %> | Coaching: <%= coaching?.name || user.coachingName || '-' %></p>
+        <p class="muted">Batch: <%= profile?.batch_name || ((profile?.standard || profile?.course) ? `${profile?.standard || ''}${profile?.standard && profile?.course ? ' - ' : ''}${profile?.course ? profile.course.toUpperCase() : ''}` : '-') %></p>
         <p class="muted">Phone: <%= profile?.contact_phone || '-' %> | Email: <%= profile?.email || '-' %></p>
         </div>
       </div>
@@ -33,12 +34,12 @@
 
     <section class="stats-grid">
       <div class="stat-card">
-        <p>Standard</p>
-        <h3><%= profile?.standard || '-' %></h3>
+        <p>Batch</p>
+        <h3><%= profile?.batch_name || ((profile?.standard || profile?.course) ? `${profile?.standard || ''}${profile?.standard && profile?.course ? ' - ' : ''}${profile?.course ? profile.course.toUpperCase() : ''}` : '-') %></h3>
       </div>
       <div class="stat-card">
-        <p>Course</p>
-        <h3><%= profile?.course ? profile.course.toUpperCase() : '-' %></h3>
+        <p>Uploaded Papers</p>
+        <h3><%= papers.length %></h3>
       </div>
       <div class="stat-card">
         <p>Pending Fees</p>

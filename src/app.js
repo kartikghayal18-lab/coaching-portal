@@ -6,7 +6,7 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 require('dotenv').config({ quiet: true });
 
-const { initDb, run, get, all } = require('./db');
+const { initDb, run, get, all, withTransaction } = require('./db');
 const { initStorage, getStorageMode, uploadPaperFile, getPaperAccess, deleteStoredPaper } = require('./storage');
 
 const app = express();
@@ -30,8 +30,6 @@ function resolvePort(value) {
 }
 
 const PORT = resolvePort(process.env.PORT);
-const VALID_STANDARDS = new Set(['11th', '12th']);
-const VALID_COURSES = new Set(['jee', 'neet']);
 const OWNER_SECTIONS = new Set(['overview', 'plans', 'coachings']);
 const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes']);
 const ALLOWED_UPLOAD_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/jpg']);
@@ -106,14 +104,76 @@ function getAdminSection(input) {
   return ADMIN_SECTIONS.has(section) ? section : 'overview';
 }
 
-function toStudentGroups(students) {
-  return {
-    '11th-jee': students.filter((s) => s.standard === '11th' && s.course === 'jee'),
-    '11th-neet': students.filter((s) => s.standard === '11th' && s.course === 'neet'),
-    '12th-jee': students.filter((s) => s.standard === '12th' && s.course === 'jee'),
-    '12th-neet': students.filter((s) => s.standard === '12th' && s.course === 'neet'),
-    unassigned: students.filter((s) => !s.standard || !s.course),
-  };
+function formatLegacyBatchLabel(standard, course) {
+  const safeStandard = String(standard || '').trim();
+  const safeCourse = String(course || '').trim().toUpperCase();
+
+  if (safeStandard && safeCourse) return `${safeStandard} - ${safeCourse}`;
+  if (safeStandard) return safeStandard;
+  if (safeCourse) return safeCourse;
+  return '';
+}
+
+function getBatchLabel(item) {
+  return String(item?.batch_name || '').trim()
+    || formatLegacyBatchLabel(item?.standard, item?.course)
+    || 'Unassigned';
+}
+
+function normalizeBatchName(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function toStudentBatchGroups(students, batches = []) {
+  const batchOrder = new Map(batches.map((batch, index) => [String(batch.id), index]));
+  const groups = new Map();
+
+  students.forEach((student) => {
+    const key = student.batch_id ? `batch-${student.batch_id}` : 'unassigned';
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        label: getBatchLabel(student),
+        students: [],
+        order: student.batch_id ? batchOrder.get(String(student.batch_id)) ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER,
+        isUnassigned: !student.batch_id,
+      });
+    }
+
+    groups.get(key).students.push(student);
+  });
+
+  return Array.from(groups.values()).sort((a, b) => {
+    if (a.isUnassigned !== b.isUnassigned) return a.isUnassigned ? 1 : -1;
+    if (a.order !== b.order) return a.order - b.order;
+    return a.label.localeCompare(b.label, 'en', { numeric: true, sensitivity: 'base' });
+  });
+}
+
+function toBatchSummaries(students, batches = []) {
+  const counts = new Map();
+  students.forEach((student) => {
+    const key = student.batch_id ? String(student.batch_id) : 'unassigned';
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+
+  const summaries = batches.map((batch) => ({
+    ...batch,
+    count: counts.get(String(batch.id)) || 0,
+  }));
+
+  if (counts.get('unassigned')) {
+    summaries.push({
+      id: null,
+      name: 'Unassigned',
+      count: counts.get('unassigned'),
+      isUnassigned: true,
+    });
+  }
+
+  return summaries;
 }
 
 function parseAbsentees(input) {
@@ -181,6 +241,26 @@ function slugify(input) {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 60);
+}
+
+async function getBatchesForCoaching(coachingId) {
+  return all(
+    `SELECT id, name, normalized_name, standard, course, created_at
+     FROM batches
+     WHERE coaching_id = ?
+     ORDER BY LOWER(name) ASC, id ASC`,
+    [coachingId]
+  );
+}
+
+async function getBatchForCoaching(coachingId, batchId) {
+  return get(
+    `SELECT id, coaching_id, name, normalized_name, standard, course
+     FROM batches
+     WHERE coaching_id = ? AND id = ?
+     LIMIT 1`,
+    [coachingId, batchId]
+  );
 }
 
 function buildPortalUrl(req, slug) {
@@ -390,13 +470,22 @@ async function buildAnswerRequestSummaries(coachingId, requests) {
   const summaries = [];
 
   for (const request of requests) {
-    const targetStudents = await all(
-      `SELECT id, roll_no, name, contact_phone, email
-       FROM users
-       WHERE coaching_id = ? AND role = 'student' AND standard = ? AND course = ?
-       ORDER BY roll_no ASC`,
-      [coachingId, request.standard, request.course]
-    );
+    const targetStudents = request.batch_id
+      ? await all(
+        `SELECT u.id, u.roll_no, u.name, u.contact_phone, u.email, u.batch_id, b.name AS batch_name
+         FROM users u
+         LEFT JOIN batches b ON b.id = u.batch_id
+         WHERE u.coaching_id = ? AND u.role = 'student' AND u.batch_id = ?
+         ORDER BY u.roll_no ASC`,
+        [coachingId, request.batch_id]
+      )
+      : await all(
+        `SELECT id, roll_no, name, contact_phone, email, batch_id
+         FROM users
+         WHERE coaching_id = ? AND role = 'student' AND standard = ? AND course = ?
+         ORDER BY roll_no ASC`,
+        [coachingId, request.standard, request.course]
+      );
 
     const submissions = await all(
       `SELECT tp.id, tp.student_id, tp.upload_date, tp.original_name, tp.test_label, tp.content_type,
@@ -432,6 +521,7 @@ async function buildAnswerRequestSummaries(coachingId, requests) {
 
     summaries.push({
       ...request,
+      batch_name: request.batch_name || formatLegacyBatchLabel(request.standard, request.course) || null,
       state: getAnswerRequestState(request),
       totalStudents: targetStudents.length,
       uploadedCount: uploadedStudents.length,
@@ -462,11 +552,11 @@ async function findRecentDuplicatePaper({
          AND student_id = ?
          AND uploaded_by = ?
          AND answer_request_id IS NULL
-         AND original_name = ?
-         AND COALESCE(test_label, '') = COALESCE(?, '')
-         AND COALESCE(marks_obtained, -999999) = COALESCE(?, -999999)
-         AND COALESCE(max_marks, -999999) = COALESCE(?, -999999)
-         AND upload_date >= datetime('now', '-20 seconds')
+        AND original_name = ?
+        AND COALESCE(test_label, '') = COALESCE(?, '')
+        AND COALESCE(marks_obtained, -999999) = COALESCE(?, -999999)
+        AND COALESCE(max_marks, -999999) = COALESCE(?, -999999)
+        AND upload_date >= CURRENT_TIMESTAMP - INTERVAL '20 seconds'
        ORDER BY upload_date DESC, id DESC
        LIMIT 1`,
       [coachingId, studentId, uploadedBy, originalName, testLabel || null, marksObtained, maxMarks]
@@ -484,7 +574,7 @@ async function findRecentDuplicatePaper({
        AND COALESCE(test_label, '') = COALESCE(?, '')
        AND COALESCE(marks_obtained, -999999) = COALESCE(?, -999999)
        AND COALESCE(max_marks, -999999) = COALESCE(?, -999999)
-       AND upload_date >= datetime('now', '-20 seconds')
+       AND upload_date >= CURRENT_TIMESTAMP - INTERVAL '20 seconds'
      ORDER BY upload_date DESC, id DESC
      LIMIT 1`,
     [coachingId, studentId, uploadedBy, answerRequestId, originalName, testLabel || null, marksObtained, maxMarks]
@@ -656,9 +746,11 @@ async function cleanupDuplicateAnswerSubmissions() {
 
 async function getStudentDashboardPayload(coachingId, studentId) {
   const profile = await get(
-    `SELECT id, roll_no, name, standard, course, contact_phone, email
-     FROM users
-     WHERE id = ? AND coaching_id = ? AND role = 'student'`,
+    `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course, u.contact_phone, u.email,
+            b.name AS batch_name
+     FROM users u
+     LEFT JOIN batches b ON b.id = u.batch_id
+     WHERE u.id = ? AND u.coaching_id = ? AND u.role = 'student'`,
     [studentId, coachingId]
   );
 
@@ -689,15 +781,26 @@ async function getStudentDashboardPayload(coachingId, studentId) {
     [coachingId, studentId]
   );
 
-  const notes = profile?.standard && profile?.course
+  const notes = profile?.batch_id
     ? await all(
-      `SELECT title, resource_url, description, created_at
-       FROM batch_notes
-       WHERE coaching_id = ? AND standard = ? AND course = ?
-       ORDER BY created_at DESC`,
-      [coachingId, profile.standard, profile.course]
+      `SELECT bn.title, bn.resource_url, bn.description, bn.created_at, bn.batch_id, b.name AS batch_name
+       FROM batch_notes bn
+       LEFT JOIN batches b ON b.id = bn.batch_id
+       WHERE bn.coaching_id = ? AND bn.batch_id = ?
+       ORDER BY bn.created_at DESC`,
+      [coachingId, profile.batch_id]
     )
-    : [];
+    : profile?.standard || profile?.course
+      ? await all(
+        `SELECT title, resource_url, description, created_at, batch_id
+         FROM batch_notes
+         WHERE coaching_id = ?
+           AND COALESCE(standard, '') = COALESCE(?, '')
+           AND COALESCE(course, '') = COALESCE(?, '')
+         ORDER BY created_at DESC`,
+        [coachingId, profile.standard || null, profile.course || null]
+      )
+      : [];
 
   const attendanceSummary = await get(
     `SELECT
@@ -844,6 +947,8 @@ function buildSessionUser(user, coaching = null) {
     username: user.username || null,
     rollNo: user.roll_no || null,
     name: user.name || null,
+    batchId: user.batch_id || null,
+    batchName: user.batch_name || formatLegacyBatchLabel(user.standard, user.course) || null,
     standard: user.standard || null,
     course: user.course || null,
   };
@@ -880,25 +985,16 @@ async function deleteCoachingData(coachingId) {
     [coachingId]
   );
 
-  await run('BEGIN TRANSACTION');
-
-  try {
-    await run(`DELETE FROM attendance WHERE coaching_id = ?`, [coachingId]);
-    await run(`DELETE FROM fees WHERE coaching_id = ?`, [coachingId]);
-    await run(`DELETE FROM batch_notes WHERE coaching_id = ?`, [coachingId]);
-    await run(`DELETE FROM answer_upload_requests WHERE coaching_id = ?`, [coachingId]);
-    await run(`DELETE FROM test_papers WHERE coaching_id = ?`, [coachingId]);
-    await run(`DELETE FROM users WHERE coaching_id = ?`, [coachingId]);
-    await run(`DELETE FROM coaching_classes WHERE id = ?`, [coachingId]);
-    await run('COMMIT');
-  } catch (error) {
-    try {
-      await run('ROLLBACK');
-    } catch (rollbackError) {
-      console.error('Failed to rollback coaching delete transaction', rollbackError);
-    }
-    throw error;
-  }
+  await withTransaction(async (tx) => {
+    await tx.run(`DELETE FROM attendance WHERE coaching_id = ?`, [coachingId]);
+    await tx.run(`DELETE FROM fees WHERE coaching_id = ?`, [coachingId]);
+    await tx.run(`DELETE FROM batch_notes WHERE coaching_id = ?`, [coachingId]);
+    await tx.run(`DELETE FROM answer_upload_requests WHERE coaching_id = ?`, [coachingId]);
+    await tx.run(`DELETE FROM test_papers WHERE coaching_id = ?`, [coachingId]);
+    await tx.run(`DELETE FROM users WHERE coaching_id = ?`, [coachingId]);
+    await tx.run(`DELETE FROM batches WHERE coaching_id = ?`, [coachingId]);
+    await tx.run(`DELETE FROM coaching_classes WHERE id = ?`, [coachingId]);
+  });
 
   for (const paper of papers) {
     try {
@@ -1130,7 +1226,16 @@ app.get('/owner/dashboard', requireOwner, async (req, res) => {
      FROM coaching_classes cc
      LEFT JOIN subscription_plans sp ON sp.id = cc.subscription_plan_id
      LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.role = 'admin' AND admin.is_owner = 0
-     GROUP BY cc.id
+     GROUP BY
+       cc.id,
+       sp.id,
+       sp.name,
+       sp.code,
+       sp.price_inr,
+       sp.max_students,
+       admin.id,
+       admin.username,
+       admin.name
      ORDER BY cc.created_at DESC`
   );
 
@@ -1335,12 +1440,15 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const attendanceDateFilter = (req.query.attendanceDate || '').trim();
   const coachingId = req.session.user.coachingId;
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
+  const batches = await getBatchesForCoaching(coachingId);
 
   const students = await all(
-    `SELECT id, roll_no, name, standard, course, contact_phone, email, password_display, created_at
-     FROM users
-     WHERE role = 'student' AND coaching_id = ?
-     ORDER BY standard DESC, course ASC, roll_no ASC`,
+    `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course, u.contact_phone, u.email, u.password_display, u.created_at,
+            b.name AS batch_name
+     FROM users u
+     LEFT JOIN batches b ON b.id = u.batch_id
+     WHERE u.role = 'student' AND u.coaching_id = ?
+     ORDER BY COALESCE(b.name, ''), u.roll_no ASC`,
     [coachingId]
   );
 
@@ -1360,12 +1468,15 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
        tp.answer_request_id,
        u.roll_no,
        u.name,
+       u.batch_id,
        u.standard,
        u.course,
+       b.name AS batch_name,
        uploader.name AS uploaded_by_name,
        uploader.role AS uploaded_by_role
      FROM test_papers tp
      JOIN users u ON u.id = tp.student_id
+     LEFT JOIN batches b ON b.id = u.batch_id
      LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
      WHERE tp.coaching_id = ?
      ORDER BY tp.upload_date DESC
@@ -1374,9 +1485,10 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   );
 
   let attendanceSql = `
-    SELECT a.id, a.attendance_date, a.status, a.notes, u.roll_no, u.name, u.standard, u.course
+    SELECT a.id, a.attendance_date, a.status, a.notes, u.roll_no, u.name, u.batch_id, u.standard, u.course, b.name AS batch_name
     FROM attendance a
     JOIN users u ON u.id = a.student_id
+    LEFT JOIN batches b ON b.id = u.batch_id
     WHERE a.coaching_id = ?
   `;
   const attendanceParams = [coachingId];
@@ -1397,9 +1509,10 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   );
 
   const fees = await all(
-    `SELECT f.id, f.amount, f.due_date, f.payment_date, f.status, f.notes, u.roll_no, u.name, u.standard, u.course
+    `SELECT f.id, f.amount, f.due_date, f.payment_date, f.status, f.notes, u.roll_no, u.name, u.batch_id, u.standard, u.course, b.name AS batch_name
      FROM fees f
      JOIN users u ON u.id = f.student_id
+     LEFT JOIN batches b ON b.id = u.batch_id
      WHERE f.coaching_id = ?
      ORDER BY f.created_at DESC
      LIMIT 150`,
@@ -1407,19 +1520,23 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   );
 
   const notes = await all(
-    `SELECT id, standard, course, title, resource_url, description, created_at
-     FROM batch_notes
-     WHERE coaching_id = ?
-     ORDER BY created_at DESC
+    `SELECT bn.id, bn.batch_id, bn.standard, bn.course, bn.title, bn.resource_url, bn.description, bn.created_at,
+            b.name AS batch_name
+     FROM batch_notes bn
+     LEFT JOIN batches b ON b.id = bn.batch_id
+     WHERE bn.coaching_id = ?
+     ORDER BY bn.created_at DESC
      LIMIT 150`,
     [coachingId]
   );
 
   const answerRequests = await all(
-    `SELECT id, standard, course, title, description, starts_at, ends_at, created_at
-     FROM answer_upload_requests
-     WHERE coaching_id = ?
-     ORDER BY created_at DESC
+    `SELECT ar.id, ar.batch_id, ar.standard, ar.course, ar.title, ar.description, ar.starts_at, ar.ends_at, ar.created_at,
+            b.name AS batch_name
+     FROM answer_upload_requests ar
+     LEFT JOIN batches b ON b.id = ar.batch_id
+     WHERE ar.coaching_id = ?
+     ORDER BY ar.created_at DESC
      LIMIT 20`,
     [coachingId]
   );
@@ -1491,7 +1608,9 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     subscriptionState,
     subscriptionNotice: subscriptionState.notice,
     students,
-    studentGroups: toStudentGroups(students),
+    batches,
+    batchSummaries: toBatchSummaries(students, batches),
+    studentBatchGroups: toStudentBatchGroups(students, batches),
     studentUsage,
     papers,
     attendance,
@@ -1520,16 +1639,21 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const email = (req.body.email || '').trim().toLowerCase();
   const submittedPassword = (req.body.password || '').trim();
   const password = submittedPassword || rollNo;
-  const standard = (req.body.standard || '').trim();
-  const course = (req.body.course || '').trim().toLowerCase();
+  const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
 
   if (!rollNo) {
     req.session.flash = { type: 'error', text: 'Roll number is required' };
     return res.redirect('/admin/dashboard?section=students');
   }
 
-  if (!VALID_STANDARDS.has(standard) || !VALID_COURSES.has(course)) {
-    req.session.flash = { type: 'error', text: 'Please select valid standard and course' };
+  if (!Number.isInteger(batchId) || batchId <= 0) {
+    req.session.flash = { type: 'error', text: 'Please select a batch for the student' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  const batch = await getBatchForCoaching(coachingId, batchId);
+  if (!batch) {
+    req.session.flash = { type: 'error', text: 'Selected batch was not found' };
     return res.redirect('/admin/dashboard?section=students');
   }
 
@@ -1558,9 +1682,20 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const passwordHash = await bcrypt.hash(password, 10);
   await run(
     `INSERT INTO users (
-      coaching_id, role, is_owner, username, roll_no, name, standard, course, contact_phone, email, password_hash, password_display
-    ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [coachingId, rollNo, name, standard, course, contactPhone || null, email || null, passwordHash, password]
+      coaching_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, email, password_hash, password_display
+    ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      coachingId,
+      rollNo,
+      name,
+      batch.id,
+      batch.standard || null,
+      batch.course || null,
+      contactPhone || null,
+      email || null,
+      passwordHash,
+      password,
+    ]
   );
 
   req.session.flash = {
@@ -1569,6 +1704,36 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
       ? `Student ${rollNo} created with a custom password`
       : `Student ${rollNo} created. Default password is the roll number`,
   };
+  return res.redirect('/admin/dashboard?section=students');
+});
+
+app.post('/admin/batches', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const batchName = normalizeBatchName(req.body.batchName);
+
+  if (!batchName) {
+    req.session.flash = { type: 'error', text: 'Batch name is required' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  const normalizedName = batchName.toLowerCase();
+  const existing = await get(
+    `SELECT id FROM batches WHERE coaching_id = ? AND normalized_name = ? LIMIT 1`,
+    [coachingId, normalizedName]
+  );
+
+  if (existing) {
+    req.session.flash = { type: 'error', text: 'This batch already exists' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  await run(
+    `INSERT INTO batches (coaching_id, name, normalized_name, created_by)
+     VALUES (?, ?, ?, ?)`,
+    [coachingId, batchName, normalizedName, req.session.user.id]
+  );
+
+  req.session.flash = { type: 'success', text: `Batch "${batchName}" created successfully` };
   return res.redirect('/admin/dashboard?section=students');
 });
 
@@ -1678,7 +1843,9 @@ app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('pape
   }
 
   const student = await get(
-    `SELECT id, roll_no FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
+    `SELECT id, roll_no, batch_id, standard, course
+     FROM users
+     WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
     [coachingId, rollNo]
   );
 
@@ -1695,11 +1862,22 @@ app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('pape
   let linkedAnswerRequest = null;
   if (answerRequestId !== null) {
     linkedAnswerRequest = await get(
-      `SELECT id FROM answer_upload_requests WHERE id = ? AND coaching_id = ?`,
+      `SELECT id, batch_id, standard, course, title
+       FROM answer_upload_requests
+       WHERE id = ? AND coaching_id = ?`,
       [answerRequestId, coachingId]
     );
     if (!linkedAnswerRequest) {
       req.session.flash = { type: 'error', text: 'Selected answer upload request was not found' };
+      return res.redirect('/admin/dashboard?section=papers');
+    }
+
+    const studentMatchesRequest = linkedAnswerRequest.batch_id
+      ? Number(linkedAnswerRequest.batch_id) === Number(student.batch_id || 0)
+      : linkedAnswerRequest.standard === student.standard && linkedAnswerRequest.course === student.course;
+
+    if (!studentMatchesRequest) {
+      req.session.flash = { type: 'error', text: `Student ${student.roll_no} does not belong to the selected upload window batch` };
       return res.redirect('/admin/dashboard?section=papers');
     }
   }
@@ -1779,14 +1957,19 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
 
 app.post('/admin/answer-requests', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
-  const standard = (req.body.standard || '').trim();
-  const course = (req.body.course || '').trim().toLowerCase();
+  const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
   const title = (req.body.title || '').trim();
   const description = (req.body.description || '').trim();
   const startsAtInput = (req.body.startsAt || '').trim() || toDateTimeLocalInput(new Date());
 
-  if (!VALID_STANDARDS.has(standard) || !VALID_COURSES.has(course)) {
-    req.session.flash = { type: 'error', text: 'Select a valid standard and course for answer upload request' };
+  if (!Number.isInteger(batchId) || batchId <= 0) {
+    req.session.flash = { type: 'error', text: 'Select a batch for answer upload request' };
+    return res.redirect('/admin/dashboard?section=overview');
+  }
+
+  const batch = await getBatchForCoaching(coachingId, batchId);
+  if (!batch) {
+    req.session.flash = { type: 'error', text: 'Selected batch was not found' };
     return res.redirect('/admin/dashboard?section=overview');
   }
 
@@ -1805,12 +1988,13 @@ app.post('/admin/answer-requests', requireCoachingAdmin, async (req, res) => {
 
   await run(
     `INSERT INTO answer_upload_requests (
-      coaching_id, standard, course, title, description, starts_at, ends_at, created_by
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      coaching_id, batch_id, standard, course, title, description, starts_at, ends_at, created_by
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
-      standard,
-      course,
+      batch.id,
+      batch.standard || null,
+      batch.course || null,
       title,
       description || null,
       toDateTimeLocalInput(startsAt),
@@ -1821,7 +2005,7 @@ app.post('/admin/answer-requests', requireCoachingAdmin, async (req, res) => {
 
   req.session.flash = {
     type: 'success',
-    text: `Answer upload request created for ${standard} ${course.toUpperCase()} students. Window stays open for ${ANSWER_UPLOAD_WINDOW_HOURS} hours.`,
+    text: `Answer upload request created for ${batch.name}. Window stays open for ${ANSWER_UPLOAD_WINDOW_HOURS} hours.`,
   };
   return res.redirect('/admin/dashboard?section=overview');
 });
@@ -1866,13 +2050,18 @@ app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
-  const standard = (req.body.standard || '').trim();
-  const course = (req.body.course || '').trim().toLowerCase();
+  const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
   const attendanceDate = req.body.attendanceDate;
   const notes = (req.body.notes || '').trim();
 
-  if (!VALID_STANDARDS.has(standard) || !VALID_COURSES.has(course)) {
-    req.session.flash = { type: 'error', text: 'Please select valid standard and course' };
+  if (!Number.isInteger(batchId) || batchId <= 0) {
+    req.session.flash = { type: 'error', text: 'Please select a batch' };
+    return res.redirect('/admin/dashboard?section=attendance');
+  }
+
+  const batch = await getBatchForCoaching(coachingId, batchId);
+  if (!batch) {
+    req.session.flash = { type: 'error', text: 'Selected batch was not found' };
     return res.redirect('/admin/dashboard?section=attendance');
   }
 
@@ -1884,13 +2073,13 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
   const students = await all(
     `SELECT id, roll_no
      FROM users
-     WHERE coaching_id = ? AND role = 'student' AND standard = ? AND course = ?
+     WHERE coaching_id = ? AND role = 'student' AND batch_id = ?
      ORDER BY roll_no ASC`,
-    [coachingId, standard, course]
+    [coachingId, batch.id]
   );
 
   if (!students.length) {
-    req.session.flash = { type: 'error', text: 'No students found in selected group' };
+    req.session.flash = { type: 'error', text: 'No students found in selected batch' };
     return res.redirect('/admin/dashboard?section=attendance');
   }
 
@@ -1959,14 +2148,19 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/notes', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
-  const standard = (req.body.standard || '').trim();
-  const course = (req.body.course || '').trim().toLowerCase();
+  const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
   const title = (req.body.title || '').trim();
   const resourceUrl = (req.body.resourceUrl || '').trim();
   const description = (req.body.description || '').trim();
 
-  if (!VALID_STANDARDS.has(standard) || !VALID_COURSES.has(course)) {
-    req.session.flash = { type: 'error', text: 'Please select valid standard and course for note' };
+  if (!Number.isInteger(batchId) || batchId <= 0) {
+    req.session.flash = { type: 'error', text: 'Please select a batch for note' };
+    return res.redirect('/admin/dashboard?section=notes');
+  }
+
+  const batch = await getBatchForCoaching(coachingId, batchId);
+  if (!batch) {
+    req.session.flash = { type: 'error', text: 'Selected batch was not found' };
     return res.redirect('/admin/dashboard?section=notes');
   }
 
@@ -1976,12 +2170,12 @@ app.post('/admin/notes', requireCoachingAdmin, async (req, res) => {
   }
 
   await run(
-    `INSERT INTO batch_notes (coaching_id, standard, course, title, resource_url, description, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [coachingId, standard, course, title, resourceUrl, description, req.session.user.id]
+    `INSERT INTO batch_notes (coaching_id, batch_id, standard, course, title, resource_url, description, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [coachingId, batch.id, batch.standard || null, batch.course || null, title, resourceUrl, description, req.session.user.id]
   );
 
-  req.session.flash = { type: 'success', text: 'Batch note published' };
+  req.session.flash = { type: 'success', text: `Batch note published for ${batch.name}` };
   return res.redirect('/admin/dashboard?section=notes');
 });
 
@@ -2042,7 +2236,7 @@ app.post('/student/answer-requests/:id/upload', requireStudent, upload.single('p
   }
 
   const student = await get(
-    `SELECT id, standard, course FROM users WHERE id = ? AND coaching_id = ? AND role = 'student'`,
+    `SELECT id, batch_id, standard, course FROM users WHERE id = ? AND coaching_id = ? AND role = 'student'`,
     [studentId, coachingId]
   );
   if (!student) {
@@ -2051,7 +2245,7 @@ app.post('/student/answer-requests/:id/upload', requireStudent, upload.single('p
   }
 
   const answerRequest = await get(
-    `SELECT id, title, standard, course, starts_at, ends_at
+    `SELECT id, title, batch_id, standard, course, starts_at, ends_at
      FROM answer_upload_requests
      WHERE id = ? AND coaching_id = ?`,
     [requestId, coachingId]
@@ -2061,7 +2255,11 @@ app.post('/student/answer-requests/:id/upload', requireStudent, upload.single('p
     return res.redirect('/student/dashboard');
   }
 
-  if (answerRequest.standard !== student.standard || answerRequest.course !== student.course) {
+  const batchMismatch = answerRequest.batch_id
+    ? Number(answerRequest.batch_id) !== Number(student.batch_id || 0)
+    : answerRequest.standard !== student.standard || answerRequest.course !== student.course;
+
+  if (batchMismatch) {
     req.session.flash = { type: 'error', text: 'This answer upload request does not belong to your batch' };
     return res.redirect('/student/dashboard');
   }
@@ -2121,16 +2319,28 @@ app.get('/student/dashboard', requireStudent, async (req, res) => {
   const dashboard = await getStudentDashboardPayload(coachingId, req.session.user.id);
   const profile = dashboard.profile;
 
-  const answerRequests = profile?.standard && profile?.course
+  const answerRequests = profile?.batch_id
     ? await all(
-      `SELECT id, title, description, starts_at, ends_at, created_at
-       FROM answer_upload_requests
-       WHERE coaching_id = ? AND standard = ? AND course = ?
-       ORDER BY created_at DESC
+      `SELECT ar.id, ar.title, ar.description, ar.starts_at, ar.ends_at, ar.created_at, ar.batch_id, b.name AS batch_name
+       FROM answer_upload_requests ar
+       LEFT JOIN batches b ON b.id = ar.batch_id
+       WHERE ar.coaching_id = ? AND ar.batch_id = ?
+       ORDER BY ar.created_at DESC
        LIMIT 12`,
-      [coachingId, profile.standard, profile.course]
+      [coachingId, profile.batch_id]
     )
-    : [];
+    : profile?.standard || profile?.course
+      ? await all(
+        `SELECT id, title, description, starts_at, ends_at, created_at, batch_id
+         FROM answer_upload_requests
+         WHERE coaching_id = ?
+           AND COALESCE(standard, '') = COALESCE(?, '')
+           AND COALESCE(course, '') = COALESCE(?, '')
+         ORDER BY created_at DESC
+         LIMIT 12`,
+        [coachingId, profile.standard || null, profile.course || null]
+      )
+      : [];
 
   const submissions = await all(
     `SELECT id, answer_request_id, upload_date, original_name
@@ -2230,7 +2440,8 @@ Promise.resolve()
 
     server.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
-        console.error(`Port ${PORT} is already in use. Start with another port, for example: PORT=3001 npm start`);
+        const suggestedPort = Number(PORT) + 1;
+        console.error(`Port ${PORT} is already in use. Start with another port, for example: PORT=${suggestedPort} npm start`);
         process.exit(1);
       }
 

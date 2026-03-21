@@ -16,7 +16,7 @@
         <div>
           <p class="eyebrow"><%= branding?.brandName || 'Admin Student View' %></p>
           <h1><%= student?.name || 'Student Overview' %></h1>
-          <p class="muted">Roll No: <%= student?.roll_no || '-' %> | Batch: <%= student?.standard || '-' %> - <%= student?.course ? student.course.toUpperCase() : '-' %></p>
+          <p class="muted">Roll No: <%= student?.roll_no || '-' %> | Batch: <%= student?.batch_name || ((student?.standard || student?.course) ? `${student?.standard || ''}${student?.standard && student?.course ? ' - ' : ''}${student?.course ? student.course.toUpperCase() : ''}` : '-') %></p>
           <p class="muted">Phone: <%= student?.contact_phone || '-' %> | Email: <%= student?.email || '-' %></p>
         </div>
       </div>

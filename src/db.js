@@ -1,94 +1,177 @@
-const path = require('path');
-const fs = require('fs');
-const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 require('dotenv').config({ quiet: true });
 
-const dataDir = process.env.DATA_DIR
-  ? path.resolve(process.env.DATA_DIR)
-  : path.join(__dirname, '..', 'data');
+let pool = null;
 
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+function normalizeDatabaseUrl(rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!value || value.includes('YOUR_NEON_') || value.includes('<paste-neon-url-here>')) {
+    throw new Error('DATABASE_URL is not set. Paste your Neon PostgreSQL connection string into .env');
+  }
+
+  const url = new URL(value);
+  if (!url.searchParams.has('sslmode')) {
+    url.searchParams.set('sslmode', 'require');
+  }
+
+  const sslMode = url.searchParams.get('sslmode');
+  if (['prefer', 'require', 'verify-ca'].includes(sslMode) && !url.searchParams.has('uselibpqcompat')) {
+    url.searchParams.set('uselibpqcompat', 'true');
+  }
+
+  return url.toString();
 }
 
-const dbPath = path.join(dataDir, 'coaching.db');
-const db = new sqlite3.Database(dbPath);
-
-function run(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function onRun(err) {
-      if (err) return reject(err);
-      resolve(this);
+function getPool() {
+  if (!pool) {
+    pool = new Pool({
+      connectionString: normalizeDatabaseUrl(process.env.DATABASE_URL),
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 15000,
     });
-  });
+  }
+
+  return pool;
 }
 
-function get(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) return reject(err);
-      resolve(row);
-    });
-  });
+function convertPlaceholders(sql) {
+  let output = '';
+  let paramIndex = 1;
+  let inSingleQuote = false;
+
+  for (let i = 0; i < sql.length; i += 1) {
+    const char = sql[i];
+
+    if (char === '\'') {
+      output += char;
+
+      if (inSingleQuote && sql[i + 1] === '\'') {
+        output += sql[i + 1];
+        i += 1;
+        continue;
+      }
+
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+
+    if (!inSingleQuote && char === '?') {
+      output += `$${paramIndex}`;
+      paramIndex += 1;
+      continue;
+    }
+
+    output += char;
+  }
+
+  return output;
 }
 
-function all(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) return reject(err);
-      resolve(rows);
-    });
-  });
+function needsReturningId(query) {
+  return /^\s*INSERT\s+INTO\b/i.test(query) && !/\bRETURNING\b/i.test(query);
 }
 
-async function tableExists(name) {
-  const row = await get(
-    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
-    [name]
-  );
-  return Boolean(row);
+function prepareQuery(query) {
+  const converted = convertPlaceholders(query);
+
+  if (!needsReturningId(converted)) {
+    return converted;
+  }
+
+  return converted.replace(/;\s*$/, '') + ' RETURNING id';
+}
+
+async function execute(query, params = [], client = null) {
+  const runner = client || getPool();
+  const text = prepareQuery(query);
+  const res = await runner.query(text, params);
+
+  return {
+    rows: res.rows,
+    rowCount: res.rowCount,
+    lastID: res.rows?.[0]?.id ?? null,
+  };
+}
+
+async function run(query, params = []) {
+  return execute(query, params);
+}
+
+async function get(query, params = []) {
+  const res = await execute(query, params);
+  return res.rows[0];
+}
+
+async function all(query, params = []) {
+  const res = await execute(query, params);
+  return res.rows;
+}
+
+async function withTransaction(handler) {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const scoped = {
+      run: (query, params = []) => execute(query, params, client),
+      get: async (query, params = []) => {
+        const res = await execute(query, params, client);
+        return res.rows[0];
+      },
+      all: async (query, params = []) => {
+        const res = await execute(query, params, client);
+        return res.rows;
+      },
+    };
+    const result = await handler(scoped);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function ensureColumn(table, column, definition) {
-  const columns = await all(`PRAGMA table_info(${table})`);
-  const exists = columns.some((item) => item.name === column);
-  if (!exists) {
-    await run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-  }
+  await run(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${definition}`);
+}
+
+function normalizeBatchName(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+function getLegacyBatchName(standard, course) {
+  const safeStandard = String(standard || '').trim();
+  const safeCourse = String(course || '').trim().toUpperCase();
+
+  if (safeStandard && safeCourse) return `${safeStandard} - ${safeCourse}`;
+  if (safeStandard) return safeStandard;
+  if (safeCourse) return safeCourse;
+  return '';
 }
 
 async function createSubscriptionPlansTable() {
   await run(`
     CREATE TABLE IF NOT EXISTS subscription_plans (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       code TEXT NOT NULL UNIQUE,
       name TEXT NOT NULL,
-      price_inr REAL NOT NULL DEFAULT 0,
+      price_inr DOUBLE PRECISION NOT NULL DEFAULT 0,
       max_students INTEGER,
       description TEXT,
       is_active INTEGER NOT NULL DEFAULT 1,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-
-  await ensureColumn('subscription_plans', 'max_students', `INTEGER`);
 }
 
 async function seedSubscriptionPlans() {
-  const legacyPremiumPlan = await get(`SELECT id, name FROM subscription_plans WHERE code = 'pro' LIMIT 1`);
-  const premiumPlan = await get(`SELECT id FROM subscription_plans WHERE code = 'premium' LIMIT 1`);
-
-  if (legacyPremiumPlan && !premiumPlan) {
-    await run(
-      `UPDATE subscription_plans
-       SET code = 'premium',
-           name = CASE WHEN name = 'Pro' THEN 'Premium' ELSE name END
-       WHERE id = ?`,
-      [legacyPremiumPlan.id]
-    );
-  }
-
   const plans = [
     {
       code: 'basic',
@@ -114,30 +197,24 @@ async function seedSubscriptionPlans() {
   ];
 
   for (const plan of plans) {
-    const existing = await get(`SELECT id, name, max_students FROM subscription_plans WHERE code = ?`, [plan.code]);
-    if (!existing) {
-      await run(
-        `INSERT INTO subscription_plans (code, name, price_inr, max_students, description, is_active)
-         VALUES (?, ?, ?, ?, ?, 1)`,
-        [plan.code, plan.name, plan.price, plan.maxStudents, plan.description]
-      );
-      continue;
-    }
-
-    if (existing.name !== plan.name && ['Basic', 'Mid', 'Pro', 'Premium'].includes(existing.name)) {
-      await run(`UPDATE subscription_plans SET name = ? WHERE id = ?`, [plan.name, existing.id]);
-    }
-
-    if (existing.max_students === null && plan.maxStudents !== null) {
-      await run(`UPDATE subscription_plans SET max_students = ? WHERE id = ?`, [plan.maxStudents, existing.id]);
-    }
+    await run(
+      `INSERT INTO subscription_plans (code, name, price_inr, max_students, description, is_active)
+       VALUES (?, ?, ?, ?, ?, 1)
+       ON CONFLICT (code)
+       DO UPDATE SET
+         name = EXCLUDED.name,
+         price_inr = EXCLUDED.price_inr,
+         max_students = COALESCE(subscription_plans.max_students, EXCLUDED.max_students),
+         description = EXCLUDED.description`,
+      [plan.code, plan.name, plan.price, plan.maxStudents, plan.description]
+    );
   }
 }
 
 async function createCoachingClassesTable() {
   await run(`
     CREATE TABLE IF NOT EXISTS coaching_classes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
       slug TEXT NOT NULL UNIQUE,
       brand_name TEXT,
@@ -147,19 +224,23 @@ async function createCoachingClassesTable() {
       theme_surface TEXT,
       contact_email TEXT,
       subscription_plan_id INTEGER,
-      subscription_status TEXT NOT NULL DEFAULT 'active' CHECK(subscription_status IN ('trial', 'active', 'suspended', 'cancelled')),
+      subscription_status TEXT NOT NULL DEFAULT 'active',
       subscription_started_at TEXT,
       subscription_ends_at TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(subscription_plan_id) REFERENCES subscription_plans(id)
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
-  await ensureColumn('coaching_classes', 'brand_name', `TEXT`);
-  await ensureColumn('coaching_classes', 'logo_url', `TEXT`);
-  await ensureColumn('coaching_classes', 'theme_primary', `TEXT`);
-  await ensureColumn('coaching_classes', 'theme_background', `TEXT`);
-  await ensureColumn('coaching_classes', 'theme_surface', `TEXT`);
+  await ensureColumn('coaching_classes', 'brand_name', 'TEXT');
+  await ensureColumn('coaching_classes', 'logo_url', 'TEXT');
+  await ensureColumn('coaching_classes', 'theme_primary', 'TEXT');
+  await ensureColumn('coaching_classes', 'theme_background', 'TEXT');
+  await ensureColumn('coaching_classes', 'theme_surface', 'TEXT');
+  await ensureColumn('coaching_classes', 'contact_email', 'TEXT');
+  await ensureColumn('coaching_classes', 'subscription_plan_id', 'INTEGER');
+  await ensureColumn('coaching_classes', 'subscription_status', `TEXT NOT NULL DEFAULT 'active'`);
+  await ensureColumn('coaching_classes', 'subscription_started_at', 'TEXT');
+  await ensureColumn('coaching_classes', 'subscription_ends_at', 'TEXT');
 
   await run(`
     UPDATE coaching_classes
@@ -169,322 +250,389 @@ async function createCoachingClassesTable() {
 }
 
 async function getBasicPlanId() {
-  const basicPlan = await get(`SELECT id FROM subscription_plans WHERE code = 'basic' LIMIT 1`);
-  return basicPlan ? basicPlan.id : null;
+  const plan = await get(`SELECT id FROM subscription_plans WHERE code = 'basic' LIMIT 1`);
+  return plan?.id || null;
 }
 
 async function ensureLegacyCoaching() {
-  const existing = await get(`SELECT * FROM coaching_classes WHERE slug = 'legacy-coaching' LIMIT 1`);
+  const existing = await get(`SELECT id, name, slug FROM coaching_classes WHERE slug = 'legacy-coaching' LIMIT 1`);
   if (existing) return existing;
 
   const basicPlanId = await getBasicPlanId();
   const result = await run(
     `INSERT INTO coaching_classes (
-      name, slug, subscription_plan_id, subscription_status, subscription_started_at
-    ) VALUES (?, ?, ?, 'active', DATE('now'))`,
-    ['Legacy Coaching', 'legacy-coaching', basicPlanId]
+      name, slug, brand_name, subscription_plan_id, subscription_status, subscription_started_at
+    ) VALUES (?, ?, ?, ?, 'active', CURRENT_DATE::text)`,
+    ['Legacy Coaching', 'legacy-coaching', 'Legacy Coaching', basicPlanId]
   );
 
-  return get(`SELECT * FROM coaching_classes WHERE id = ?`, [result.lastID]);
+  return { id: result.lastID, name: 'Legacy Coaching', slug: 'legacy-coaching' };
+}
+
+async function createBatchesTable() {
+  await run(`
+    CREATE TABLE IF NOT EXISTS batches (
+      id SERIAL PRIMARY KEY,
+      coaching_id INTEGER,
+      name TEXT,
+      normalized_name TEXT,
+      standard TEXT,
+      course TEXT,
+      created_by INTEGER,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await ensureColumn('batches', 'coaching_id', 'INTEGER');
+  await ensureColumn('batches', 'normalized_name', 'TEXT');
+  await ensureColumn('batches', 'standard', 'TEXT');
+  await ensureColumn('batches', 'course', 'TEXT');
+  await ensureColumn('batches', 'created_by', 'INTEGER');
 }
 
 async function createUsersTable() {
   await run(`
     CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       coaching_id INTEGER,
-      role TEXT NOT NULL CHECK(role IN ('admin', 'student')),
+      role TEXT NOT NULL DEFAULT 'student',
       is_owner INTEGER NOT NULL DEFAULT 0,
       username TEXT,
       roll_no TEXT,
       name TEXT,
-      standard TEXT CHECK(standard IN ('11th', '12th')),
-      course TEXT CHECK(course IN ('jee', 'neet')),
+      batch_id INTEGER,
+      standard TEXT,
+      course TEXT,
       contact_phone TEXT,
       email TEXT,
       password_hash TEXT NOT NULL,
       password_display TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(coaching_id) REFERENCES coaching_classes(id)
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
-  await ensureColumn('users', 'contact_phone', `TEXT`);
-  await ensureColumn('users', 'email', `TEXT`);
-  await ensureColumn('users', 'password_display', `TEXT`);
-
-  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_owner_username ON users(username) WHERE is_owner = 1`);
-  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_coaching_username ON users(coaching_id, username) WHERE username IS NOT NULL AND is_owner = 0`);
-  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_coaching_roll ON users(coaching_id, roll_no) WHERE roll_no IS NOT NULL`);
-  await run(`CREATE INDEX IF NOT EXISTS idx_users_group ON users(coaching_id, role, standard, course)`);
+  await ensureColumn('users', 'coaching_id', 'INTEGER');
+  await ensureColumn('users', 'is_owner', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn('users', 'batch_id', 'INTEGER');
+  await ensureColumn('users', 'contact_phone', 'TEXT');
+  await ensureColumn('users', 'email', 'TEXT');
+  await ensureColumn('users', 'password_display', 'TEXT');
 }
 
-async function migrateLegacyUsers(adminUsername) {
-  const hasUsersTable = await tableExists('users');
-  if (!hasUsersTable) {
-    await createUsersTable();
-    return;
-  }
-
-  const columns = await all(`PRAGMA table_info(users)`);
-  const alreadyMultiTenant = columns.some((item) => item.name === 'coaching_id')
-    && columns.some((item) => item.name === 'username')
-    && columns.some((item) => item.name === 'is_owner');
-
-  if (alreadyMultiTenant) {
-    await createUsersTable();
-    return;
-  }
-
-  const legacyTableName = 'users_legacy_migration';
-  const legacyExists = await tableExists(legacyTableName);
-  if (!legacyExists) {
-    await run(`ALTER TABLE users RENAME TO ${legacyTableName}`);
-  }
-
-  await createUsersTable();
-
-  const legacyCoaching = await ensureLegacyCoaching();
-  const legacyUsers = await all(`SELECT * FROM ${legacyTableName} ORDER BY id ASC`);
-  let ownerCreated = false;
-  let legacyAdminHash = null;
-
-  for (const user of legacyUsers) {
-    if (user.role === 'admin' && !ownerCreated) {
-      await run(
-        `INSERT INTO users (
-          id, coaching_id, role, is_owner, username, roll_no, name, standard, course, password_hash, created_at
-        ) VALUES (?, NULL, 'admin', 1, ?, NULL, ?, NULL, NULL, ?, ?)`,
-        [user.id, adminUsername, user.name || 'Owner', user.password_hash, user.created_at]
-      );
-      ownerCreated = true;
-      legacyAdminHash = user.password_hash;
-      continue;
-    }
-
-    if (user.role === 'admin') {
-      await run(
-        `INSERT INTO users (
-          id, coaching_id, role, is_owner, username, roll_no, name, standard, course, password_hash, created_at
-        ) VALUES (?, ?, 'admin', 0, ?, NULL, ?, NULL, NULL, ?, ?)`,
-        [
-          user.id,
-          legacyCoaching.id,
-          `legacy-admin-${user.id}`,
-          user.name || `Legacy Admin ${user.id}`,
-          user.password_hash,
-          user.created_at,
-        ]
-      );
-      if (!legacyAdminHash) legacyAdminHash = user.password_hash;
-      continue;
-    }
-
-    await run(
-      `INSERT INTO users (
-        id, coaching_id, role, is_owner, username, roll_no, name, standard, course, password_hash, created_at
-      ) VALUES (?, ?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?)`,
-      [
-        user.id,
-        legacyCoaching.id,
-        user.roll_no,
-        user.name,
-        user.standard || null,
-        user.course || null,
-        user.password_hash,
-        user.created_at,
-      ]
-    );
-  }
-
-  if (legacyAdminHash) {
-    const legacyPortalAdmin = await get(
-      `SELECT id FROM users WHERE coaching_id = ? AND role = 'admin' AND is_owner = 0 LIMIT 1`,
-      [legacyCoaching.id]
-    );
-
-    if (!legacyPortalAdmin) {
-      await run(
-        `INSERT INTO users (
-          coaching_id, role, is_owner, username, roll_no, name, standard, course, password_hash
-        ) VALUES (?, 'admin', 0, ?, NULL, ?, NULL, NULL, ?)`,
-        [legacyCoaching.id, 'legacy-admin', 'Legacy Coaching Admin', legacyAdminHash]
-      );
-    }
-  }
-}
-
-async function ensureTenantScopedTables() {
+async function createTestPapersTable() {
   await run(`
     CREATE TABLE IF NOT EXISTS test_papers (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       coaching_id INTEGER,
       student_id INTEGER NOT NULL,
       original_name TEXT NOT NULL,
       stored_name TEXT NOT NULL,
-      upload_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-      uploaded_by INTEGER NOT NULL,
+      upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      uploaded_by INTEGER,
       storage_type TEXT NOT NULL DEFAULT 'local',
       storage_key TEXT,
       public_url TEXT,
       content_type TEXT,
       size_bytes INTEGER,
-      marks_obtained REAL,
-      max_marks REAL,
+      marks_obtained DOUBLE PRECISION,
+      max_marks DOUBLE PRECISION,
       test_label TEXT,
-      paper_type TEXT NOT NULL DEFAULT 'general' CHECK(paper_type IN ('general', 'answer_submission')),
-      answer_request_id INTEGER,
-      FOREIGN KEY(coaching_id) REFERENCES coaching_classes(id),
-      FOREIGN KEY(student_id) REFERENCES users(id),
-      FOREIGN KEY(uploaded_by) REFERENCES users(id)
+      paper_type TEXT NOT NULL DEFAULT 'general',
+      answer_request_id INTEGER
     )
   `);
 
-  await ensureColumn('test_papers', 'coaching_id', `INTEGER`);
+  await ensureColumn('test_papers', 'coaching_id', 'INTEGER');
+  await ensureColumn('test_papers', 'uploaded_by', 'INTEGER');
   await ensureColumn('test_papers', 'storage_type', `TEXT NOT NULL DEFAULT 'local'`);
-  await ensureColumn('test_papers', 'storage_key', `TEXT`);
-  await ensureColumn('test_papers', 'public_url', `TEXT`);
-  await ensureColumn('test_papers', 'content_type', `TEXT`);
-  await ensureColumn('test_papers', 'size_bytes', `INTEGER`);
-  await ensureColumn('test_papers', 'marks_obtained', `REAL`);
-  await ensureColumn('test_papers', 'max_marks', `REAL`);
-  await ensureColumn('test_papers', 'test_label', `TEXT`);
+  await ensureColumn('test_papers', 'storage_key', 'TEXT');
+  await ensureColumn('test_papers', 'public_url', 'TEXT');
+  await ensureColumn('test_papers', 'content_type', 'TEXT');
+  await ensureColumn('test_papers', 'size_bytes', 'INTEGER');
+  await ensureColumn('test_papers', 'marks_obtained', 'DOUBLE PRECISION');
+  await ensureColumn('test_papers', 'max_marks', 'DOUBLE PRECISION');
+  await ensureColumn('test_papers', 'test_label', 'TEXT');
   await ensureColumn('test_papers', 'paper_type', `TEXT NOT NULL DEFAULT 'general'`);
-  await ensureColumn('test_papers', 'answer_request_id', `INTEGER`);
-  await run(`UPDATE test_papers SET paper_type = COALESCE(NULLIF(paper_type, ''), 'general')`);
+  await ensureColumn('test_papers', 'answer_request_id', 'INTEGER');
+}
 
+async function createAttendanceTable() {
   await run(`
     CREATE TABLE IF NOT EXISTS attendance (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       coaching_id INTEGER,
       student_id INTEGER NOT NULL,
       attendance_date TEXT NOT NULL,
-      status TEXT NOT NULL CHECK(status IN ('present', 'absent', 'late')),
+      status TEXT NOT NULL,
       notes TEXT,
-      marked_by INTEGER NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(coaching_id) REFERENCES coaching_classes(id),
-      FOREIGN KEY(student_id) REFERENCES users(id),
-      FOREIGN KEY(marked_by) REFERENCES users(id)
+      marked_by INTEGER,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  await ensureColumn('attendance', 'coaching_id', `INTEGER`);
 
+  await ensureColumn('attendance', 'coaching_id', 'INTEGER');
+  await ensureColumn('attendance', 'notes', 'TEXT');
+  await ensureColumn('attendance', 'marked_by', 'INTEGER');
+  await ensureColumn('attendance', 'created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
+}
+
+async function createFeesTable() {
   await run(`
     CREATE TABLE IF NOT EXISTS fees (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       coaching_id INTEGER,
       student_id INTEGER NOT NULL,
-      amount REAL NOT NULL,
+      amount DOUBLE PRECISION NOT NULL DEFAULT 0,
       due_date TEXT,
       payment_date TEXT,
-      status TEXT NOT NULL CHECK(status IN ('pending', 'paid', 'overdue')),
+      status TEXT NOT NULL DEFAULT 'pending',
       notes TEXT,
-      added_by INTEGER NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(coaching_id) REFERENCES coaching_classes(id),
-      FOREIGN KEY(student_id) REFERENCES users(id),
-      FOREIGN KEY(added_by) REFERENCES users(id)
+      added_by INTEGER,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  await ensureColumn('fees', 'coaching_id', `INTEGER`);
 
+  await ensureColumn('fees', 'coaching_id', 'INTEGER');
+  await ensureColumn('fees', 'due_date', 'TEXT');
+  await ensureColumn('fees', 'payment_date', 'TEXT');
+  await ensureColumn('fees', 'notes', 'TEXT');
+  await ensureColumn('fees', 'added_by', 'INTEGER');
+  await ensureColumn('fees', 'created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
+}
+
+async function createBatchNotesTable() {
   await run(`
     CREATE TABLE IF NOT EXISTS batch_notes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       coaching_id INTEGER,
-      standard TEXT NOT NULL CHECK(standard IN ('11th', '12th')),
-      course TEXT NOT NULL CHECK(course IN ('jee', 'neet')),
+      batch_id INTEGER,
+      standard TEXT,
+      course TEXT,
       title TEXT NOT NULL,
       resource_url TEXT NOT NULL,
       description TEXT,
-      created_by INTEGER NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(coaching_id) REFERENCES coaching_classes(id),
-      FOREIGN KEY(created_by) REFERENCES users(id)
+      created_by INTEGER,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  await ensureColumn('batch_notes', 'coaching_id', `INTEGER`);
 
+  await ensureColumn('batch_notes', 'coaching_id', 'INTEGER');
+  await ensureColumn('batch_notes', 'batch_id', 'INTEGER');
+  await ensureColumn('batch_notes', 'standard', 'TEXT');
+  await ensureColumn('batch_notes', 'course', 'TEXT');
+  await ensureColumn('batch_notes', 'description', 'TEXT');
+  await ensureColumn('batch_notes', 'created_by', 'INTEGER');
+  await ensureColumn('batch_notes', 'created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
+}
+
+async function createAnswerUploadRequestsTable() {
   await run(`
     CREATE TABLE IF NOT EXISTS answer_upload_requests (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       coaching_id INTEGER NOT NULL,
-      standard TEXT NOT NULL CHECK(standard IN ('11th', '12th')),
-      course TEXT NOT NULL CHECK(course IN ('jee', 'neet')),
+      batch_id INTEGER,
+      standard TEXT,
+      course TEXT,
       title TEXT NOT NULL,
       description TEXT,
       starts_at TEXT NOT NULL,
       ends_at TEXT NOT NULL,
-      created_by INTEGER NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(coaching_id) REFERENCES coaching_classes(id),
-      FOREIGN KEY(created_by) REFERENCES users(id)
+      created_by INTEGER,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  await ensureColumn('answer_upload_requests', 'coaching_id', 'INTEGER');
+  await ensureColumn('answer_upload_requests', 'batch_id', 'INTEGER');
+  await ensureColumn('answer_upload_requests', 'standard', 'TEXT');
+  await ensureColumn('answer_upload_requests', 'course', 'TEXT');
+  await ensureColumn('answer_upload_requests', 'description', 'TEXT');
+  await ensureColumn('answer_upload_requests', 'created_by', 'INTEGER');
+  await ensureColumn('answer_upload_requests', 'created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
 }
 
 async function backfillTenantScopes() {
-  const legacyCoaching = await ensureLegacyCoaching();
+  const legacyUserCount = await get(
+    `SELECT COUNT(*)::int AS total
+     FROM users
+     WHERE COALESCE(is_owner, 0) = 0 AND coaching_id IS NULL`
+  );
 
-  await run(`UPDATE test_papers SET storage_type = COALESCE(NULLIF(storage_type, ''), 'local')`);
-  await run(`UPDATE test_papers SET storage_key = COALESCE(storage_key, stored_name)`);
+  let legacyCoaching = null;
+  if (Number(legacyUserCount?.total || 0) > 0) {
+    legacyCoaching = await ensureLegacyCoaching();
+    await run(`UPDATE users SET coaching_id = ? WHERE COALESCE(is_owner, 0) = 0 AND coaching_id IS NULL`, [legacyCoaching.id]);
+  }
+
+  await run(`UPDATE users SET is_owner = COALESCE(is_owner, 0)`);
+  await run(`UPDATE users SET role = COALESCE(NULLIF(role, ''), 'student')`);
+  await run(`UPDATE users SET name = COALESCE(NULLIF(name, ''), username, roll_no, 'User')`);
+  await run(`UPDATE batches SET normalized_name = COALESCE(NULLIF(normalized_name, ''), LOWER(REGEXP_REPLACE(TRIM(COALESCE(name, '')), '\\s+', ' ', 'g')))`);
+
+  if (!legacyCoaching) {
+    const orphanPapers = await get(`SELECT COUNT(*)::int AS total FROM test_papers WHERE coaching_id IS NULL`);
+    const orphanAttendance = await get(`SELECT COUNT(*)::int AS total FROM attendance WHERE coaching_id IS NULL`);
+    const orphanFees = await get(`SELECT COUNT(*)::int AS total FROM fees WHERE coaching_id IS NULL`);
+    const orphanNotes = await get(`SELECT COUNT(*)::int AS total FROM batch_notes WHERE coaching_id IS NULL`);
+    const orphanRequests = await get(`SELECT COUNT(*)::int AS total FROM answer_upload_requests WHERE coaching_id IS NULL`);
+
+    if (
+      Number(orphanPapers?.total || 0) > 0
+      || Number(orphanAttendance?.total || 0) > 0
+      || Number(orphanFees?.total || 0) > 0
+      || Number(orphanNotes?.total || 0) > 0
+      || Number(orphanRequests?.total || 0) > 0
+    ) {
+      legacyCoaching = await ensureLegacyCoaching();
+    }
+  }
 
   await run(`
-    UPDATE test_papers
-    SET coaching_id = (
-      SELECT coaching_id FROM users WHERE users.id = test_papers.student_id
-    )
-    WHERE coaching_id IS NULL
+    UPDATE test_papers tp
+    SET coaching_id = u.coaching_id
+    FROM users u
+    WHERE tp.student_id = u.id AND tp.coaching_id IS NULL
   `);
 
   await run(`
-    UPDATE attendance
-    SET coaching_id = (
-      SELECT coaching_id FROM users WHERE users.id = attendance.student_id
-    )
-    WHERE coaching_id IS NULL
+    UPDATE attendance a
+    SET coaching_id = u.coaching_id
+    FROM users u
+    WHERE a.student_id = u.id AND a.coaching_id IS NULL
   `);
 
   await run(`
-    UPDATE fees
-    SET coaching_id = (
-      SELECT coaching_id FROM users WHERE users.id = fees.student_id
-    )
-    WHERE coaching_id IS NULL
+    UPDATE fees f
+    SET coaching_id = u.coaching_id
+    FROM users u
+    WHERE f.student_id = u.id AND f.coaching_id IS NULL
   `);
 
-  await run(`
-    UPDATE batch_notes
-    SET coaching_id = COALESCE(
-      (SELECT coaching_id FROM users WHERE users.id = batch_notes.created_by),
-      ?
-    )
-    WHERE coaching_id IS NULL
-  `, [legacyCoaching.id]);
+  if (legacyCoaching) {
+    await run(`UPDATE batches SET coaching_id = ? WHERE coaching_id IS NULL`, [legacyCoaching.id]);
+    await run(`
+      UPDATE batch_notes bn
+      SET coaching_id = COALESCE(
+        (SELECT coaching_id FROM users u WHERE u.id = bn.created_by),
+        ?
+      )
+      WHERE bn.coaching_id IS NULL
+    `, [legacyCoaching.id]);
+
+    await run(`
+      UPDATE answer_upload_requests ar
+      SET coaching_id = COALESCE(
+        (SELECT coaching_id FROM users u WHERE u.id = ar.created_by),
+        ?
+      )
+      WHERE ar.coaching_id IS NULL
+    `, [legacyCoaching.id]);
+  }
+}
+
+async function ensureBatchRow(coachingId, name, standard = null, course = null, createdBy = null) {
+  const normalizedName = normalizeBatchName(name);
+  if (!normalizedName) return null;
+
+  const existing = await get(
+    `SELECT id, standard, course
+     FROM batches
+     WHERE coaching_id = ? AND normalized_name = ?
+     LIMIT 1`,
+    [coachingId, normalizedName]
+  );
+
+  if (existing) {
+    if ((!existing.standard && standard) || (!existing.course && course)) {
+      await run(
+        `UPDATE batches
+         SET standard = COALESCE(standard, ?),
+             course = COALESCE(course, ?)
+         WHERE id = ?`,
+        [standard || null, course || null, existing.id]
+      );
+    }
+    return existing.id;
+  }
+
+  const result = await run(
+    `INSERT INTO batches (coaching_id, name, normalized_name, standard, course, created_by)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [coachingId, name, normalizedName, standard || null, course || null, createdBy || null]
+  );
+
+  return result.lastID;
+}
+
+async function backfillBatchRelations() {
+  const students = await all(
+    `SELECT id, coaching_id, batch_id, standard, course
+     FROM users
+     WHERE role = 'student' AND coaching_id IS NOT NULL`
+  );
+
+  for (const student of students) {
+    if (student.batch_id) continue;
+    const batchName = getLegacyBatchName(student.standard, student.course);
+    if (!batchName) continue;
+    const batchId = await ensureBatchRow(student.coaching_id, batchName, student.standard, student.course, null);
+    await run(`UPDATE users SET batch_id = ? WHERE id = ?`, [batchId, student.id]);
+  }
+
+  const notes = await all(
+    `SELECT id, coaching_id, batch_id, standard, course, created_by
+     FROM batch_notes
+     WHERE coaching_id IS NOT NULL`
+  );
+
+  for (const note of notes) {
+    if (note.batch_id) continue;
+    const batchName = getLegacyBatchName(note.standard, note.course);
+    if (!batchName) continue;
+    const batchId = await ensureBatchRow(note.coaching_id, batchName, note.standard, note.course, note.created_by);
+    await run(`UPDATE batch_notes SET batch_id = ? WHERE id = ?`, [batchId, note.id]);
+  }
+
+  const requests = await all(
+    `SELECT id, coaching_id, batch_id, standard, course, created_by
+     FROM answer_upload_requests
+     WHERE coaching_id IS NOT NULL`
+  );
+
+  for (const request of requests) {
+    if (request.batch_id) continue;
+    const batchName = getLegacyBatchName(request.standard, request.course);
+    if (!batchName) continue;
+    const batchId = await ensureBatchRow(request.coaching_id, batchName, request.standard, request.course, request.created_by);
+    await run(`UPDATE answer_upload_requests SET batch_id = ? WHERE id = ?`, [batchId, request.id]);
+  }
 }
 
 async function ensureIndexes() {
-  await run(`CREATE INDEX IF NOT EXISTS idx_test_papers_storage ON test_papers(storage_type, storage_key)`);
-  await run(`CREATE INDEX IF NOT EXISTS idx_test_papers_coaching_student ON test_papers(coaching_id, student_id, upload_date)`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_subscription_plans_code ON subscription_plans(code)`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_coaching_slug ON coaching_classes(slug)`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_owner_username ON users(username) WHERE is_owner = 1`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_coaching_username ON users(coaching_id, username) WHERE username IS NOT NULL AND is_owner = 0`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_coaching_roll ON users(coaching_id, roll_no) WHERE roll_no IS NOT NULL`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_coaching_name ON batches(coaching_id, normalized_name)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_users_batch ON users(coaching_id, role, batch_id, roll_no)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_test_papers_coaching_student ON test_papers(coaching_id, student_id, upload_date DESC)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_test_papers_answer_request ON test_papers(coaching_id, answer_request_id, student_id, upload_date DESC)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_attendance_student_date ON attendance(coaching_id, student_id, attendance_date)`);
-  await run(`CREATE INDEX IF NOT EXISTS idx_fees_student_created ON fees(coaching_id, student_id, created_at)`);
-  await run(`CREATE INDEX IF NOT EXISTS idx_batch_notes_group ON batch_notes(coaching_id, standard, course, created_at DESC)`);
-  await run(`CREATE INDEX IF NOT EXISTS idx_answer_requests_group_dates ON answer_upload_requests(coaching_id, standard, course, starts_at DESC, ends_at DESC)`);
-  await run(`CREATE INDEX IF NOT EXISTS idx_coaching_slug ON coaching_classes(slug)`);
-  await run(`CREATE INDEX IF NOT EXISTS idx_coaching_subscription_status ON coaching_classes(subscription_status, subscription_plan_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_fees_student_created ON fees(coaching_id, student_id, created_at DESC)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_batch_notes_batch ON batch_notes(coaching_id, batch_id, created_at DESC)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_answer_requests_batch_dates ON answer_upload_requests(coaching_id, batch_id, starts_at DESC, ends_at DESC)`);
 }
 
 async function ensureOwnerAccount(adminUsername, adminPassword, adminForceReset) {
-  const owner = await get(`SELECT id, password_hash FROM users WHERE is_owner = 1 LIMIT 1`);
+  const owner = await get(`SELECT id, username FROM users WHERE is_owner = 1 LIMIT 1`);
   const hash = await bcrypt.hash(adminPassword, 10);
 
   if (!owner) {
     await run(
       `INSERT INTO users (
-        coaching_id, role, is_owner, username, roll_no, name, standard, course, password_hash
-      ) VALUES (NULL, 'admin', 1, ?, NULL, ?, NULL, NULL, ?)`,
+        coaching_id, role, is_owner, username, roll_no, name, batch_id, standard, course, password_hash
+      ) VALUES (NULL, 'admin', 1, ?, NULL, ?, NULL, NULL, NULL, ?)`,
       [adminUsername, 'Owner', hash]
     );
     return;
@@ -514,9 +662,9 @@ async function syncStudentPasswordDisplay() {
   );
 
   for (const student of students) {
-    if (student.password_display || !student.roll_no) continue;
+    if (student.password_display || !student.roll_no || !student.password_hash) continue;
 
-    const matchesRollNo = await bcrypt.compare(student.roll_no, student.password_hash);
+    const matchesRollNo = await bcrypt.compare(student.roll_no, student.password_hash).catch(() => false);
     if (!matchesRollNo) continue;
 
     await run(`UPDATE users SET password_display = ? WHERE id = ?`, [student.roll_no, student.id]);
@@ -524,25 +672,33 @@ async function syncStudentPasswordDisplay() {
 }
 
 async function initDb() {
-  const adminUsername = (process.env.ADMIN_USERNAME || 'kartik001').trim();
+  const adminUsername = (process.env.ADMIN_USERNAME || 'kartiiik001').trim();
   const adminPassword = (process.env.ADMIN_PASSWORD || 'Ga7BU8cZ').trim();
   const adminForceReset = String(process.env.ADMIN_FORCE_RESET || 'true').toLowerCase() === 'true';
 
   await createSubscriptionPlansTable();
   await seedSubscriptionPlans();
   await createCoachingClassesTable();
-  await migrateLegacyUsers(adminUsername);
-  await ensureTenantScopedTables();
+  await createBatchesTable();
+  await createUsersTable();
+  await createTestPapersTable();
+  await createAttendanceTable();
+  await createFeesTable();
+  await createBatchNotesTable();
+  await createAnswerUploadRequestsTable();
   await backfillTenantScopes();
+  await backfillBatchRelations();
   await ensureIndexes();
   await ensureOwnerAccount(adminUsername, adminPassword, adminForceReset);
   await syncStudentPasswordDisplay();
+
+  console.log('PostgreSQL connected and schema ready');
 }
 
 module.exports = {
-  db,
   run,
   get,
   all,
   initDb,
+  withTransaction,
 };
