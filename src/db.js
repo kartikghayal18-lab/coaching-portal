@@ -1,8 +1,12 @@
-const { Pool } = require('pg');
+const { Pool: PgPool } = require('pg');
+const { Pool: NeonPool, neonConfig } = require('@neondatabase/serverless');
+const ws = require('ws');
 const bcrypt = require('bcryptjs');
 require('dotenv').config({ quiet: true });
 
 let pool = null;
+
+neonConfig.webSocketConstructor = ws;
 
 function normalizeDatabaseUrl(rawValue) {
   const value = String(rawValue || '').trim();
@@ -25,8 +29,12 @@ function normalizeDatabaseUrl(rawValue) {
 
 function getPool() {
   if (!pool) {
-    pool = new Pool({
-      connectionString: normalizeDatabaseUrl(process.env.DATABASE_URL),
+    const connectionString = normalizeDatabaseUrl(process.env.DATABASE_URL);
+    const hostname = new URL(connectionString).hostname || '';
+    const PoolImpl = hostname.includes('.neon.tech') ? NeonPool : PgPool;
+
+    pool = new PoolImpl({
+      connectionString,
       max: 10,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 15000,
@@ -172,6 +180,11 @@ async function createSubscriptionPlansTable() {
 }
 
 async function seedSubscriptionPlans() {
+  const existingPlans = await get(`SELECT COUNT(*)::int AS total FROM subscription_plans`);
+  if (Number(existingPlans?.total || 0) > 0) {
+    return;
+  }
+
   const plans = [
     {
       code: 'basic',
@@ -199,13 +212,7 @@ async function seedSubscriptionPlans() {
   for (const plan of plans) {
     await run(
       `INSERT INTO subscription_plans (code, name, price_inr, max_students, description, is_active)
-       VALUES (?, ?, ?, ?, ?, 1)
-       ON CONFLICT (code)
-       DO UPDATE SET
-         name = EXCLUDED.name,
-         price_inr = EXCLUDED.price_inr,
-         max_students = COALESCE(subscription_plans.max_students, EXCLUDED.max_students),
-         description = EXCLUDED.description`,
+       VALUES (?, ?, ?, ?, ?, 1)`,
       [plan.code, plan.name, plan.price, plan.maxStudents, plan.description]
     );
   }
@@ -223,6 +230,8 @@ async function createCoachingClassesTable() {
       theme_background TEXT,
       theme_surface TEXT,
       contact_email TEXT,
+      custom_plan_name TEXT,
+      custom_max_students INTEGER,
       subscription_plan_id INTEGER,
       subscription_status TEXT NOT NULL DEFAULT 'active',
       subscription_started_at TEXT,
@@ -237,6 +246,8 @@ async function createCoachingClassesTable() {
   await ensureColumn('coaching_classes', 'theme_background', 'TEXT');
   await ensureColumn('coaching_classes', 'theme_surface', 'TEXT');
   await ensureColumn('coaching_classes', 'contact_email', 'TEXT');
+  await ensureColumn('coaching_classes', 'custom_plan_name', 'TEXT');
+  await ensureColumn('coaching_classes', 'custom_max_students', 'INTEGER');
   await ensureColumn('coaching_classes', 'subscription_plan_id', 'INTEGER');
   await ensureColumn('coaching_classes', 'subscription_status', `TEXT NOT NULL DEFAULT 'active'`);
   await ensureColumn('coaching_classes', 'subscription_started_at', 'TEXT');
@@ -307,6 +318,12 @@ async function createUsersTable() {
       email TEXT,
       password_hash TEXT NOT NULL,
       password_display TEXT,
+      must_change_password INTEGER NOT NULL DEFAULT 0,
+      password_changed_at TIMESTAMP,
+      terms_accepted_at TIMESTAMP,
+      privacy_accepted_at TIMESTAMP,
+      saas_accepted_at TIMESTAMP,
+      legal_accepted_at TIMESTAMP,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -317,6 +334,12 @@ async function createUsersTable() {
   await ensureColumn('users', 'contact_phone', 'TEXT');
   await ensureColumn('users', 'email', 'TEXT');
   await ensureColumn('users', 'password_display', 'TEXT');
+  await ensureColumn('users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn('users', 'password_changed_at', 'TIMESTAMP');
+  await ensureColumn('users', 'terms_accepted_at', 'TIMESTAMP');
+  await ensureColumn('users', 'privacy_accepted_at', 'TIMESTAMP');
+  await ensureColumn('users', 'saas_accepted_at', 'TIMESTAMP');
+  await ensureColumn('users', 'legal_accepted_at', 'TIMESTAMP');
 }
 
 async function createTestPapersTable() {
@@ -449,6 +472,37 @@ async function createAnswerUploadRequestsTable() {
   await ensureColumn('answer_upload_requests', 'description', 'TEXT');
   await ensureColumn('answer_upload_requests', 'created_by', 'INTEGER');
   await ensureColumn('answer_upload_requests', 'created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
+}
+
+async function createTrialRequestsTable() {
+  await run(`
+    CREATE TABLE IF NOT EXISTS trial_requests (
+      id SERIAL PRIMARY KEY,
+      class_name TEXT NOT NULL,
+      applicant_name TEXT NOT NULL,
+      contact_phone TEXT NOT NULL,
+      email TEXT NOT NULL,
+      whatsapp_number TEXT NOT NULL,
+      logo_url TEXT,
+      student_requirement INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      owner_notes TEXT,
+      reviewed_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await ensureColumn('trial_requests', 'class_name', 'TEXT');
+  await ensureColumn('trial_requests', 'applicant_name', 'TEXT');
+  await ensureColumn('trial_requests', 'contact_phone', 'TEXT');
+  await ensureColumn('trial_requests', 'email', 'TEXT');
+  await ensureColumn('trial_requests', 'whatsapp_number', 'TEXT');
+  await ensureColumn('trial_requests', 'logo_url', 'TEXT');
+  await ensureColumn('trial_requests', 'student_requirement', 'INTEGER');
+  await ensureColumn('trial_requests', 'status', `TEXT NOT NULL DEFAULT 'pending'`);
+  await ensureColumn('trial_requests', 'owner_notes', 'TEXT');
+  await ensureColumn('trial_requests', 'reviewed_at', 'TIMESTAMP');
+  await ensureColumn('trial_requests', 'created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
 }
 
 async function backfillTenantScopes() {
@@ -622,6 +676,8 @@ async function ensureIndexes() {
   await run(`CREATE INDEX IF NOT EXISTS idx_fees_student_created ON fees(coaching_id, student_id, created_at DESC)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_batch_notes_batch ON batch_notes(coaching_id, batch_id, created_at DESC)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_answer_requests_batch_dates ON answer_upload_requests(coaching_id, batch_id, starts_at DESC, ends_at DESC)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_trial_requests_status_created ON trial_requests(status, created_at DESC)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_trial_requests_email_status ON trial_requests(email, status)`);
 }
 
 async function ensureOwnerAccount(adminUsername, adminPassword, adminForceReset) {
@@ -686,6 +742,7 @@ async function initDb() {
   await createFeesTable();
   await createBatchNotesTable();
   await createAnswerUploadRequestsTable();
+  await createTrialRequestsTable();
   await backfillTenantScopes();
   await backfillBatchRelations();
   await ensureIndexes();

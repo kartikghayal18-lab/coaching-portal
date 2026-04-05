@@ -7,27 +7,57 @@
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
 <body>
-  <div class="container small">
-    <div class="card login-hero">
-      <p class="eyebrow">Private Owner Access</p>
-      <h1>Owner Control Room</h1>
-      <p class="muted">Use your owner credentials to manage plans, branding, subscriptions, and coaching tenants.</p>
+  <div class="container wide auth-page">
+    <div class="auth-layout auth-layout--owner">
+      <section class="card auth-panel auth-panel--hero login-hero">
+        <div>
+          <p class="eyebrow">Private Owner Access</p>
+          <h1>Owner Control Room</h1>
+          <p class="muted auth-lead">Manage coachings, seat limits, subscription status, branding, and trial approvals from one control room.</p>
+
+          <div class="hero-chip-row">
+            <span class="info-chip">Tenant Control</span>
+            <span class="info-chip">Branding</span>
+            <span class="info-chip">Subscriptions</span>
+          </div>
+        </div>
+
+        <div class="feature-list">
+          <article class="feature-item">
+            <span class="feature-kicker">Single Source</span>
+            <strong>Create coaching portals, update limits, and keep every tenant isolated on the same platform.</strong>
+          </article>
+          <article class="feature-item">
+            <span class="feature-kicker">Owner Only</span>
+            <strong>This screen is hidden from the standard login flow and is intended for private platform management.</strong>
+          </article>
+        </div>
+      </section>
+
+      <div class="auth-column">
+        <% if (flash) { %>
+          <div class="alert <%= flash.type %>"><%= flash.text %></div>
+        <% } %>
+
+        <form method="post" action="/owner/login" class="card auth-form">
+          <div class="form-title-row">
+            <div>
+              <p class="eyebrow">Owner Login</p>
+              <h2>Secure Sign In</h2>
+            </div>
+          </div>
+
+          <label>Owner Username</label>
+          <input type="text" name="username" placeholder="Enter owner username" required />
+
+          <label>Password</label>
+          <input type="password" name="password" placeholder="Enter owner password" required />
+
+          <button type="submit" class="btn">Login</button>
+          <a href="/login" class="mini-link">Back to coaching login</a>
+        </form>
+      </div>
     </div>
-
-    <% if (flash) { %>
-      <div class="alert <%= flash.type %>"><%= flash.text %></div>
-    <% } %>
-
-    <form method="post" action="/owner/login" class="card">
-      <label>Owner Username</label>
-      <input type="text" name="username" placeholder="Enter owner username" required />
-
-      <label>Password</label>
-      <input type="password" name="password" placeholder="Enter owner password" required />
-
-      <button type="submit" class="btn">Login</button>
-      <a href="/login" class="mini-link">Back to coaching login</a>
-    </form>
   </div>
 </body>
 </html>

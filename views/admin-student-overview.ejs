@@ -8,7 +8,7 @@
 </head>
 <body style="<%= branding?.cssVars || '' %>">
   <div class="container wide">
-    <div class="topbar card">
+    <div class="topbar card hero-card">
       <div class="brand-lockup">
         <% if (branding?.logoUrl) { %>
           <img src="<%= branding.logoUrl %>" alt="<%= branding.brandName %> logo" class="brand-logo" />
@@ -18,6 +18,12 @@
           <h1><%= student?.name || 'Student Overview' %></h1>
           <p class="muted">Roll No: <%= student?.roll_no || '-' %> | Batch: <%= student?.batch_name || ((student?.standard || student?.course) ? `${student?.standard || ''}${student?.standard && student?.course ? ' - ' : ''}${student?.course ? student.course.toUpperCase() : ''}` : '-') %></p>
           <p class="muted">Phone: <%= student?.contact_phone || '-' %> | Email: <%= student?.email || '-' %></p>
+          <div class="hero-chip-row">
+            <span class="info-chip">Papers <strong><%= papers.length %></strong></span>
+            <span class="info-chip">Attendance <strong><%= attendanceSummary.attendancePercent %>%</strong></span>
+            <span class="info-chip">Progress <strong><%= marksSummary.marksPercent %>%</strong></span>
+            <span class="info-chip">Pending Fees <strong><%= feeSummary.pendingCount %></strong></span>
+          </div>
         </div>
       </div>
       <div class="inline-actions">

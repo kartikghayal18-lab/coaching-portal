@@ -8,15 +8,21 @@
 </head>
 <body style="<%= branding?.cssVars || '' %>">
   <div class="container wide">
-    <div class="topbar card">
+    <div class="topbar card hero-card">
       <div class="brand-lockup">
         <% if (branding?.logoUrl) { %>
           <img src="<%= branding.logoUrl %>" alt="<%= branding.brandName %> logo" class="brand-logo" />
         <% } %>
         <div>
-        <p class="eyebrow"><%= branding?.brandName || 'Coaching Management' %></p>
-        <h1>Admin Dashboard</h1>
-        <p class="muted">Welcome, <%= user.name %> | <strong><%= coaching?.name || user.coachingName || '-' %></strong> | Plan: <%= coaching?.plan_name || user.coachingPlan || '-' %></p>
+          <p class="eyebrow"><%= branding?.brandName || 'Coaching Management' %></p>
+          <h1>Admin Dashboard</h1>
+          <p class="muted">Welcome, <%= user.name %> | <strong><%= coaching?.name || user.coachingName || '-' %></strong> | Plan: <%= coaching?.plan_name || user.coachingPlan || '-' %></p>
+          <div class="hero-chip-row">
+            <span class="info-chip">Subscription <strong><%= coaching?.subscription_status || user.coachingSubscriptionStatus || '-' %></strong></span>
+            <span class="info-chip">Storage <strong><%= (storageMode || 'local').toUpperCase() %></strong></span>
+            <span class="info-chip">Batches <strong><%= batches.length %></strong></span>
+            <span class="info-chip">Seats <strong><%= studentUsage.limit === null ? 'Unlimited' : `${studentUsage.count}/${studentUsage.limit}` %></strong></span>
+          </div>
         </div>
       </div>
       <form method="post" action="/logout"><button type="submit" class="btn secondary">Logout</button></form>
@@ -40,6 +46,7 @@
         <a class="sec-btn <%= activeSection === 'fees' ? 'active' : '' %>" href="/admin/dashboard?section=fees">Fees Management</a>
         <a class="sec-btn <%= activeSection === 'papers' ? 'active' : '' %>" href="/admin/dashboard?section=papers">Test Papers</a>
         <a class="sec-btn <%= activeSection === 'notes' ? 'active' : '' %>" href="/admin/dashboard?section=notes">Batch Notes</a>
+        <a class="sec-btn <%= activeSection === 'settings' ? 'active' : '' %>" href="/admin/dashboard?section=settings">Settings</a>
       </section>
     <% } %>
 
@@ -258,16 +265,41 @@
             <button type="submit" class="btn">Create Batch</button>
           </form>
 
+          <form method="post" action="/admin/batches/rename" class="batch-rename-form">
+            <h3>Promote / Rename Batch</h3>
+            <label>Current Batch</label>
+            <select name="batchId" required>
+              <option value="">Select batch</option>
+              <% batches.forEach((batch) => { %>
+                <option value="<%= batch.id %>"><%= batch.name %></option>
+              <% }) %>
+            </select>
+
+            <label>New Batch Name</label>
+            <input type="text" name="newBatchName" placeholder="12th-A, 12th-B, Repeater Batch, MHT-CET" required />
+            <button type="submit" class="btn secondary">Update Batch</button>
+          </form>
+
           <h3 style="margin-top: 20px;">Existing Batches</h3>
           <table>
-            <tr><th>Batch</th><th>Count</th></tr>
+            <tr><th>Batch</th><th>Count</th><th>Action</th></tr>
             <% batchSummaries.forEach((batch) => { %>
               <tr>
                 <td><%= batch.name %></td>
                 <td><%= batch.count %></td>
+                <td>
+                  <% if (batch.id) { %>
+                    <form method="post" action="/admin/batches/<%= batch.id %>/delete" onsubmit="return confirm('Delete batch <%= batch.name %>? Students must be removed from this batch first. Related notes and answer windows for this batch will also be removed.');">
+                      <button type="submit" class="btn danger compact">Delete Batch</button>
+                    </form>
+                  <% } else { %>
+                    <span class="muted">-</span>
+                  <% } %>
+                </td>
               </tr>
             <% }) %>
           </table>
+          <p class="tiny-note">You can delete only an empty batch. If students are still assigned, move or delete those students first.</p>
         </div>
       </section>
 
@@ -574,6 +606,71 @@
               </tr>
             <% }) %>
           </table>
+        </div>
+      </section>
+    <% } %>
+
+    <% if (!subscriptionState.accessBlocked && activeSection === 'settings') { %>
+      <section class="grid two">
+        <div class="card">
+          <h2>Profile & Branding</h2>
+          <p class="muted">Update your admin display name and the portal branding your students see.</p>
+          <form method="post" action="/admin/settings/profile">
+            <label>Admin Display Name</label>
+            <input type="text" name="adminDisplayName" value="<%= user.name || '' %>" required />
+
+            <label>Admin Contact Number</label>
+            <input type="text" name="adminContactPhone" value="<%= adminProfile?.contact_phone || user.contactPhone || '' %>" placeholder="9876543210" />
+
+            <label>Admin Email</label>
+            <input type="email" name="adminEmail" value="<%= adminProfile?.email || user.email || '' %>" placeholder="admin@class.com" />
+
+            <label>Coaching Name</label>
+            <input type="text" name="coachingName" value="<%= coaching?.name || '' %>" required />
+
+            <label>Portal Display Name</label>
+            <input type="text" name="brandName" value="<%= coaching?.brand_name || coaching?.name || '' %>" placeholder="Name shown on login and dashboards" />
+
+            <label>Contact Email</label>
+            <input type="email" name="contactEmail" value="<%= coaching?.contact_email || '' %>" placeholder="class@example.com" />
+
+            <label>Logo URL</label>
+            <input type="url" name="logoUrl" value="<%= coaching?.logo_url || '' %>" placeholder="https://example.com/logo.png" />
+
+            <div class="branding-colors">
+              <div>
+                <label>Theme Primary</label>
+                <input type="text" name="themePrimary" value="<%= coaching?.theme_primary || '#1769aa' %>" placeholder="#1769aa" />
+              </div>
+              <div>
+                <label>Theme Background</label>
+                <input type="text" name="themeBackground" value="<%= coaching?.theme_background || '#f3f6fb' %>" placeholder="#f3f6fb" />
+              </div>
+              <div>
+                <label>Theme Surface</label>
+                <input type="text" name="themeSurface" value="<%= coaching?.theme_surface || '#ffffff' %>" placeholder="#ffffff" />
+              </div>
+            </div>
+
+            <button type="submit" class="btn">Save Settings</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Update Password</h2>
+          <p class="muted">Use your current password here. If this is still your temporary password, enter that as the current password first.</p>
+          <form method="post" action="/admin/settings/password">
+            <label>Current Password</label>
+            <input type="password" name="oldPassword" required />
+
+            <label>New Password</label>
+            <input type="password" name="newPassword" minlength="6" required />
+
+            <label>Confirm New Password</label>
+            <input type="password" name="confirmPassword" minlength="6" required />
+
+            <button type="submit" class="btn">Change Password</button>
+          </form>
         </div>
       </section>
     <% } %>
