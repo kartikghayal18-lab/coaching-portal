@@ -29,7 +29,8 @@
       <div class="inline-actions">
         <a href="/admin/dashboard?section=overview" class="sec-btn">Back to Overview</a>
         <a href="/admin/dashboard?section=students" class="sec-btn">Student List</a>
-        <form method="post" action="/logout"><button type="submit" class="btn secondary compact">Logout</button></form>
+        <form method="post" action="/logout">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="btn secondary compact">Logout</button></form>
       </div>
     </div>
 
@@ -103,6 +104,7 @@
               <a href="/papers/<%= paper.id %>/view" target="_blank" rel="noopener">Open</a>
               <a href="/papers/<%= paper.id %>/download">Download</a>
               <form method="post" action="/papers/<%= paper.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this paper?');">
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                 <input type="hidden" name="redirectTo" value="/admin/students/<%= student.id %>/overview" />
                 <button type="submit" class="btn danger compact">Delete</button>
               </form>

@@ -28,6 +28,7 @@
       <% } %>
       <p class="muted">Student access is paused until the coaching renews the subscription.</p>
       <form method="post" action="/logout">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
         <button type="submit" class="btn">Back to Login</button>
       </form>
     </section>

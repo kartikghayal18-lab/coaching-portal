@@ -138,10 +138,6 @@ async function getSignedPaperUrl(paper, dispositionType) {
   const key = resolveStorageKey(paper);
   if (!key) return null;
 
-  if (paper.public_url && dispositionType === 'inline') {
-    return paper.public_url;
-  }
-
   const command = new GetObjectCommand({
     Bucket: s3Config.bucket,
     Key: key,

@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
@@ -11,6 +12,12 @@ const { initStorage, getStorageMode, uploadPaperFile, getPaperAccess, deleteStor
 const { OTP_TTL_MINUTES, generateOtpCode, getOtpChannelOptions, sendOtpMessage } = require('./otp-service');
 
 const app = express();
+const isProduction = process.env.NODE_ENV === 'production';
+const sessionSecret = String(process.env.SESSION_SECRET || '').trim() || crypto.randomBytes(32).toString('hex');
+const requestAttemptStore = new Map();
+const CAPTCHA_TTL_MS = 10 * 60 * 1000;
+const sessionCookieSecure = isProduction ? 'auto' : false;
+
 function resolvePort(value) {
   const raw = String(value || '').trim();
   if (!raw) return 3000;
@@ -35,6 +42,8 @@ const OWNER_SECTIONS = new Set(['overview', 'coachings', 'trial-requests']);
 const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes', 'settings']);
 const ALLOWED_UPLOAD_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/jpg']);
 const ANSWER_UPLOAD_WINDOW_HOURS = 24;
+const RETENTION_BATCH_NAME = 'Retained Student Records';
+const RETENTION_MAX_STUDENTS_PER_SOURCE_BATCH = 5;
 const DEFAULT_THEME = {
   brand: '#1769aa',
   background: '#f3f6fb',
@@ -53,18 +62,51 @@ const upload = multer({
   },
 });
 
+app.disable('x-powered-by');
+if (isProduction) {
+  app.set('trust proxy', 1);
+}
+
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, '..', 'views'));
 
 app.use(express.urlencoded({ extended: true }));
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || 'coaching-secret-key',
+    name: 'coaching.sid',
+    secret: sessionSecret,
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: 1000 * 60 * 60 * 8 },
+    cookie: {
+      maxAge: 1000 * 60 * 60 * 8,
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: sessionCookieSecure,
+    },
   })
 );
+app.use((req, res, next) => {
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
+app.use((req, res, next) => {
+  if (req.session && !req.session.csrfToken) {
+    req.session.csrfToken = crypto.randomBytes(24).toString('hex');
+  }
+
+  const csrfToken = req.session?.csrfToken || '';
+  res.locals.csrfToken = csrfToken;
+  res.locals.appendCsrfToUrl = (value) => {
+    const target = String(value || '');
+    if (!csrfToken || !target) return target;
+    const separator = target.includes('?') ? '&' : '?';
+    return `${target}${separator}_csrf=${encodeURIComponent(csrfToken)}`;
+  };
+  next();
+});
 app.use('/public', express.static(path.join(__dirname, '..', 'public')));
 
 function renderWithMessage(res, view, data = {}) {
@@ -81,6 +123,222 @@ function buildOtpStatus(sessionOtp = null) {
     expired: remainingMs <= 0,
     remainingSeconds: remainingMs > 0 ? Math.ceil(remainingMs / 1000) : 0,
   };
+}
+
+function timingSafeEqualString(left, right) {
+  const a = String(left || '');
+  const b = String(right || '');
+  if (!a || !b || a.length !== b.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
+
+function issueCaptcha(req, scope) {
+  const left = crypto.randomInt(1, 10);
+  const right = crypto.randomInt(1, 10);
+  const answer = String(left + right);
+  const challenge = {
+    prompt: `${left} + ${right}`,
+    answer,
+    expiresAt: Date.now() + CAPTCHA_TTL_MS,
+  };
+
+  if (!req.session.captchaChallenges) {
+    req.session.captchaChallenges = {};
+  }
+
+  req.session.captchaChallenges[scope] = challenge;
+  return { prompt: challenge.prompt };
+}
+
+function getCaptchaChallenge(req, scope) {
+  const existing = req.session?.captchaChallenges?.[scope];
+  if (existing && existing.expiresAt > Date.now()) {
+    return { prompt: existing.prompt };
+  }
+  return issueCaptcha(req, scope);
+}
+
+function verifyCaptcha(req, scope, answer) {
+  const expected = req.session?.captchaChallenges?.[scope];
+  delete req.session?.captchaChallenges?.[scope];
+  if (!expected || expected.expiresAt <= Date.now()) return false;
+  return timingSafeEqualString(String(answer || '').trim(), String(expected.answer));
+}
+
+function ensureCsrf(req) {
+  const expected = req.session?.csrfToken || '';
+  const received = String(req.body?._csrf || req.query?._csrf || '').trim();
+  return timingSafeEqualString(received, expected);
+}
+
+function getClientAddress(req) {
+  return String(req.headers['x-forwarded-for'] || req.ip || 'unknown')
+    .split(',')[0]
+    .trim()
+    .slice(0, 120);
+}
+
+function enforceRateLimit(req, scope, limit, windowMs) {
+  const now = Date.now();
+  const key = `${scope}:${getClientAddress(req)}`;
+  const entry = requestAttemptStore.get(key);
+
+  if (!entry || entry.resetAt <= now) {
+    requestAttemptStore.set(key, { count: 1, resetAt: now + windowMs });
+    return null;
+  }
+
+  entry.count += 1;
+  if (entry.count > limit) {
+    return Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
+  }
+
+  return null;
+}
+
+function validateAdminPasswordStrength(password) {
+  if (password.length < 8) return 'Password must be at least 8 characters long';
+  if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+    return 'Password must include at least one letter and one number';
+  }
+  return null;
+}
+
+function regenerateSession(req) {
+  return new Promise((resolve, reject) => {
+    req.session.regenerate((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+async function signInUser(req, user, coaching = null) {
+  await regenerateSession(req);
+  req.session.user = buildSessionUser(user, coaching);
+}
+
+async function writeAuditLog({
+  actorId,
+  actorRole,
+  coachingId = null,
+  action,
+  targetType = null,
+  targetId = null,
+  details = null,
+  req = null,
+}) {
+  try {
+    await run(
+      `INSERT INTO audit_logs (
+        coaching_id, actor_user_id, actor_role, action, target_type, target_id, details_json, ip_address, user_agent
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        coachingId,
+        actorId,
+        actorRole,
+        action,
+        targetType,
+        targetId,
+        details ? JSON.stringify(details) : null,
+        req ? getClientAddress(req) : null,
+        req ? String(req.headers['user-agent'] || '').slice(0, 500) : null,
+      ]
+    );
+  } catch (error) {
+    console.error('Failed to write audit log', error);
+  }
+}
+
+async function auditActor(req, action, options = {}) {
+  if (!req.session?.user) return;
+  await writeAuditLog({
+    actorId: req.session.user.id,
+    actorRole: req.session.user.role,
+    coachingId: options.coachingId ?? req.session.user.coachingId ?? null,
+    action,
+    targetType: options.targetType ?? null,
+    targetId: options.targetId ?? null,
+    details: options.details ?? null,
+    req,
+  });
+}
+
+function buildOtpPurposeLabel(purpose) {
+  if (purpose === 'login-2fa') return 'sign in verification';
+  if (purpose === 'forgot-password') return 'password reset';
+  return 'security verification';
+}
+
+function getTwoFactorIdentity(user, coaching = null) {
+  if (user?.is_owner) {
+    return {
+      adminName: user.name || 'Owner',
+      className: 'Owner Control Room',
+      email: user.email || String(process.env.OWNER_2FA_EMAIL || '').trim().toLowerCase() || null,
+      contactPhone: user.contact_phone || String(process.env.OWNER_2FA_PHONE || '').trim() || null,
+    };
+  }
+
+  return {
+    adminName: user?.name || 'Admin',
+    className: coaching?.name || 'Coaching Portal',
+    email: user?.email || null,
+    contactPhone: user?.contact_phone || null,
+  };
+}
+
+async function createPendingTwoFactorLogin(req, user, coaching = null) {
+  const identity = getTwoFactorIdentity(user, coaching);
+  req.session.pendingLogin = {
+    userId: user.id,
+    coachingId: user.coaching_id || null,
+    isOwner: Boolean(user.is_owner),
+    role: user.is_owner ? 'owner' : user.role,
+    coachingName: coaching?.name || null,
+    ...identity,
+  };
+}
+
+async function getPendingTwoFactorContext(req) {
+  const pending = req.session?.pendingLogin;
+  if (!pending?.userId) return null;
+
+  const user = await get(`SELECT * FROM users WHERE id = ? LIMIT 1`, [pending.userId]);
+  if (!user) return null;
+
+  const coaching = pending.coachingId ? await getCoachingContextById(pending.coachingId) : null;
+  return {
+    pending,
+    user,
+    coaching,
+    identity: getTwoFactorIdentity(user, coaching),
+  };
+}
+
+async function finishAuthenticatedLogin(req, res, user, coaching = null) {
+  await signInUser(req, user, coaching);
+
+  if (req.session.user.role === 'admin' && !hasAcceptedAdminLegal(user)) {
+    return res.redirect('/admin/legal');
+  }
+
+  if (req.session.user.role === 'admin' && user.must_change_password) {
+    req.session.user.mustChangePassword = true;
+    return res.redirect('/admin/password/setup');
+  }
+
+  if (!req.session.user.isOwner && coaching) {
+    const subscriptionState = getSubscriptionState(coaching);
+    if (subscriptionState.accessBlocked) {
+      if (req.session.user.role === 'admin') return res.redirect('/admin/dashboard');
+      return res.redirect('/subscription-status');
+    }
+  }
+
+  if (req.session.user.isOwner) return res.redirect('/owner/dashboard');
+  if (req.session.user.role === 'admin') return res.redirect('/admin/dashboard');
+  return res.redirect('/student/dashboard');
 }
 
 function requireAuth(req, res, next) {
@@ -106,6 +364,40 @@ function requireStudent(req, res, next) {
   return next();
 }
 
+app.use((req, res, next) => {
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    return next();
+  }
+
+  const origin = String(req.headers.origin || '').trim();
+  const referer = String(req.headers.referer || '').trim();
+  const host = String(req.headers.host || '').trim();
+
+  if (origin) {
+    try {
+      if (new URL(origin).host !== host) {
+        return res.status(403).send('Invalid request origin');
+      }
+    } catch (error) {
+      return res.status(403).send('Invalid request origin');
+    }
+  } else if (referer) {
+    try {
+      if (new URL(referer).host !== host) {
+        return res.status(403).send('Invalid request origin');
+      }
+    } catch (error) {
+      return res.status(403).send('Invalid request origin');
+    }
+  }
+
+  if (!ensureCsrf(req)) {
+    return res.status(403).send('Invalid security token');
+  }
+
+  return next();
+});
+
 function getOwnerSection(input) {
   const section = (input || '').trim();
   return OWNER_SECTIONS.has(section) ? section : 'overview';
@@ -124,6 +416,14 @@ function formatLegacyBatchLabel(standard, course) {
   if (safeStandard) return safeStandard;
   if (safeCourse) return safeCourse;
   return '';
+}
+
+function formatDaysAgo(value) {
+  if (!value) return null;
+  const diff = Date.now() - new Date(value).getTime();
+  if (!Number.isFinite(diff) || diff < 0) return '0 days';
+  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+  return `${days} day${days === 1 ? '' : 's'}`;
 }
 
 function getBatchLabel(item) {
@@ -158,10 +458,11 @@ function toStudentBatchGroups(students, batches = []) {
     if (!groups.has(key)) {
       groups.set(key, {
         key,
-        label: getBatchLabel(student),
+        label: student.is_retained_record ? `${getBatchLabel(student)} (Retained)` : getBatchLabel(student),
         students: [],
-        order: student.batch_id ? batchOrder.get(String(student.batch_id)) ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER,
+        order: student.is_retained_record ? -1 : (student.batch_id ? batchOrder.get(String(student.batch_id)) ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER),
         isUnassigned: !student.batch_id,
+        isRetained: Boolean(student.is_retained_record),
       });
     }
 
@@ -169,6 +470,7 @@ function toStudentBatchGroups(students, batches = []) {
   });
 
   return Array.from(groups.values()).sort((a, b) => {
+    if (a.isRetained !== b.isRetained) return a.isRetained ? -1 : 1;
     if (a.isUnassigned !== b.isUnassigned) return a.isUnassigned ? 1 : -1;
     if (a.order !== b.order) return a.order - b.order;
     return a.label.localeCompare(b.label, 'en', { numeric: true, sensitivity: 'base' });
@@ -185,6 +487,8 @@ function toBatchSummaries(students, batches = []) {
   const summaries = batches.map((batch) => ({
     ...batch,
     count: counts.get(String(batch.id)) || 0,
+    createdDaysAgo: formatDaysAgo(batch.created_at),
+    completedDaysAgo: formatDaysAgo(batch.completed_at),
   }));
 
   if (counts.get('unassigned')) {
@@ -257,6 +561,27 @@ function isValidHttpUrl(value) {
   }
 }
 
+function normalizeLogoUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase();
+
+    if ((host === 'www.google.com' || host === 'google.com') && url.pathname === '/imgres') {
+      const nestedImageUrl = url.searchParams.get('imgurl');
+      if (nestedImageUrl && isValidHttpUrl(nestedImageUrl)) {
+        return nestedImageUrl.trim();
+      }
+    }
+
+    return raw;
+  } catch {
+    return raw;
+  }
+}
+
 function isValidEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
 }
@@ -277,22 +602,41 @@ function slugify(input) {
 
 async function getBatchesForCoaching(coachingId) {
   return all(
-    `SELECT id, name, normalized_name, standard, course, created_at
+    `SELECT id, name, normalized_name, standard, course, status, completed_at, is_retention_batch, created_at
      FROM batches
      WHERE coaching_id = ?
-     ORDER BY LOWER(name) ASC, id ASC`,
+     ORDER BY is_retention_batch DESC, CASE WHEN status = 'active' THEN 0 ELSE 1 END, LOWER(name) ASC, id ASC`,
     [coachingId]
   );
 }
 
 async function getBatchForCoaching(coachingId, batchId) {
   return get(
-    `SELECT id, coaching_id, name, normalized_name, standard, course
+    `SELECT id, coaching_id, name, normalized_name, standard, course, status, completed_at, is_retention_batch, created_at
      FROM batches
      WHERE coaching_id = ? AND id = ?
      LIMIT 1`,
     [coachingId, batchId]
   );
+}
+
+async function ensureRetentionBatch(coachingId, createdBy = null) {
+  const existing = await get(
+    `SELECT id, coaching_id, name, normalized_name, standard, course, status, completed_at, is_retention_batch, created_at
+     FROM batches
+     WHERE coaching_id = ? AND is_retention_batch = 1
+     LIMIT 1`,
+    [coachingId]
+  );
+  if (existing) return existing;
+
+  const normalizedName = RETENTION_BATCH_NAME.toLowerCase();
+  const result = await run(
+    `INSERT INTO batches (coaching_id, name, normalized_name, standard, course, status, is_retention_batch, created_by)
+     VALUES (?, ?, ?, NULL, NULL, 'active', 1, ?)`,
+    [coachingId, RETENTION_BATCH_NAME, normalizedName, createdBy]
+  );
+  return getBatchForCoaching(coachingId, result.lastID);
 }
 
 function buildPortalUrl(req, slug) {
@@ -437,7 +781,7 @@ function buildBranding(coaching = null) {
   return {
     brandName,
     coachingName: coaching?.name || brandName,
-    logoUrl: String(coaching?.logo_url || '').trim(),
+    logoUrl: normalizeLogoUrl(coaching?.logo_url),
     themePrimary,
     themeBackground,
     themeSurface,
@@ -1029,6 +1373,7 @@ async function renderLoginPage(req, res, flash = null) {
   const coachingHint = (req.query.coaching || req.body?.coachingSlug || '').trim().toLowerCase();
   const coaching = coachingHint ? await getCoachingBySlug(coachingHint) : null;
   const nextFlash = flash || req.session?.flash || null;
+  const captcha = getCaptchaChallenge(req, 'login');
   if (req.session) req.session.flash = null;
 
   return renderWithMessage(res, 'auth-login', {
@@ -1036,15 +1381,50 @@ async function renderLoginPage(req, res, flash = null) {
     coaching,
     coachingHint,
     branding: buildBranding(coaching),
+    captcha,
   });
 }
 
 async function renderOwnerLoginPage(req, res, flash = null) {
   const nextFlash = flash || req.session?.flash || null;
+  const captcha = getCaptchaChallenge(req, 'owner-login');
   if (req.session) req.session.flash = null;
 
   return renderWithMessage(res, 'owner-login', {
     flash: nextFlash,
+    captcha,
+  });
+}
+
+async function renderOwnerForgotPasswordPage(req, res, flash = null) {
+  const nextFlash = flash || req.session?.flash || null;
+  const captcha = getCaptchaChallenge(req, 'owner-forgot-password');
+  if (req.session) req.session.flash = null;
+
+  return renderWithMessage(res, 'owner-forgot-password', {
+    flash: nextFlash,
+    captcha,
+  });
+}
+
+async function renderOwnerResetPasswordPage(req, res, flash = null) {
+  const nextFlash = flash || req.session?.flash || null;
+  if (req.session) req.session.flash = null;
+  const resetRequest = req.session?.ownerResetCandidate || null;
+  const otpChannels = resetRequest
+    ? getOtpChannelOptions({
+      email: resetRequest.email,
+      contactPhone: resetRequest.contactPhone,
+    })
+    : getOtpChannelOptions({});
+  const captcha = getCaptchaChallenge(req, 'owner-reset-password');
+
+  return renderWithMessage(res, 'owner-reset-password', {
+    flash: nextFlash,
+    resetRequest,
+    otpChannels,
+    otpState: buildOtpStatus(req.session?.ownerResetOtp || null),
+    captcha,
   });
 }
 
@@ -1073,11 +1453,13 @@ async function renderAdminPasswordSetupPage(req, res, flash = null) {
 
 async function renderAdminForgotPasswordPage(req, res, flash = null) {
   const nextFlash = flash || req.session?.flash || null;
+  const captcha = getCaptchaChallenge(req, 'admin-forgot-password');
   if (req.session) req.session.flash = null;
 
   return renderWithMessage(res, 'admin-forgot-password', {
     flash: nextFlash,
     branding: buildBranding(null),
+    captcha,
   });
 }
 
@@ -1091,6 +1473,7 @@ async function renderAdminResetPasswordPage(req, res, flash = null) {
       contactPhone: resetRequest.contactPhone,
     })
     : getOtpChannelOptions({});
+  const captcha = getCaptchaChallenge(req, 'admin-reset-password');
 
   return renderWithMessage(res, 'admin-reset-password', {
     flash: nextFlash,
@@ -1098,12 +1481,37 @@ async function renderAdminResetPasswordPage(req, res, flash = null) {
     resetRequest,
     otpChannels,
     otpState: buildOtpStatus(req.session?.adminResetOtp || null),
+    captcha,
+  });
+}
+
+async function renderTwoFactorPage(req, res, flash = null) {
+  const context = await getPendingTwoFactorContext(req);
+  if (!context) {
+    req.session.flash = { type: 'error', text: 'Start login again to continue.' };
+    return res.redirect('/login');
+  }
+
+  const nextFlash = flash || req.session?.flash || null;
+  if (req.session) req.session.flash = null;
+  const otpChannels = getOtpChannelOptions({
+    email: context.identity.email,
+    contactPhone: context.identity.contactPhone,
+  });
+
+  return renderWithMessage(res, 'two-factor', {
+    flash: nextFlash,
+    branding: buildBranding(context.coaching),
+    pendingLogin: context.pending,
+    otpChannels,
+    otpState: buildOtpStatus(req.session?.loginOtp || null),
+    roleLabel: context.pending.isOwner ? 'Owner' : 'Admin',
   });
 }
 
 async function issueAdminOtp(req, { sessionKey, userId, coachingId, adminName, className, email, contactPhone, channel, purpose }) {
   const otpChannels = getOtpChannelOptions({ email, contactPhone });
-  const selected = channel === 'sms' ? otpChannels.sms : otpChannels.email;
+  const selected = otpChannels.email;
 
   if (!selected?.available || !selected.value) {
     throw new Error(selected?.reason || 'Selected OTP channel is not available');
@@ -1311,6 +1719,20 @@ app.get('/admin/forgot-password', async (req, res) => {
 });
 
 app.post('/admin/forgot-password', async (req, res) => {
+  const retryAfter = enforceRateLimit(req, 'admin-forgot-password', 5, 15 * 60 * 1000);
+  if (retryAfter) {
+    res.set('Retry-After', String(retryAfter));
+    req.session.flash = { type: 'error', text: 'Too many reset attempts. Please wait a few minutes and try again.' };
+    return res.redirect('/admin/forgot-password');
+  }
+
+  if (!verifyCaptcha(req, 'admin-forgot-password', req.body.captchaAnswer)) {
+    return renderAdminForgotPasswordPage(req, res, {
+      type: 'error',
+      text: 'Security check failed. Please solve the CAPTCHA again.',
+    });
+  }
+
   const className = (req.body.className || '').trim();
   const adminName = (req.body.adminName || '').trim();
   const contactPhone = (req.body.contactPhone || '').trim();
@@ -1362,6 +1784,18 @@ app.post('/admin/forgot-password', async (req, res) => {
 });
 
 app.post('/admin/reset-password/send-otp', async (req, res) => {
+  const retryAfter = enforceRateLimit(req, 'admin-reset-password-otp', 3, 10 * 60 * 1000);
+  if (retryAfter) {
+    res.set('Retry-After', String(retryAfter));
+    req.session.flash = { type: 'error', text: 'Too many OTP requests. Please wait a few minutes and try again.' };
+    return res.redirect('/admin/reset-password');
+  }
+
+  if (!verifyCaptcha(req, 'admin-reset-password', req.body.captchaAnswer)) {
+    req.session.flash = { type: 'error', text: 'Security check failed. Please solve the CAPTCHA again.' };
+    return res.redirect('/admin/reset-password');
+  }
+
   const candidate = req.session?.adminResetCandidate;
   if (!candidate) {
     req.session.flash = { type: 'error', text: 'Start with the forgot password form first' };
@@ -1379,7 +1813,7 @@ app.post('/admin/reset-password/send-otp', async (req, res) => {
       className: candidate.className,
       email: candidate.email,
       contactPhone: candidate.contactPhone,
-      channel,
+      channel: 'email',
       purpose: 'forgot-password',
     });
 
@@ -1415,6 +1849,13 @@ app.post('/admin/reset-password', async (req, res) => {
   const newPassword = (req.body.newPassword || '').trim();
   const confirmPassword = (req.body.confirmPassword || '').trim();
 
+  if (!verifyCaptcha(req, 'admin-reset-password', req.body.captchaAnswer)) {
+    return renderAdminResetPasswordPage(req, res, {
+      type: 'error',
+      text: 'Security check failed. Please solve the CAPTCHA again.',
+    });
+  }
+
   if (!otpSession || otpSession.userId !== candidate.userId || otpSession.coachingId !== candidate.coachingId) {
     return renderAdminResetPasswordPage(req, res, {
       type: 'error',
@@ -1437,10 +1878,11 @@ app.post('/admin/reset-password', async (req, res) => {
     });
   }
 
-  if (newPassword.length < 6) {
+  const passwordError = validateAdminPasswordStrength(newPassword);
+  if (passwordError) {
     return renderAdminResetPasswordPage(req, res, {
       type: 'error',
-      text: 'New password must be at least 6 characters long',
+      text: passwordError,
     });
   }
 
@@ -1476,7 +1918,199 @@ app.get('/owner/login', async (req, res) => {
   return renderOwnerLoginPage(req, res);
 });
 
+app.get('/owner/forgot-password', async (req, res) => {
+  if (req.session.user?.isOwner) return res.redirect('/owner/dashboard');
+  if (req.session.user) return res.redirect('/');
+  return renderOwnerForgotPasswordPage(req, res);
+});
+
+app.post('/owner/forgot-password', async (req, res) => {
+  const retryAfter = enforceRateLimit(req, 'owner-forgot-password', 5, 15 * 60 * 1000);
+  if (retryAfter) {
+    res.set('Retry-After', String(retryAfter));
+    req.session.flash = { type: 'error', text: 'Too many reset attempts. Please wait a few minutes and try again.' };
+    return res.redirect('/owner/forgot-password');
+  }
+
+  if (!verifyCaptcha(req, 'owner-forgot-password', req.body.captchaAnswer)) {
+    return renderOwnerForgotPasswordPage(req, res, {
+      type: 'error',
+      text: 'Security check failed. Please solve the CAPTCHA again.',
+    });
+  }
+
+  const username = String(req.body.username || '').trim();
+  const email = String(req.body.email || '').trim().toLowerCase();
+
+  if (!username || !email) {
+    return renderOwnerForgotPasswordPage(req, res, {
+      type: 'error',
+      text: 'Owner username and email are required.',
+    });
+  }
+
+  const owner = await get(`SELECT * FROM users WHERE is_owner = 1 AND username = ? LIMIT 1`, [username]);
+  if (!owner) {
+    return renderOwnerForgotPasswordPage(req, res, {
+      type: 'error',
+      text: 'Owner account not found.',
+    });
+  }
+
+  const identity = getTwoFactorIdentity(owner, null);
+  if (String(identity.email || '').toLowerCase() !== email) {
+    return renderOwnerForgotPasswordPage(req, res, {
+      type: 'error',
+      text: 'Email does not match the owner recovery email.',
+    });
+  }
+
+  req.session.ownerResetCandidate = {
+    userId: owner.id,
+    username: owner.username,
+    email: identity.email,
+    contactPhone: identity.contactPhone,
+    ownerName: owner.name || 'Owner',
+    issuedAt: new Date().toISOString(),
+  };
+  delete req.session.ownerResetOtp;
+
+  return res.redirect('/owner/reset-password');
+});
+
+app.get('/owner/reset-password', async (req, res) => {
+  if (!req.session?.ownerResetCandidate) {
+    req.session.flash = { type: 'error', text: 'Start with the owner forgot password form first.' };
+    return res.redirect('/owner/forgot-password');
+  }
+
+  return renderOwnerResetPasswordPage(req, res);
+});
+
+app.post('/owner/reset-password/send-otp', async (req, res) => {
+  const retryAfter = enforceRateLimit(req, 'owner-reset-password-otp', 3, 10 * 60 * 1000);
+  if (retryAfter) {
+    res.set('Retry-After', String(retryAfter));
+    req.session.flash = { type: 'error', text: 'Too many OTP requests. Please wait a few minutes and try again.' };
+    return res.redirect('/owner/reset-password');
+  }
+
+  if (!verifyCaptcha(req, 'owner-reset-password', req.body.captchaAnswer)) {
+    req.session.flash = { type: 'error', text: 'Security check failed. Please solve the CAPTCHA again.' };
+    return res.redirect('/owner/reset-password');
+  }
+
+  const candidate = req.session?.ownerResetCandidate;
+  if (!candidate) {
+    req.session.flash = { type: 'error', text: 'Start with the owner forgot password form first.' };
+    return res.redirect('/owner/forgot-password');
+  }
+
+  try {
+    const otp = await issueAdminOtp(req, {
+      sessionKey: 'ownerResetOtp',
+      userId: candidate.userId,
+      coachingId: 0,
+      adminName: candidate.ownerName,
+      className: 'Owner Control Room',
+      email: candidate.email,
+      contactPhone: candidate.contactPhone,
+      channel: 'email',
+      purpose: 'forgot-password',
+    });
+
+    req.session.flash = {
+      type: 'success',
+      text: `OTP sent to ${otp.destinationMasked}. It is valid for ${OTP_TTL_MINUTES} minutes.`,
+    };
+  } catch (error) {
+    req.session.flash = { type: 'error', text: error.message || 'Failed to send OTP' };
+  }
+
+  return res.redirect('/owner/reset-password');
+});
+
+app.post('/owner/reset-password', async (req, res) => {
+  const candidate = req.session?.ownerResetCandidate;
+  const otpSession = buildOtpStatus(req.session?.ownerResetOtp || null);
+
+  if (!candidate) {
+    req.session.flash = { type: 'error', text: 'Start with the owner forgot password form first.' };
+    return res.redirect('/owner/forgot-password');
+  }
+
+  if (!verifyCaptcha(req, 'owner-reset-password', req.body.captchaAnswer)) {
+    return renderOwnerResetPasswordPage(req, res, {
+      type: 'error',
+      text: 'Security check failed. Please solve the CAPTCHA again.',
+    });
+  }
+
+  const otp = String(req.body.otp || '').trim();
+  const newPassword = String(req.body.newPassword || '').trim();
+  const confirmPassword = String(req.body.confirmPassword || '').trim();
+
+  if (!otpSession || otpSession.userId !== candidate.userId) {
+    return renderOwnerResetPasswordPage(req, res, {
+      type: 'error',
+      text: 'Request an OTP first to continue.',
+    });
+  }
+
+  if (otpSession.expired) {
+    delete req.session.ownerResetOtp;
+    return renderOwnerResetPasswordPage(req, res, {
+      type: 'error',
+      text: 'OTP expired. Request a new OTP and try again.',
+    });
+  }
+
+  if (!timingSafeEqualString(otp, otpSession.code)) {
+    return renderOwnerResetPasswordPage(req, res, {
+      type: 'error',
+      text: 'Invalid OTP entered.',
+    });
+  }
+
+  const passwordError = validateAdminPasswordStrength(newPassword);
+  if (passwordError) {
+    return renderOwnerResetPasswordPage(req, res, {
+      type: 'error',
+      text: passwordError,
+    });
+  }
+
+  if (newPassword !== confirmPassword) {
+    return renderOwnerResetPasswordPage(req, res, {
+      type: 'error',
+      text: 'New password and confirm password must match.',
+    });
+  }
+
+  const passwordHash = await bcrypt.hash(newPassword, 10);
+  await run(
+    `UPDATE users
+     SET password_hash = ?, password_changed_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND is_owner = 1`,
+    [passwordHash, candidate.userId]
+  );
+
+  delete req.session.ownerResetCandidate;
+  delete req.session.ownerResetOtp;
+  req.session.flash = { type: 'success', text: 'Owner password reset successful. You can now sign in.' };
+  return res.redirect('/owner/login');
+});
+
 app.post('/login', async (req, res) => {
+  const retryAfter = enforceRateLimit(req, 'login', 10, 15 * 60 * 1000);
+  if (retryAfter) {
+    res.set('Retry-After', String(retryAfter));
+    return renderLoginPage(req, res, {
+      type: 'error',
+      text: 'Too many login attempts. Please wait a few minutes and try again.',
+    });
+  }
+
   const role = (req.body.role || '').trim();
   const username = (req.body.username || '').trim();
   const submittedPassword = req.body.password || '';
@@ -1485,6 +2119,13 @@ app.post('/login', async (req, res) => {
       ? username
       : submittedPassword;
   const coachingSlug = (req.body.coachingSlug || '').trim().toLowerCase();
+
+  if (!verifyCaptcha(req, 'login', req.body.captchaAnswer)) {
+    return renderLoginPage(req, res, {
+      type: 'error',
+      text: 'Security check failed. Please solve the CAPTCHA again.',
+    });
+  }
 
   let user = null;
   let coaching = null;
@@ -1526,28 +2167,24 @@ app.post('/login', async (req, res) => {
     return renderLoginPage(req, res, { type: 'error', text: 'Invalid credentials' });
   }
 
-  req.session.user = buildSessionUser(user, coaching);
-
-  if (req.session.user.role === 'admin' && !hasAcceptedAdminLegal(user)) {
-    return res.redirect('/admin/legal');
-  }
-
-  if (req.session.user.role === 'admin' && user.must_change_password) {
-    req.session.user.mustChangePassword = true;
-    return res.redirect('/admin/password/setup');
-  }
-
-  if (!req.session.user.isOwner && coaching) {
-    const subscriptionState = getSubscriptionState(coaching);
-    if (subscriptionState.accessBlocked) {
-      if (req.session.user.role === 'admin') return res.redirect('/admin/dashboard');
-      return res.redirect('/subscription-status');
+  if (role === 'admin') {
+    const identity = getTwoFactorIdentity(user, coaching);
+    const otpChannels = getOtpChannelOptions({
+      email: identity.email,
+      contactPhone: identity.contactPhone,
+    });
+    if (!otpChannels.email.available) {
+      return renderLoginPage(req, res, {
+        type: 'error',
+        text: 'Two-factor login is not configured for this admin account yet. Add admin email and configure SMTP first.',
+      });
     }
+    await createPendingTwoFactorLogin(req, user, coaching);
+    delete req.session.loginOtp;
+    return res.redirect('/auth/2fa');
   }
 
-  if (req.session.user.isOwner) return res.redirect('/owner/dashboard');
-  if (req.session.user.role === 'admin') return res.redirect('/admin/dashboard');
-  return res.redirect('/student/dashboard');
+  return finishAuthenticatedLogin(req, res, user, coaching);
 });
 
 app.post('/trial/apply', async (req, res) => {
@@ -1556,7 +2193,7 @@ app.post('/trial/apply', async (req, res) => {
   const contactPhone = (req.body.contactPhone || '').trim();
   const email = (req.body.email || '').trim().toLowerCase();
   const whatsappNumber = (req.body.whatsappNumber || '').trim();
-  const logoUrl = (req.body.logoUrl || '').trim();
+  const logoUrl = normalizeLogoUrl(req.body.logoUrl);
   const studentRequirement = Number.parseInt(String(req.body.studentRequirement || '').trim(), 10);
 
   if (!className || !applicantName || !contactPhone || !email || !whatsappNumber) {
@@ -1605,8 +2242,24 @@ app.post('/trial/apply', async (req, res) => {
 });
 
 app.post('/owner/login', async (req, res) => {
+  const retryAfter = enforceRateLimit(req, 'owner-login', 8, 15 * 60 * 1000);
+  if (retryAfter) {
+    res.set('Retry-After', String(retryAfter));
+    return renderOwnerLoginPage(req, res, {
+      type: 'error',
+      text: 'Too many login attempts. Please wait a few minutes and try again.',
+    });
+  }
+
   const username = (req.body.username || '').trim();
   const password = req.body.password || '';
+
+  if (!verifyCaptcha(req, 'owner-login', req.body.captchaAnswer)) {
+    return renderOwnerLoginPage(req, res, {
+      type: 'error',
+      text: 'Security check failed. Please solve the CAPTCHA again.',
+    });
+  }
 
   const user = await get(
     `SELECT * FROM users WHERE is_owner = 1 AND username = ? LIMIT 1`,
@@ -1622,8 +2275,112 @@ app.post('/owner/login', async (req, res) => {
     return renderOwnerLoginPage(req, res, { type: 'error', text: 'Invalid owner credentials' });
   }
 
-  req.session.user = buildSessionUser(user);
-  return res.redirect('/owner/dashboard');
+  const identity = getTwoFactorIdentity(user, null);
+  const otpChannels = getOtpChannelOptions({
+    email: identity.email,
+    contactPhone: identity.contactPhone,
+  });
+  if (!otpChannels.email.available) {
+    return renderOwnerLoginPage(req, res, {
+      type: 'error',
+      text: 'Two-factor login is not configured for the owner account yet. Add OWNER_2FA_EMAIL and configure SMTP first.',
+    });
+  }
+
+  await createPendingTwoFactorLogin(req, user, null);
+  delete req.session.loginOtp;
+  return res.redirect('/auth/2fa');
+});
+
+app.get('/auth/2fa', async (req, res) => {
+  return renderTwoFactorPage(req, res);
+});
+
+app.post('/auth/2fa/send-otp', async (req, res) => {
+  const retryAfter = enforceRateLimit(req, 'auth-2fa-send-otp', 3, 10 * 60 * 1000);
+  if (retryAfter) {
+    res.set('Retry-After', String(retryAfter));
+    req.session.flash = { type: 'error', text: 'Too many OTP requests. Please wait a few minutes and try again.' };
+    return res.redirect('/auth/2fa');
+  }
+
+  const context = await getPendingTwoFactorContext(req);
+  if (!context) {
+    req.session.flash = { type: 'error', text: 'Start login again to continue.' };
+    return res.redirect('/login');
+  }
+
+  try {
+    const otp = await issueAdminOtp(req, {
+      sessionKey: 'loginOtp',
+      userId: context.user.id,
+      coachingId: context.user.coaching_id || 0,
+      adminName: context.identity.adminName,
+      className: context.identity.className,
+      email: context.identity.email,
+      contactPhone: context.identity.contactPhone,
+      channel: 'email',
+      purpose: 'login-2fa',
+    });
+
+    req.session.flash = {
+      type: 'success',
+      text: `Verification code sent to ${otp.destinationMasked}. It is valid for ${OTP_TTL_MINUTES} minutes.`,
+    };
+  } catch (error) {
+    req.session.flash = { type: 'error', text: error.message || 'Failed to send verification code' };
+  }
+
+  return res.redirect('/auth/2fa');
+});
+
+app.post('/auth/2fa/verify', async (req, res) => {
+  const retryAfter = enforceRateLimit(req, 'auth-2fa-verify', 8, 15 * 60 * 1000);
+  if (retryAfter) {
+    res.set('Retry-After', String(retryAfter));
+    req.session.flash = { type: 'error', text: 'Too many verification attempts. Please wait a few minutes and try again.' };
+    return res.redirect('/auth/2fa');
+  }
+
+  const context = await getPendingTwoFactorContext(req);
+  const otpSession = buildOtpStatus(req.session?.loginOtp || null);
+  const code = String(req.body.otp || '').trim();
+
+  if (!context) {
+    req.session.flash = { type: 'error', text: 'Start login again to continue.' };
+    return res.redirect('/login');
+  }
+
+  if (!otpSession || otpSession.userId !== context.user.id) {
+    req.session.flash = { type: 'error', text: 'Request a verification code first.' };
+    return res.redirect('/auth/2fa');
+  }
+
+  if (otpSession.expired) {
+    delete req.session.loginOtp;
+    req.session.flash = { type: 'error', text: 'Verification code expired. Request a new one.' };
+    return res.redirect('/auth/2fa');
+  }
+
+  if (!timingSafeEqualString(code, otpSession.code)) {
+    req.session.flash = { type: 'error', text: 'Invalid verification code.' };
+    return res.redirect('/auth/2fa');
+  }
+
+  const coaching = context.user.coaching_id ? await getCoachingContextById(context.user.coaching_id) : null;
+  delete req.session.pendingLogin;
+  delete req.session.loginOtp;
+  await writeAuditLog({
+    actorId: context.user.id,
+    actorRole: context.pending.isOwner ? 'owner' : context.user.role,
+    coachingId: context.user.coaching_id || null,
+    action: 'two_factor_login_verified',
+    targetType: context.pending.isOwner ? 'owner' : 'admin',
+    targetId: context.user.id,
+    details: { channel: otpSession.channel },
+    req,
+  });
+  return finishAuthenticatedLogin(req, res, context.user, coaching);
 });
 
 app.post('/logout', (req, res) => {
@@ -1687,6 +2444,10 @@ app.post('/admin/legal/accept', requireCoachingAdmin, async (req, res) => {
   );
 
   req.session.user.legalAcceptedAt = new Date().toISOString();
+  await auditActor(req, 'admin_legal_accepted', {
+    targetType: 'coaching',
+    targetId: req.session.user.coachingId,
+  });
   req.session.flash = { type: 'success', text: 'Agreement accepted. Welcome to your dashboard.' };
   return res.redirect('/admin/dashboard');
 });
@@ -1731,8 +2492,9 @@ app.post('/admin/password/setup/save', requireCoachingAdmin, async (req, res) =>
     return renderAdminPasswordSetupPage(req, res, { type: 'error', text: 'Old password is incorrect' });
   }
 
-  if (newPassword.length < 6) {
-    return renderAdminPasswordSetupPage(req, res, { type: 'error', text: 'New password must be at least 6 characters long' });
+  const passwordError = validateAdminPasswordStrength(newPassword);
+  if (passwordError) {
+    return renderAdminPasswordSetupPage(req, res, { type: 'error', text: passwordError });
   }
 
   if (newPassword !== confirmPassword) {
@@ -1748,6 +2510,7 @@ app.post('/admin/password/setup/save', requireCoachingAdmin, async (req, res) =>
   );
 
   req.session.user.mustChangePassword = false;
+  await auditActor(req, 'admin_password_setup_completed');
   req.session.flash = { type: 'success', text: 'Password updated successfully.' };
   return res.redirect('/admin/dashboard');
 });
@@ -1776,8 +2539,9 @@ app.post('/admin/settings/password', requireCoachingAdmin, async (req, res) => {
     return res.redirect('/admin/dashboard?section=settings');
   }
 
-  if (newPassword.length < 6) {
-    req.session.flash = { type: 'error', text: 'New password must be at least 6 characters long' };
+  const passwordError = validateAdminPasswordStrength(newPassword);
+  if (passwordError) {
+    req.session.flash = { type: 'error', text: passwordError };
     return res.redirect('/admin/dashboard?section=settings');
   }
 
@@ -1795,94 +2559,8 @@ app.post('/admin/settings/password', requireCoachingAdmin, async (req, res) => {
   );
 
   req.session.user.mustChangePassword = false;
+  await auditActor(req, 'admin_password_changed');
   req.session.flash = { type: 'success', text: 'Admin password updated successfully.' };
-  return res.redirect('/admin/dashboard?section=settings');
-});
-
-app.post('/admin/settings/password/send-otp', requireCoachingAdmin, async (req, res) => {
-  const admin = await get(
-    `SELECT u.id, u.coaching_id, u.name, u.contact_phone, u.email, cc.name AS class_name
-     FROM users u
-     JOIN coaching_classes cc ON cc.id = u.coaching_id
-     WHERE u.id = ? AND u.coaching_id = ? AND u.role = 'admin'
-     LIMIT 1`,
-    [req.session.user.id, req.session.user.coachingId]
-  );
-
-  if (!admin) {
-    req.session.flash = { type: 'error', text: 'Admin account not found' };
-    return res.redirect('/logout');
-  }
-
-  const channel = String(req.body.channel || '').trim() === 'sms' ? 'sms' : 'email';
-
-  try {
-    const otp = await issueAdminOtp(req, {
-      sessionKey: 'adminSettingsOtp',
-      userId: admin.id,
-      coachingId: admin.coaching_id,
-      adminName: admin.name,
-      className: admin.class_name,
-      email: admin.email,
-      contactPhone: admin.contact_phone,
-      channel,
-      purpose: 'settings-password-change',
-    });
-
-    req.session.flash = {
-      type: 'success',
-      text: `OTP sent to ${otp.destinationMasked}. It is valid for ${OTP_TTL_MINUTES} minutes.`,
-    };
-  } catch (error) {
-    req.session.flash = { type: 'error', text: error.message || 'Failed to send OTP' };
-  }
-
-  return res.redirect('/admin/dashboard?section=settings');
-});
-
-app.post('/admin/settings/password/otp', requireCoachingAdmin, async (req, res) => {
-  const otp = (req.body.otp || '').trim();
-  const newPassword = (req.body.newPassword || '').trim();
-  const confirmPassword = (req.body.confirmPassword || '').trim();
-  const otpSession = buildOtpStatus(req.session?.adminSettingsOtp || null);
-
-  if (!otpSession || otpSession.userId !== req.session.user.id || otpSession.coachingId !== req.session.user.coachingId) {
-    req.session.flash = { type: 'error', text: 'Request an OTP first to use OTP password change' };
-    return res.redirect('/admin/dashboard?section=settings');
-  }
-
-  if (otpSession.expired) {
-    delete req.session.adminSettingsOtp;
-    req.session.flash = { type: 'error', text: 'OTP expired. Request a fresh OTP and try again.' };
-    return res.redirect('/admin/dashboard?section=settings');
-  }
-
-  if (!otp || otp !== otpSession.code) {
-    req.session.flash = { type: 'error', text: 'Invalid OTP entered' };
-    return res.redirect('/admin/dashboard?section=settings');
-  }
-
-  if (newPassword.length < 6) {
-    req.session.flash = { type: 'error', text: 'New password must be at least 6 characters long' };
-    return res.redirect('/admin/dashboard?section=settings');
-  }
-
-  if (newPassword !== confirmPassword) {
-    req.session.flash = { type: 'error', text: 'New password and confirm password must match' };
-    return res.redirect('/admin/dashboard?section=settings');
-  }
-
-  const passwordHash = await bcrypt.hash(newPassword, 10);
-  await run(
-    `UPDATE users
-     SET password_hash = ?, must_change_password = 0, password_changed_at = CURRENT_TIMESTAMP
-     WHERE id = ? AND coaching_id = ? AND role = 'admin'`,
-    [passwordHash, req.session.user.id, req.session.user.coachingId]
-  );
-
-  delete req.session.adminSettingsOtp;
-  req.session.user.mustChangePassword = false;
-  req.session.flash = { type: 'success', text: 'Admin password updated successfully with OTP.' };
   return res.redirect('/admin/dashboard?section=settings');
 });
 
@@ -1894,7 +2572,7 @@ app.post('/admin/settings/profile', requireCoachingAdmin, async (req, res) => {
   const coachingName = (req.body.coachingName || '').trim();
   const brandName = (req.body.brandName || '').trim() || coachingName;
   const contactEmail = (req.body.contactEmail || '').trim().toLowerCase();
-  const logoUrl = (req.body.logoUrl || '').trim();
+  const logoUrl = normalizeLogoUrl(req.body.logoUrl);
   const themePrimary = normalizeHexColor(req.body.themePrimary, DEFAULT_THEME.brand);
   const themeBackground = normalizeHexColor(req.body.themeBackground, DEFAULT_THEME.background);
   const themeSurface = normalizeHexColor(req.body.themeSurface, DEFAULT_THEME.surface);
@@ -1943,6 +2621,16 @@ app.post('/admin/settings/profile', requireCoachingAdmin, async (req, res) => {
   req.session.user.name = adminDisplayName;
   req.session.user.contactPhone = adminContactPhone || null;
   req.session.user.email = adminEmail || null;
+  await auditActor(req, 'admin_profile_updated', {
+    targetType: 'coaching',
+    targetId: coachingId,
+    details: {
+      coachingName,
+      brandName,
+      adminEmail: adminEmail || null,
+      contactEmail: contactEmail || null,
+    },
+  });
   req.session.user.coachingName = coachingName;
   req.session.flash = { type: 'success', text: 'Settings updated successfully.' };
   return res.redirect('/admin/dashboard?section=settings');
@@ -1979,7 +2667,19 @@ app.get('/owner/dashboard', requireOwner, async (req, res) => {
        (
          SELECT COUNT(*) FROM users u
          WHERE u.coaching_id = cc.id AND u.role = 'student'
-       ) AS student_count
+       ) AS student_count,
+       (
+         SELECT COUNT(*) FROM batches b
+         WHERE b.coaching_id = cc.id AND COALESCE(b.status, 'active') = 'active' AND COALESCE(b.is_retention_batch, 0) = 0
+       ) AS active_batch_count,
+       (
+         SELECT COUNT(*) FROM batches b
+         WHERE b.coaching_id = cc.id AND COALESCE(b.status, 'active') = 'completed' AND COALESCE(b.is_retention_batch, 0) = 0
+       ) AS completed_batch_count,
+       (
+         SELECT MIN(b.created_at) FROM batches b
+         WHERE b.coaching_id = cc.id AND COALESCE(b.is_retention_batch, 0) = 0
+       ) AS oldest_batch_created_at
      FROM coaching_classes cc
      LEFT JOIN subscription_plans sp ON sp.id = cc.subscription_plan_id
      LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.role = 'admin' AND admin.is_owner = 0
@@ -2033,6 +2733,9 @@ app.get('/owner/dashboard', requireOwner, async (req, res) => {
       portal_url: buildPortalUrl(req, coaching.slug),
       subscriptionState: getSubscriptionState(coaching),
       studentUsage: getStudentUsage(Number(coaching.student_count || 0), coaching),
+      activeBatchCount: Number(coaching.active_batch_count || 0),
+      completedBatchCount: Number(coaching.completed_batch_count || 0),
+      oldestBatchAge: formatDaysAgo(coaching.oldest_batch_created_at),
     })),
     stats: {
       totalCoachings: Number(totals?.total_coachings || 0),
@@ -2205,6 +2908,11 @@ app.post('/owner/coachings', requireOwner, async (req, res) => {
     type: 'success',
     text: `Coaching created. Portal URL: ${slug}`,
   };
+  await auditActor(req, 'owner_coaching_created', {
+    targetType: 'coaching',
+    targetId: coachingId,
+    details: { slug, adminUsername, planName, maxStudents, subscriptionStatus },
+  });
   return res.redirect('/owner/dashboard?section=coachings');
 });
 
@@ -2239,6 +2947,11 @@ app.post('/owner/coachings/:id/subscription', requireOwner, async (req, res) => 
     [planName, maxStudents, subscriptionStatus, subscriptionStartedAt, subscriptionEndsAt, coachingId]
   );
 
+  await auditActor(req, 'owner_coaching_subscription_updated', {
+    targetType: 'coaching',
+    targetId: coachingId,
+    details: { planName, maxStudents, subscriptionStatus, subscriptionStartedAt, subscriptionEndsAt },
+  });
   req.session.flash = { type: 'success', text: 'Coaching access and plan settings updated' };
   return res.redirect('/owner/dashboard?section=coachings');
 });
@@ -2253,7 +2966,7 @@ app.post('/owner/coachings/:id/branding', requireOwner, async (req, res) => {
 
   const name = (req.body.name || '').trim();
   const brandName = (req.body.brandName || '').trim() || name;
-  const logoUrl = (req.body.logoUrl || '').trim();
+  const logoUrl = normalizeLogoUrl(req.body.logoUrl);
   const contactEmail = (req.body.contactEmail || '').trim();
   const adminName = (req.body.adminName || '').trim();
   const adminContactPhone = (req.body.adminContactPhone || '').trim();
@@ -2295,6 +3008,11 @@ app.post('/owner/coachings/:id/branding', requireOwner, async (req, res) => {
     );
   });
 
+  await auditActor(req, 'owner_coaching_branding_updated', {
+    targetType: 'coaching',
+    targetId: coachingId,
+    details: { name, brandName, contactEmail: contactEmail || null, adminEmail: adminEmail || null },
+  });
   req.session.flash = { type: 'success', text: 'Branding and tuition owner details updated' };
   return res.redirect('/owner/dashboard?section=coachings');
 });
@@ -2309,6 +3027,11 @@ app.post('/owner/coachings/:id/delete', requireOwner, async (req, res) => {
 
   await deleteCoachingData(coachingId);
 
+  await auditActor(req, 'owner_coaching_deleted', {
+    targetType: 'coaching',
+    targetId: coachingId,
+    details: { coachingName: coaching.name },
+  });
   req.session.flash = {
     type: 'success',
     text: `${coaching.name} deleted permanently with all students, notes, papers, attendance, and fees data.`,
@@ -2344,6 +3067,11 @@ app.post('/owner/trial-requests/:id/review', requireOwner, async (req, res) => {
     [status, ownerNotes || null, trialRequestId]
   );
 
+  await auditActor(req, 'owner_trial_request_reviewed', {
+    targetType: 'trial_request',
+    targetId: trialRequestId,
+    details: { status, className: trialRequest.class_name },
+  });
   req.session.flash = {
     type: 'success',
     text: `Trial request for ${trialRequest.class_name} marked as ${status}. You can now contact them manually with login details.`,
@@ -2367,8 +3095,9 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const batches = await getBatchesForCoaching(coachingId);
 
   const students = await all(
-    `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course, u.contact_phone, u.email, u.password_display, u.created_at,
-            b.name AS batch_name
+    `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course, u.contact_phone, u.email, u.created_at,
+            u.is_retained_record, u.retention_source_batch_id,
+            b.name AS batch_name, b.status AS batch_status, b.completed_at AS batch_completed_at, b.is_retention_batch
      FROM users u
      LEFT JOIN batches b ON b.id = u.batch_id
      WHERE u.role = 'student' AND u.coaching_id = ?
@@ -2524,23 +3253,34 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     activeAnswerRequests: answerRequestSummaries.filter((item) => item.state.isActive).length,
   };
   const studentUsage = getStudentUsage(students.length, coaching);
+  const batchSummaries = toBatchSummaries(students, batches);
+  const studentBatchGroups = toStudentBatchGroups(students, batches);
+  const completedBatches = batches.filter((batch) => batch.status === 'completed' && !batch.is_retention_batch).map((batch) => ({
+    ...batch,
+    studentCount: students.filter((student) => Number(student.batch_id) === Number(batch.id) && !student.is_retained_record).length,
+    retainedCount: students.filter((student) => Number(student.retention_source_batch_id || 0) === Number(batch.id) && student.is_retained_record).length,
+    eligibleRetentionStudents: students.filter((student) => Number(student.batch_id) === Number(batch.id) && !student.is_retained_record),
+    createdDaysAgo: formatDaysAgo(batch.created_at),
+    completedDaysAgo: formatDaysAgo(batch.completed_at),
+    retentionRemaining: Math.max(
+      0,
+      RETENTION_MAX_STUDENTS_PER_SOURCE_BATCH
+        - students.filter((student) => Number(student.retention_source_batch_id || 0) === Number(batch.id) && student.is_retained_record).length
+    ),
+  }));
 
   renderWithMessage(res, 'admin-dashboard', {
     user: req.session.user,
     coaching,
     branding: buildBranding(coaching),
     adminProfile,
-    adminOtpChannels: getOtpChannelOptions({
-      email: adminProfile?.email,
-      contactPhone: adminProfile?.contact_phone,
-    }),
-    adminOtpState: buildOtpStatus(req.session?.adminSettingsOtp || null),
     subscriptionState,
     subscriptionNotice: subscriptionState.notice,
     students,
     batches,
-    batchSummaries: toBatchSummaries(students, batches),
-    studentBatchGroups: toStudentBatchGroups(students, batches),
+    batchSummaries,
+    studentBatchGroups,
+    completedBatches,
     studentUsage,
     papers,
     attendance,
@@ -2612,8 +3352,8 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const passwordHash = await bcrypt.hash(password, 10);
   await run(
     `INSERT INTO users (
-      coaching_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, email, password_hash, password_display
-    ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      coaching_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, email, password_hash
+    ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
       rollNo,
@@ -2624,7 +3364,6 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
       contactPhone || null,
       email || null,
       passwordHash,
-      password,
     ]
   );
 
@@ -2634,6 +3373,10 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
       ? `Student ${rollNo} created with a custom password`
       : `Student ${rollNo} created. Default password is the roll number`,
   };
+  await auditActor(req, 'student_created', {
+    targetType: 'student',
+    details: { rollNo, batchId: batch.id, batchName: batch.name },
+  });
   return res.redirect('/admin/dashboard?section=students');
 });
 
@@ -2664,6 +3407,10 @@ app.post('/admin/batches', requireCoachingAdmin, async (req, res) => {
     [coachingId, batchName, normalizedName, meta.standard, meta.course, req.session.user.id]
   );
 
+  await auditActor(req, 'batch_created', {
+    targetType: 'batch',
+    details: { batchName, standard: meta.standard, course: meta.course },
+  });
   req.session.flash = { type: 'success', text: `Batch "${batchName}" created successfully` };
   return res.redirect('/admin/dashboard?section=students');
 });
@@ -2686,6 +3433,10 @@ app.post('/admin/batches/rename', requireCoachingAdmin, async (req, res) => {
   const batch = await getBatchForCoaching(coachingId, batchId);
   if (!batch) {
     req.session.flash = { type: 'error', text: 'Batch not found' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+  if (batch.is_retention_batch) {
+    req.session.flash = { type: 'error', text: 'Retention batch cannot be renamed' };
     return res.redirect('/admin/dashboard?section=students');
   }
 
@@ -2726,6 +3477,11 @@ app.post('/admin/batches/rename', requireCoachingAdmin, async (req, res) => {
       type: 'success',
       text: `Batch "${batch.name}" merged into "${targetBatch.name}". Student, note, and upload-window data now follow the updated batch.`,
     };
+    await auditActor(req, 'batch_merged', {
+      targetType: 'batch',
+      targetId: targetBatch.id,
+      details: { sourceBatchId: batchId, sourceBatchName: batch.name, targetBatchName: targetBatch.name },
+    });
     return res.redirect('/admin/dashboard?section=students');
   }
 
@@ -2759,6 +3515,11 @@ app.post('/admin/batches/rename', requireCoachingAdmin, async (req, res) => {
     type: 'success',
     text: `Batch updated from "${batch.name}" to "${newBatchName}". The new batch name now appears across students, attendance, fees, notes, and upload windows.`,
   };
+  await auditActor(req, 'batch_renamed', {
+    targetType: 'batch',
+    targetId: batchId,
+    details: { oldName: batch.name, newName: newBatchName },
+  });
   return res.redirect('/admin/dashboard?section=students');
 });
 
@@ -2774,6 +3535,10 @@ app.post('/admin/batches/:id/delete', requireCoachingAdmin, async (req, res) => 
   const batch = await getBatchForCoaching(coachingId, batchId);
   if (!batch) {
     req.session.flash = { type: 'error', text: 'Batch not found' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+  if (batch.is_retention_batch) {
+    req.session.flash = { type: 'error', text: 'Retention batch cannot be deleted' };
     return res.redirect('/admin/dashboard?section=students');
   }
 
@@ -2814,7 +3579,117 @@ app.post('/admin/batches/:id/delete', requireCoachingAdmin, async (req, res) => 
     await tx.run(`DELETE FROM batches WHERE coaching_id = ? AND id = ?`, [coachingId, batchId]);
   });
 
+  await auditActor(req, 'batch_deleted', {
+    targetType: 'batch',
+    targetId: batchId,
+    details: { batchName: batch.name },
+  });
   req.session.flash = { type: 'success', text: `Batch "${batch.name}" deleted successfully` };
+  return res.redirect('/admin/dashboard?section=students');
+});
+
+app.post('/admin/batches/:id/complete', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const batchId = Number.parseInt(req.params.id, 10);
+  const batch = await getBatchForCoaching(coachingId, batchId);
+
+  if (!batch || batch.is_retention_batch) {
+    req.session.flash = { type: 'error', text: 'Batch not found' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  await run(
+    `UPDATE batches
+     SET status = 'completed', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+     WHERE coaching_id = ? AND id = ?`,
+    [coachingId, batchId]
+  );
+
+  await auditActor(req, 'batch_completed', {
+    targetType: 'batch',
+    targetId: batchId,
+    details: { batchName: batch.name },
+  });
+  req.session.flash = { type: 'success', text: `Batch "${batch.name}" marked as completed.` };
+  return res.redirect('/admin/dashboard?section=students');
+});
+
+app.post('/admin/batches/:id/activate', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const batchId = Number.parseInt(req.params.id, 10);
+  const batch = await getBatchForCoaching(coachingId, batchId);
+
+  if (!batch || batch.is_retention_batch) {
+    req.session.flash = { type: 'error', text: 'Batch not found' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  await run(
+    `UPDATE batches
+     SET status = 'active', completed_at = NULL
+     WHERE coaching_id = ? AND id = ?`,
+    [coachingId, batchId]
+  );
+
+  await auditActor(req, 'batch_reactivated', {
+    targetType: 'batch',
+    targetId: batchId,
+    details: { batchName: batch.name },
+  });
+  req.session.flash = { type: 'success', text: `Batch "${batch.name}" moved back to active.` };
+  return res.redirect('/admin/dashboard?section=students');
+});
+
+app.post('/admin/batches/:id/retain-student', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const batchId = Number.parseInt(req.params.id, 10);
+  const studentId = Number.parseInt(String(req.body.studentId || '').trim(), 10);
+  const batch = await getBatchForCoaching(coachingId, batchId);
+
+  if (!batch || batch.is_retention_batch || batch.status !== 'completed') {
+    req.session.flash = { type: 'error', text: 'Only completed batches can move retained students.' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  const student = await get(
+    `SELECT id, roll_no, name, batch_id, is_retained_record
+     FROM users
+     WHERE id = ? AND coaching_id = ? AND role = 'student'
+     LIMIT 1`,
+    [studentId, coachingId]
+  );
+
+  if (!student || Number(student.batch_id || 0) !== batchId || student.is_retained_record) {
+    req.session.flash = { type: 'error', text: 'Selected student is not available in this completed batch.' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  const retainedCount = await get(
+    `SELECT COUNT(*) AS total
+     FROM users
+     WHERE coaching_id = ? AND role = 'student' AND is_retained_record = 1 AND retention_source_batch_id = ?`,
+    [coachingId, batchId]
+  );
+
+  if (Number(retainedCount?.total || 0) >= RETENTION_MAX_STUDENTS_PER_SOURCE_BATCH) {
+    req.session.flash = { type: 'error', text: `Only ${RETENTION_MAX_STUDENTS_PER_SOURCE_BATCH} retained students are allowed from one completed batch.` };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  const retentionBatch = await ensureRetentionBatch(coachingId, req.session.user.id);
+  await run(
+    `UPDATE users
+     SET batch_id = ?, standard = NULL, course = NULL, is_retained_record = 1, retention_source_batch_id = ?
+     WHERE id = ? AND coaching_id = ?`,
+    [retentionBatch.id, batchId, studentId, coachingId]
+  );
+
+  await auditActor(req, 'student_moved_to_retention', {
+    targetType: 'student',
+    targetId: studentId,
+    details: { rollNo: student.roll_no, sourceBatch: batch.name, retentionBatch: retentionBatch.name },
+  });
+  req.session.flash = { type: 'success', text: `${student.roll_no} moved to retained student records.` };
   return res.redirect('/admin/dashboard?section=students');
 });
 
@@ -2863,12 +3738,17 @@ app.post('/admin/students/:id/reset-password', requireCoachingAdmin, async (req,
   }
 
   const passwordHash = await bcrypt.hash(student.roll_no, 10);
-  await run(`UPDATE users SET password_hash = ?, password_display = ? WHERE id = ?`, [passwordHash, student.roll_no, studentId]);
+  await run(`UPDATE users SET password_hash = ? WHERE id = ?`, [passwordHash, studentId]);
 
   req.session.flash = {
     type: 'success',
     text: `Password reset for ${student.roll_no}. Student can now use roll number as password`,
   };
+  await auditActor(req, 'student_password_reset', {
+    targetType: 'student',
+    targetId: studentId,
+    details: { rollNo: student.roll_no },
+  });
   return res.redirect('/admin/dashboard?section=students');
 });
 
@@ -2906,6 +3786,11 @@ app.post('/admin/students/:id/delete', requireCoachingAdmin, async (req, res) =>
   }
 
   req.session.flash = { type: 'success', text: `Student ${student.roll_no} deleted successfully` };
+  await auditActor(req, 'student_deleted', {
+    targetType: 'student',
+    targetId: studentId,
+    details: { rollNo: student.roll_no, filesDeleted: files.length },
+  });
   return res.redirect('/admin/dashboard?section=students');
 });
 
@@ -2979,6 +3864,11 @@ app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('pape
     replaced: `Paper updated for ${student.roll_no}. Previous upload was replaced.`,
     duplicate: `Duplicate click ignored. Latest paper for ${student.roll_no} is already saved.`,
   };
+  await auditActor(req, 'paper_uploaded_single', {
+    targetType: 'student',
+    targetId: student.id,
+    details: { rollNo: student.roll_no, fileName: file.originalname, status: result.status },
+  });
   req.session.flash = { type: 'success', text: textByStatus[result.status] || `Paper uploaded for ${student.roll_no}` };
   return res.redirect('/admin/dashboard?section=papers');
 });
@@ -3033,6 +3923,10 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
     type: report.failed ? 'error' : 'success',
     text: `Upload complete. Assigned: ${report.assigned}, Duplicate ignored: ${report.duplicates}, Skipped: ${report.skipped}, Failed: ${report.failed}`,
   };
+  await auditActor(req, 'paper_uploaded_bulk', {
+    targetType: 'paper_batch',
+    details: report,
+  });
   return res.redirect('/admin/dashboard?section=papers');
 });
 
@@ -3088,6 +3982,11 @@ app.post('/admin/answer-requests', requireCoachingAdmin, async (req, res) => {
     type: 'success',
     text: `Answer upload request created for ${batch.name}. Window stays open for ${ANSWER_UPLOAD_WINDOW_HOURS} hours.`,
   };
+  await auditActor(req, 'answer_request_created', {
+    targetType: 'batch',
+    targetId: batch.id,
+    details: { batchName: batch.name, title, startsAt: toDateTimeLocalInput(startsAt), endsAt: toDateTimeLocalInput(endsAt) },
+  });
   return res.redirect('/admin/dashboard?section=overview');
 });
 
@@ -3126,6 +4025,11 @@ app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
   }
 
   req.session.flash = { type: 'success', text: 'Attendance saved' };
+  await auditActor(req, 'attendance_saved_single', {
+    targetType: 'student',
+    targetId: student.id,
+    details: { rollNo, attendanceDate, status },
+  });
   return res.redirect(`/admin/dashboard?section=attendance&attendanceDate=${encodeURIComponent(attendanceDate)}`);
 });
 
@@ -3196,6 +4100,11 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
     type: 'success',
     text: `Attendance saved. Present: ${presentCount}, Absent: ${absentCount}`,
   };
+  await auditActor(req, 'attendance_saved_bulk', {
+    targetType: 'batch',
+    targetId: batch.id,
+    details: { batchName: batch.name, attendanceDate, presentCount, absentCount },
+  });
   return res.redirect(`/admin/dashboard?section=attendance&attendanceDate=${encodeURIComponent(attendanceDate)}`);
 });
 
@@ -3223,6 +4132,11 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
     [coachingId, student.id, amount, dueDate, paymentDate, status, notes, req.session.user.id]
   );
 
+  await auditActor(req, 'fee_record_added', {
+    targetType: 'student',
+    targetId: student.id,
+    details: { rollNo, amount, status, dueDate, paymentDate },
+  });
   req.session.flash = { type: 'success', text: 'Fee record added' };
   return res.redirect('/admin/dashboard?section=fees');
 });
@@ -3256,6 +4170,11 @@ app.post('/admin/notes', requireCoachingAdmin, async (req, res) => {
     [coachingId, batch.id, batch.standard || null, batch.course || null, title, resourceUrl, description, req.session.user.id]
   );
 
+  await auditActor(req, 'batch_note_created', {
+    targetType: 'batch',
+    targetId: batch.id,
+    details: { batchName: batch.name, title, resourceUrl },
+  });
   req.session.flash = { type: 'success', text: `Batch note published for ${batch.name}` };
   return res.redirect('/admin/dashboard?section=notes');
 });
@@ -3294,6 +4213,11 @@ app.post('/student/upload-paper', requireStudent, upload.single('paper'), async 
     replaced: 'Your paper was updated successfully',
     duplicate: 'Duplicate click ignored. Your paper is already saved.',
   };
+  await auditActor(req, 'student_paper_uploaded', {
+    targetType: 'student',
+    targetId: studentId,
+    details: { fileName: file.originalname, status: result.status },
+  });
   req.session.flash = { type: 'success', text: studentUploadText[result.status] || 'Your paper was uploaded successfully' };
   return res.redirect('/student/dashboard');
 });
@@ -3367,6 +4291,11 @@ app.post('/student/answer-requests/:id/upload', requireStudent, upload.single('p
     replaced: `Updated your upload for ${answerRequest.title}`,
     duplicate: `Duplicate click ignored. Your upload for ${answerRequest.title} is already saved.`,
   };
+  await auditActor(req, 'student_answer_upload_submitted', {
+    targetType: 'answer_request',
+    targetId: answerRequest.id,
+    details: { title: answerRequest.title, status: result.status },
+  });
   req.session.flash = { type: 'success', text: answerUploadText[result.status] || `Uploaded for ${answerRequest.title}` };
   return res.redirect('/student/dashboard');
 });
@@ -3387,6 +4316,11 @@ app.post('/papers/:id/delete', requireAuth, async (req, res) => {
   }
 
   await deletePaperRecord(paper);
+  await auditActor(req, 'paper_deleted', {
+    targetType: 'paper',
+    targetId: Number(req.params.id),
+    details: { redirectTo, paperType: paper.paper_type || null, studentId: paper.student_id || null },
+  });
   if (req.session) {
     req.session.flash = { type: 'success', text: 'Paper deleted successfully' };
   }
@@ -3497,12 +4431,12 @@ app.use((err, req, res, next) => {
   }
 
   if (req.session?.user?.role === 'admin') {
-    req.session.flash = { type: 'error', text: err.message || 'Server error' };
+    req.session.flash = { type: 'error', text: 'Something went wrong. Please try again.' };
     return res.redirect('/admin/dashboard');
   }
 
   if (req.session) {
-    req.session.flash = { type: 'error', text: err.message || 'Server error' };
+    req.session.flash = { type: 'error', text: 'Something went wrong. Please try again.' };
   }
   return res.redirect('/login');
 });

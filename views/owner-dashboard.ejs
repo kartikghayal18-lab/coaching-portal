@@ -20,7 +20,8 @@
           <span class="info-chip">Pending Trials <strong><%= stats.pendingTrialRequests %></strong></span>
         </div>
       </div>
-      <form method="post" action="/logout"><button type="submit" class="btn secondary">Logout</button></form>
+      <form method="post" action="/logout">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="btn secondary">Logout</button></form>
     </div>
 
     <% if (flash) { %>
@@ -78,6 +79,7 @@
         <div class="card">
           <h2>Create Coaching Tenant</h2>
           <form method="post" action="/owner/coachings">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
             <label>Coaching Name</label>
             <input type="text" name="name" required />
 
@@ -141,6 +143,9 @@
             <th>Code</th>
             <th>Tuition Owner</th>
             <th>Students</th>
+            <th>Active Batches</th>
+            <th>Completed</th>
+            <th>Oldest Batch Age</th>
             <th>Plan</th>
             <th>Limit</th>
             <th>Status</th>
@@ -167,6 +172,9 @@
                   / Unlimited
                 <% } %>
               </td>
+              <td><%= coaching.activeBatchCount %></td>
+              <td><%= coaching.completedBatchCount %></td>
+              <td><%= coaching.oldestBatchAge || '-' %></td>
               <td><%= coaching.plan_name || '-' %></td>
               <td><%= coaching.max_students === null ? 'Unlimited' : coaching.max_students %></td>
               <td><span class="status <%= coaching.subscription_status === 'active' ? 'paid' : coaching.subscription_status === 'trial' ? 'pending' : 'overdue' %>"><%= coaching.subscription_status %></span></td>
@@ -179,8 +187,9 @@
               <td><a href="<%= coaching.portal_url %>" target="_blank" rel="noopener">Open Portal</a></td>
             </tr>
             <tr>
-              <td colspan="9">
+              <td colspan="12">
                 <form method="post" action="/owner/coachings/<%= coaching.id %>/subscription" class="owner-inline-form">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                   <label>Plan Name</label>
                   <input type="text" name="planName" value="<%= coaching.plan_name || '' %>" required />
                   <label>Student Limit</label>
@@ -201,9 +210,10 @@
               </td>
             </tr>
             <tr>
-              <td colspan="9">
+              <td colspan="12">
                 <div class="owner-manage-grid">
                   <form method="post" action="/owner/coachings/<%= coaching.id %>/branding" class="card embedded-card">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                     <h3>Portal Branding</h3>
                     <label>Coaching Name</label>
                     <input type="text" name="name" value="<%= coaching.name %>" required />
@@ -250,6 +260,7 @@
                     <p class="muted">Deleting a coaching removes its admin, all students, papers, notes, attendance, fees, and portal access permanently.</p>
                     <p class="muted"><strong>Portal:</strong> <a href="<%= coaching.portal_url %>" target="_blank" rel="noopener"><%= coaching.portal_url %></a></p>
                     <form method="post" action="/owner/coachings/<%= coaching.id %>/delete" onsubmit="return confirm('Delete <%= coaching.name %>? This will permanently remove all class data and cannot be undone.');">
+                      <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                       <button type="submit" class="btn danger">Delete Coaching Permanently</button>
                     </form>
                   </div>
@@ -301,6 +312,7 @@
                 <% } %>
 
                 <form method="post" action="/owner/trial-requests/<%= request.id %>/review" class="trial-request-actions">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                   <label>Owner Note (optional)</label>
                   <textarea name="ownerNotes" rows="3" placeholder="Internal note or reminder before you manually share login details."><%= request.owner_notes || '' %></textarea>
                   <div class="trial-request-buttons">

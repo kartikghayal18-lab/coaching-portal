@@ -19,7 +19,8 @@
           <p class="muted">This is shown only on first admin login. Please review and accept the Terms and Conditions, Privacy Policy, and SaaS Agreement to continue.</p>
         </div>
       </div>
-      <form method="post" action="/logout"><button type="submit" class="btn secondary">Logout</button></form>
+      <form method="post" action="/logout">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="btn secondary">Logout</button></form>
     </div>
 
     <% if (flash) { %>
@@ -148,6 +149,7 @@
     </div>
 
     <form method="post" action="/admin/legal/accept" class="card legal-acceptance-form">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
       <label class="checkbox-row"><input type="checkbox" name="acceptTerms" required /> I agree to the Terms and Conditions</label>
       <label class="checkbox-row"><input type="checkbox" name="acceptPrivacy" required /> I agree to the Privacy Policy</label>
       <label class="checkbox-row"><input type="checkbox" name="acceptSaas" required /> I agree to the SaaS Agreement</label>

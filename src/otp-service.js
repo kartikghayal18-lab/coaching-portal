@@ -1,7 +1,5 @@
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
-const twilio = require('twilio');
-
 const OTP_LENGTH = 6;
 const OTP_TTL_MINUTES = 10;
 
@@ -47,17 +45,7 @@ function smtpConfigured() {
   );
 }
 
-function twilioConfigured() {
-  return Boolean(
-    process.env.TWILIO_ACCOUNT_SID
-    && process.env.TWILIO_AUTH_TOKEN
-    && process.env.TWILIO_FROM_NUMBER
-  );
-}
-
 function getOtpChannelOptions({ email, contactPhone }) {
-  const normalizedPhone = normalizePhoneNumber(contactPhone);
-
   return {
     email: {
       available: Boolean(email) && smtpConfigured(),
@@ -66,32 +54,45 @@ function getOtpChannelOptions({ email, contactPhone }) {
       reason: !email ? 'No email saved for this admin account' : (!smtpConfigured() ? 'SMTP is not configured yet' : null),
     },
     sms: {
-      available: Boolean(normalizedPhone) && twilioConfigured(),
-      value: normalizedPhone,
-      masked: maskPhone(normalizedPhone),
-      reason: !normalizedPhone ? 'No contact number saved for this admin account' : (!twilioConfigured() ? 'SMS provider is not configured yet' : null),
+      available: false,
+      value: '',
+      masked: '',
+      reason: 'SMS OTP is disabled. Use email OTP.',
     },
   };
 }
 
+function getPurposeLabel(purpose) {
+  if (purpose === 'forgot-password') return 'password reset';
+  if (purpose === 'login-2fa') return 'sign in verification';
+  if (purpose === 'settings-password-change') return 'password change';
+  return 'security verification';
+}
+
 async function sendEmailOtp({ to, otpCode, adminName, className, purpose }) {
   const secure = String(process.env.SMTP_SECURE || '').toLowerCase() === 'true';
+  const smtpUser = String(process.env.SMTP_USER || '').trim();
+  const smtpPass = String(process.env.SMTP_PASS || '').replace(/\s+/g, '');
+  const smtpFrom = String(process.env.SMTP_FROM || '').trim();
   const transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT),
     secure,
     auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
+      user: smtpUser,
+      pass: smtpPass,
     },
   });
 
-  const subject = `OTP for ${purpose === 'forgot-password' ? 'password reset' : 'password change'} - ${className}`;
+  const purposeLabel = getPurposeLabel(purpose);
+  const subject = `OTP for ${purposeLabel} - ${className}`;
   const text = [
     `Hello ${adminName},`,
     '',
     `Your Coaching Portal OTP is: ${otpCode}`,
     `This OTP is valid for ${OTP_TTL_MINUTES} minutes.`,
+    '',
+    `Purpose: ${purposeLabel}`,
     '',
     `Class: ${className}`,
     '',
@@ -99,19 +100,10 @@ async function sendEmailOtp({ to, otpCode, adminName, className, purpose }) {
   ].join('\n');
 
   await transporter.sendMail({
-    from: process.env.SMTP_FROM,
+    from: smtpFrom,
     to,
     subject,
     text,
-  });
-}
-
-async function sendSmsOtp({ to, otpCode, className }) {
-  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  await client.messages.create({
-    from: process.env.TWILIO_FROM_NUMBER,
-    to,
-    body: `Your ${className} Coaching Portal OTP is ${otpCode}. Valid for ${OTP_TTL_MINUTES} minutes.`,
   });
 }
 
@@ -127,16 +119,7 @@ async function sendOtpMessage({ channel, destination, otpCode, adminName, classN
     return;
   }
 
-  if (channel === 'sms') {
-    await sendSmsOtp({
-      to: destination,
-      otpCode,
-      className,
-    });
-    return;
-  }
-
-  throw new Error('Invalid OTP channel selected');
+  throw new Error('Only email OTP is enabled');
 }
 
 module.exports = {

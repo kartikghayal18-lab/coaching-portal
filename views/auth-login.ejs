@@ -58,6 +58,7 @@
         <% } %>
 
         <form method="post" action="/login" class="card auth-form">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
           <div class="form-title-row">
             <div>
               <p class="eyebrow">Sign In</p>
@@ -95,6 +96,9 @@
           <label id="passwordLabel">Password</label>
           <input type="password" id="passwordInput" name="password" required />
           <p id="passwordHelp" class="muted"></p>
+
+          <label>Security Check: <%= captcha.prompt %> = ?</label>
+          <input type="text" name="captchaAnswer" inputmode="numeric" placeholder="Enter answer" required />
 
           <button type="submit" class="btn">Login</button>
           <a href="/admin/forgot-password" class="mini-link">Forgot admin password?</a>

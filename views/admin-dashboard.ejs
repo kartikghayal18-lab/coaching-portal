@@ -25,7 +25,8 @@
           </div>
         </div>
       </div>
-      <form method="post" action="/logout"><button type="submit" class="btn secondary">Logout</button></form>
+      <form method="post" action="/logout">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="btn secondary">Logout</button></form>
     </div>
 
     <% if (flash) { %>
@@ -80,6 +81,7 @@
           <h2>Announce Answer Upload</h2>
           <p class="muted">Create a 24-hour upload window. Students in that batch can upload their answer paper from their dashboard.</p>
           <form method="post" action="/admin/answer-requests" data-single-submit>
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
             <label>Title</label>
             <input type="text" name="title" placeholder="Physics Test 5 Answer Upload" required />
 
@@ -187,6 +189,7 @@
                     <td>
                       <a href="/papers/<%= student.submission.id %>/view" target="_blank" rel="noopener">Open</a>
                       <form method="post" action="/papers/<%= student.submission.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this uploaded paper?');">
+                        <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                         <input type="hidden" name="redirectTo" value="/admin/dashboard?section=overview" />
                         <button type="submit" class="btn danger compact">Delete</button>
                       </form>
@@ -227,6 +230,7 @@
             <p class="muted">Current plan allows <strong><%= studentUsage.limit %></strong> students. Added: <strong><%= studentUsage.count %></strong>. Remaining: <strong><%= studentUsage.remaining %></strong>.</p>
           <% } %>
           <form method="post" action="/admin/students">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
             <label>Roll Number</label>
             <input type="text" name="rollNo" required />
 
@@ -260,12 +264,14 @@
         <div class="card">
           <h2>Batch Setup</h2>
           <form method="post" action="/admin/batches" data-single-submit>
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
             <label>Custom Batch Name</label>
             <input type="text" name="batchName" placeholder="11th-A, 11th-B, MHT-CET, Repeater Batch" required />
             <button type="submit" class="btn">Create Batch</button>
           </form>
 
           <form method="post" action="/admin/batches/rename" class="batch-rename-form">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
             <h3>Promote / Rename Batch</h3>
             <label>Current Batch</label>
             <select name="batchId" required>
@@ -282,16 +288,33 @@
 
           <h3 style="margin-top: 20px;">Existing Batches</h3>
           <table>
-            <tr><th>Batch</th><th>Count</th><th>Action</th></tr>
+            <tr><th>Batch</th><th>Status</th><th>Created</th><th>Completed</th><th>Count</th><th>Action</th></tr>
             <% batchSummaries.forEach((batch) => { %>
               <tr>
                 <td><%= batch.name %></td>
+                <td><%= batch.status || (batch.isUnassigned ? '-' : 'active') %></td>
+                <td><%= batch.createdDaysAgo || '-' %></td>
+                <td><%= batch.completedDaysAgo || '-' %></td>
                 <td><%= batch.count %></td>
                 <td>
-                  <% if (batch.id) { %>
+                  <% if (batch.id && !batch.is_retention_batch) { %>
+                    <% if (batch.status === 'completed') { %>
+                      <form method="post" action="/admin/batches/<%= batch.id %>/activate" style="display:inline-block; margin-right: 8px;">
+                        <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                        <button type="submit" class="btn secondary compact">Make Active</button>
+                      </form>
+                    <% } else { %>
+                      <form method="post" action="/admin/batches/<%= batch.id %>/complete" style="display:inline-block; margin-right: 8px;">
+                        <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                        <button type="submit" class="btn secondary compact">Mark Complete</button>
+                      </form>
+                    <% } %>
                     <form method="post" action="/admin/batches/<%= batch.id %>/delete" onsubmit="return confirm('Delete batch <%= batch.name %>? Students must be removed from this batch first. Related notes and answer windows for this batch will also be removed.');">
+                      <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                       <button type="submit" class="btn danger compact">Delete Batch</button>
                     </form>
+                  <% } else if (batch.is_retention_batch) { %>
+                    <span class="muted">Protected retention batch</span>
                   <% } else { %>
                     <span class="muted">-</span>
                   <% } %>
@@ -299,8 +322,48 @@
               </tr>
             <% }) %>
           </table>
-          <p class="tiny-note">You can delete only an empty batch. If students are still assigned, move or delete those students first.</p>
+          <p class="tiny-note">You can delete only an empty batch. Completed batches can keep up to 5 retained students for future admissions or parent references.</p>
         </div>
+      </section>
+
+      <section class="card">
+        <h2>Completed Batch Retention</h2>
+        <% if (!completedBatches.length) { %>
+          <p class="muted">No completed batches yet.</p>
+        <% } %>
+        <% completedBatches.forEach((batch) => { %>
+          <details class="batch-accordion">
+            <summary class="batch-summary">
+              <span class="batch-summary-title"><%= batch.name %></span>
+              <span class="batch-summary-count"><%= batch.studentCount %> active records | retained <%= batch.retainedCount %>/<%= 5 %></span>
+            </summary>
+            <div class="batch-accordion-body">
+              <p class="muted">Created <strong><%= batch.createdDaysAgo || '-' %></strong>. Completed <strong><%= batch.completedDaysAgo || '-' %></strong> ago. Keep only up to 5 students from this batch in retained records.</p>
+              <% if (!batch.eligibleRetentionStudents.length) { %>
+                <p class="muted">No eligible students left in this batch to move.</p>
+              <% } else if (batch.retentionRemaining <= 0) { %>
+                <p class="muted">Retention limit already reached for this batch.</p>
+              <% } else { %>
+                <table>
+                  <tr><th>Roll</th><th>Name</th><th>Move To Retention</th></tr>
+                  <% batch.eligibleRetentionStudents.forEach((student) => { %>
+                    <tr>
+                      <td><%= student.roll_no %></td>
+                      <td><%= student.name %></td>
+                      <td>
+                        <form method="post" action="/admin/batches/<%= batch.id %>/retain-student">
+                          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                          <input type="hidden" name="studentId" value="<%= student.id %>" />
+                          <button type="submit" class="btn compact" <%= batch.retentionRemaining <= 0 ? 'disabled' : '' %>>Move</button>
+                        </form>
+                      </td>
+                    </tr>
+                  <% }) %>
+                </table>
+              <% } %>
+            </div>
+          </details>
+        <% }) %>
       </section>
 
       <section class="card">
@@ -317,20 +380,21 @@
               </summary>
               <div class="batch-accordion-body">
                 <table>
-                  <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Password</th><th>Action</th></tr>
+                  <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Action</th></tr>
                   <% group.students.forEach((s) => { %>
                     <tr>
                       <td><%= s.roll_no %></td>
                       <td><%= s.name %></td>
                       <td><%= s.contact_phone || '-' %></td>
                       <td><%= s.email || '-' %></td>
-                      <td><span class="password-pill"><%= s.password_display || 'Hidden' %></span></td>
                       <td>
                         <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
                         <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
+                          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                           <button type="submit" class="btn secondary compact">Reset Password</button>
                         </form>
                         <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
+                          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                           <button type="submit" class="btn danger compact">Delete</button>
                         </form>
                       </td>
@@ -355,6 +419,7 @@
 
           <div id="tab-single" class="tab-panel active">
             <form method="post" action="/admin/attendance">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
               <label>Roll Number</label>
               <input type="text" name="rollNo" required />
               <label>Date</label>
@@ -373,6 +438,7 @@
 
           <div id="tab-bulk" class="tab-panel">
             <form method="post" action="/admin/attendance-bulk">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
               <label>Batch</label>
               <select name="batchId" required>
                 <option value="">Select batch</option>
@@ -440,6 +506,7 @@
         <div class="card">
           <h2>Add Fee Record</h2>
           <form method="post" action="/admin/fees">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
             <label>Roll Number</label>
             <input type="text" name="rollNo" required />
             <label>Amount</label>
@@ -486,7 +553,8 @@
         <div class="card">
           <h2>Assign Paper to Student</h2>
           <p class="muted">Admins can upload a student paper directly. Optional marks update the progress chart immediately.</p>
-          <form method="post" action="/admin/upload-paper-single" enctype="multipart/form-data" data-single-submit>
+          <form method="post" action="<%= appendCsrfToUrl('/admin/upload-paper-single') %>" enctype="multipart/form-data" data-single-submit>
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
             <label>Student Roll Number</label>
             <input type="text" name="rollNo" required />
 
@@ -524,7 +592,8 @@
           <p class="muted"><code>101.pdf</code> (only assign paper)</p>
           <p class="muted"><code>101_78_100.pdf</code> (auto-save marks 78/100)</p>
           <p class="muted">Pattern: <code>rollno_marks_max.ext</code></p>
-          <form method="post" action="/admin/upload-papers" enctype="multipart/form-data" data-single-submit>
+          <form method="post" action="<%= appendCsrfToUrl('/admin/upload-papers') %>" enctype="multipart/form-data" data-single-submit>
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
             <label>Select Files</label>
             <input type="file" name="papers" multiple required />
             <button type="submit" class="btn">Upload and Assign</button>
@@ -556,6 +625,7 @@
                 <a href="/papers/<%= p.id %>/view" target="_blank" rel="noopener">Open</a>
                 <a href="/papers/<%= p.id %>/download">Download</a>
                 <form method="post" action="/papers/<%= p.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this paper?');">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                   <input type="hidden" name="redirectTo" value="/admin/dashboard?section=papers" />
                   <button type="submit" class="btn danger compact">Delete</button>
                 </form>
@@ -571,6 +641,7 @@
         <div class="card">
           <h2>Add Batch Note / Video Link</h2>
           <form method="post" action="/admin/notes">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
             <label>Batch</label>
             <select name="batchId" required>
               <option value="">Select batch</option>
@@ -616,6 +687,7 @@
           <h2>Profile & Branding</h2>
           <p class="muted">Update your admin display name and the portal branding your students see.</p>
           <form method="post" action="/admin/settings/profile">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
             <label>Admin Display Name</label>
             <input type="text" name="adminDisplayName" value="<%= user.name || '' %>" required />
 
@@ -660,14 +732,15 @@
           <h2>Update Password</h2>
           <p class="muted">Use your current password here. If this is still your temporary password, enter that as the current password first.</p>
           <form method="post" action="/admin/settings/password">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
             <label>Current Password</label>
             <input type="password" name="oldPassword" required />
 
             <label>New Password</label>
-            <input type="password" name="newPassword" minlength="6" required />
+            <input type="password" name="newPassword" minlength="8" required />
 
             <label>Confirm New Password</label>
-            <input type="password" name="confirmPassword" minlength="6" required />
+            <input type="password" name="confirmPassword" minlength="8" required />
 
             <button type="submit" class="btn">Change Password</button>
           </form>

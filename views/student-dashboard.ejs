@@ -27,7 +27,8 @@
           </div>
         </div>
       </div>
-      <form method="post" action="/logout"><button type="submit" class="btn secondary">Logout</button></form>
+      <form method="post" action="/logout">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="btn secondary">Logout</button></form>
     </div>
 
     <% if (flash) { %>
@@ -65,7 +66,8 @@
       <div class="card">
         <h2>Upload My Paper</h2>
         <p class="muted">You can upload your own paper, worksheet, or result. If you add marks, your progress chart updates too.</p>
-        <form method="post" action="/student/upload-paper" enctype="multipart/form-data" data-single-submit>
+        <form method="post" action="<%= appendCsrfToUrl('/student/upload-paper') %>" enctype="multipart/form-data" data-single-submit>
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
           <label>Test Title</label>
           <input type="text" name="testLabel" placeholder="Mock Test 7" />
 
@@ -112,6 +114,7 @@
               <div class="inline-actions">
                 <a href="/papers/<%= request.mySubmission.id %>/view" target="_blank" rel="noopener">Open</a>
                 <form method="post" action="/papers/<%= request.mySubmission.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this uploaded paper?');">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                   <input type="hidden" name="redirectTo" value="/student/dashboard" />
                   <button type="submit" class="btn danger compact">Delete</button>
                 </form>
@@ -121,7 +124,8 @@
             <% } %>
 
             <% if (request.state.isActive) { %>
-              <form method="post" action="/student/answer-requests/<%= request.id %>/upload" enctype="multipart/form-data" data-single-submit>
+              <form method="post" action="<%= appendCsrfToUrl(`/student/answer-requests/${request.id}/upload`) %>" enctype="multipart/form-data" data-single-submit>
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                 <div class="grid two compact-grid">
                   <div>
                     <label>Marks Obtained (optional)</label>
@@ -201,6 +205,7 @@
               <a href="/papers/<%= p.id %>/download">Download</a>
               <% if (p.uploaded_by_id === user.id) { %>
                 <form method="post" action="/papers/<%= p.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this uploaded paper?');">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                   <input type="hidden" name="redirectTo" value="/student/dashboard" />
                   <button type="submit" class="btn danger compact">Delete</button>
                 </form>

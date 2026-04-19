@@ -289,6 +289,9 @@ async function createBatchesTable() {
       normalized_name TEXT,
       standard TEXT,
       course TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      completed_at TIMESTAMP,
+      is_retention_batch INTEGER NOT NULL DEFAULT 0,
       created_by INTEGER,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
@@ -298,6 +301,9 @@ async function createBatchesTable() {
   await ensureColumn('batches', 'normalized_name', 'TEXT');
   await ensureColumn('batches', 'standard', 'TEXT');
   await ensureColumn('batches', 'course', 'TEXT');
+  await ensureColumn('batches', 'status', `TEXT NOT NULL DEFAULT 'active'`);
+  await ensureColumn('batches', 'completed_at', 'TIMESTAMP');
+  await ensureColumn('batches', 'is_retention_batch', 'INTEGER NOT NULL DEFAULT 0');
   await ensureColumn('batches', 'created_by', 'INTEGER');
 }
 
@@ -318,6 +324,8 @@ async function createUsersTable() {
       email TEXT,
       password_hash TEXT NOT NULL,
       password_display TEXT,
+      is_retained_record INTEGER NOT NULL DEFAULT 0,
+      retention_source_batch_id INTEGER,
       must_change_password INTEGER NOT NULL DEFAULT 0,
       password_changed_at TIMESTAMP,
       terms_accepted_at TIMESTAMP,
@@ -333,6 +341,8 @@ async function createUsersTable() {
   await ensureColumn('users', 'batch_id', 'INTEGER');
   await ensureColumn('users', 'contact_phone', 'TEXT');
   await ensureColumn('users', 'email', 'TEXT');
+  await ensureColumn('users', 'is_retained_record', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn('users', 'retention_source_batch_id', 'INTEGER');
   await ensureColumn('users', 'password_display', 'TEXT');
   await ensureColumn('users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0');
   await ensureColumn('users', 'password_changed_at', 'TIMESTAMP');
@@ -505,6 +515,35 @@ async function createTrialRequestsTable() {
   await ensureColumn('trial_requests', 'created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
 }
 
+async function createAuditLogsTable() {
+  await run(`
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id SERIAL PRIMARY KEY,
+      coaching_id INTEGER,
+      actor_user_id INTEGER,
+      actor_role TEXT,
+      action TEXT NOT NULL,
+      target_type TEXT,
+      target_id INTEGER,
+      details_json TEXT,
+      ip_address TEXT,
+      user_agent TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await ensureColumn('audit_logs', 'coaching_id', 'INTEGER');
+  await ensureColumn('audit_logs', 'actor_user_id', 'INTEGER');
+  await ensureColumn('audit_logs', 'actor_role', 'TEXT');
+  await ensureColumn('audit_logs', 'action', `TEXT NOT NULL DEFAULT 'unknown'`);
+  await ensureColumn('audit_logs', 'target_type', 'TEXT');
+  await ensureColumn('audit_logs', 'target_id', 'INTEGER');
+  await ensureColumn('audit_logs', 'details_json', 'TEXT');
+  await ensureColumn('audit_logs', 'ip_address', 'TEXT');
+  await ensureColumn('audit_logs', 'user_agent', 'TEXT');
+  await ensureColumn('audit_logs', 'created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
+}
+
 async function backfillTenantScopes() {
   const legacyUserCount = await get(
     `SELECT COUNT(*)::int AS total
@@ -669,6 +708,7 @@ async function ensureIndexes() {
   await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_coaching_username ON users(coaching_id, username) WHERE username IS NOT NULL AND is_owner = 0`);
   await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_coaching_roll ON users(coaching_id, roll_no) WHERE roll_no IS NOT NULL`);
   await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_coaching_name ON batches(coaching_id, normalized_name)`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_retention_per_coaching ON batches(coaching_id) WHERE is_retention_batch = 1`);
   await run(`CREATE INDEX IF NOT EXISTS idx_users_batch ON users(coaching_id, role, batch_id, roll_no)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_test_papers_coaching_student ON test_papers(coaching_id, student_id, upload_date DESC)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_test_papers_answer_request ON test_papers(coaching_id, answer_request_id, student_id, upload_date DESC)`);
@@ -678,6 +718,8 @@ async function ensureIndexes() {
   await run(`CREATE INDEX IF NOT EXISTS idx_answer_requests_batch_dates ON answer_upload_requests(coaching_id, batch_id, starts_at DESC, ends_at DESC)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_trial_requests_status_created ON trial_requests(status, created_at DESC)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_trial_requests_email_status ON trial_requests(email, status)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_audit_logs_coaching_created ON audit_logs(coaching_id, created_at DESC)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_created ON audit_logs(actor_user_id, created_at DESC)`);
 }
 
 async function ensureOwnerAccount(adminUsername, adminPassword, adminForceReset) {
@@ -710,21 +752,12 @@ async function ensureOwnerAccount(adminUsername, adminPassword, adminForceReset)
   ]);
 }
 
-async function syncStudentPasswordDisplay() {
-  const students = await all(
-    `SELECT id, roll_no, password_hash, password_display
-     FROM users
-     WHERE role = 'student'`
+async function clearStudentPasswordDisplay() {
+  await run(
+    `UPDATE users
+     SET password_display = NULL
+     WHERE role = 'student' AND password_display IS NOT NULL`
   );
-
-  for (const student of students) {
-    if (student.password_display || !student.roll_no || !student.password_hash) continue;
-
-    const matchesRollNo = await bcrypt.compare(student.roll_no, student.password_hash).catch(() => false);
-    if (!matchesRollNo) continue;
-
-    await run(`UPDATE users SET password_display = ? WHERE id = ?`, [student.roll_no, student.id]);
-  }
 }
 
 async function initDb() {
@@ -743,11 +776,12 @@ async function initDb() {
   await createBatchNotesTable();
   await createAnswerUploadRequestsTable();
   await createTrialRequestsTable();
+  await createAuditLogsTable();
   await backfillTenantScopes();
   await backfillBatchRelations();
   await ensureIndexes();
   await ensureOwnerAccount(adminUsername, adminPassword, adminForceReset);
-  await syncStudentPasswordDisplay();
+  await clearStudentPasswordDisplay();
 
   console.log('PostgreSQL connected and schema ready');
 }
