@@ -71,13 +71,19 @@ function getPurposeLabel(purpose) {
 
 async function sendEmailOtp({ to, otpCode, adminName, className, purpose }) {
   const secure = String(process.env.SMTP_SECURE || '').toLowerCase() === 'true';
+  const smtpHost = String(process.env.SMTP_HOST || '').trim();
   const smtpUser = String(process.env.SMTP_USER || '').trim();
   const smtpPass = String(process.env.SMTP_PASS || '').replace(/\s+/g, '');
   const smtpFrom = String(process.env.SMTP_FROM || '').trim();
+  const smtpFamily = Number(process.env.SMTP_FAMILY || 4);
   const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
+    host: smtpHost,
     port: Number(process.env.SMTP_PORT),
     secure,
+    family: Number.isInteger(smtpFamily) && (smtpFamily === 4 || smtpFamily === 6) ? smtpFamily : 4,
+    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT || 20000),
+    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT || 15000),
+    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT || 30000),
     auth: {
       user: smtpUser,
       pass: smtpPass,
