@@ -831,6 +831,74 @@ function buildProgressSummaryFromPapers(papers) {
   };
 }
 
+function normalizeSearchValue(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function toDigitSearchValue(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+function getStudentSearchResults(students, rawQuery) {
+  const query = String(rawQuery || '').trim();
+  if (!query) {
+    return {
+      query: '',
+      results: [],
+      totalMatches: 0,
+    };
+  }
+
+  const queryLower = normalizeSearchValue(query);
+  const queryDigits = toDigitSearchValue(query);
+
+  const scored = (students || []).map((student) => {
+    const roll = String(student.roll_no || '').trim();
+    const name = String(student.name || '').trim();
+    const phone = String(student.contact_phone || '').trim();
+    const email = String(student.email || '').trim();
+
+    const rollLower = normalizeSearchValue(roll);
+    const nameLower = normalizeSearchValue(name);
+    const phoneDigits = toDigitSearchValue(phone);
+
+    let score = -1;
+
+    if (rollLower === queryLower) score = Math.max(score, 100);
+    else if (rollLower.startsWith(queryLower)) score = Math.max(score, 90);
+    else if (rollLower.includes(queryLower)) score = Math.max(score, 80);
+
+    if (nameLower === queryLower) score = Math.max(score, 75);
+    else if (nameLower.startsWith(queryLower)) score = Math.max(score, 65);
+    else if (nameLower.includes(queryLower)) score = Math.max(score, 55);
+
+    if (queryDigits) {
+      if (phoneDigits === queryDigits) score = Math.max(score, 70);
+      else if (phoneDigits.startsWith(queryDigits)) score = Math.max(score, 60);
+      else if (phoneDigits.includes(queryDigits)) score = Math.max(score, 50);
+    }
+
+    return {
+      ...student,
+      email,
+      searchScore: score,
+      sortRoll: rollLower,
+    };
+  }).filter((student) => student.searchScore >= 0);
+
+  scored.sort((a, b) => (
+    b.searchScore - a.searchScore
+    || a.sortRoll.localeCompare(b.sortRoll)
+    || String(a.name || '').localeCompare(String(b.name || ''))
+  ));
+
+  return {
+    query,
+    results: scored.slice(0, 25),
+    totalMatches: scored.length,
+  };
+}
+
 function getAnswerRequestState(request) {
   const now = new Date();
   const startsAt = parseDateTimeLocal(request.starts_at);
@@ -1145,24 +1213,27 @@ async function getStudentDashboardPayload(coachingId, studentId) {
     [studentId, coachingId]
   );
 
-  const papers = await all(
-    `SELECT tp.id, tp.original_name, tp.stored_name, tp.upload_date, tp.storage_type, tp.storage_key, tp.content_type,
-            tp.marks_obtained, tp.max_marks, tp.test_label, tp.paper_type, tp.answer_request_id, tp.uploaded_by AS uploaded_by_id,
-            uploader.name AS uploaded_by_name, uploader.role AS uploaded_by_role
-     FROM test_papers tp
-     LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
-     WHERE tp.coaching_id = ? AND tp.student_id = ?
-     ORDER BY tp.upload_date DESC`,
-    [coachingId, studentId]
-  );
+  const papers = await all(`
+SELECT tp.id, tp.original_name, tp.stored_name, tp.upload_date,
+tp.storage_type, tp.storage_key, tp.content_type,
+tp.marks_obtained, tp.max_marks, tp.test_label, tp.paper_type,
+tp.answer_request_id, tp.uploaded_by AS uploaded_by_id,
+uploader.name AS uploaded_by_name, uploader.role AS uploaded_by_role
+FROM test_papers tp
+	LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
+	WHERE tp.coaching_id = ? AND tp.student_id = ?
+	ORDER BY tp.upload_date DESC
+	LIMIT 20
+	`, [coachingId, studentId]);
 
-  const attendance = await all(
-    `SELECT attendance_date, status, notes
-     FROM attendance
-     WHERE coaching_id = ? AND student_id = ?
-     ORDER BY attendance_date DESC, id DESC`,
-    [coachingId, studentId]
-  );
+	  const attendance = await all(
+	    `SELECT attendance_date, status, notes
+	     FROM attendance
+	     WHERE coaching_id = ? AND student_id = ?
+	     ORDER BY attendance_date DESC, id DESC
+	     LIMIT 30`,
+	    [coachingId, studentId]
+	  );
 
   const fees = await all(
     `SELECT amount, due_date, payment_date, status, notes
@@ -3083,6 +3154,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const subscriptionState = req.subscriptionState || getSubscriptionState(req.currentCoaching);
   const activeSection = subscriptionState.accessBlocked ? 'overview' : getAdminSection(req.query.section);
   const attendanceDateFilter = (req.query.attendanceDate || '').trim();
+  const studentSearchQuery = (req.query.studentSearch || '').trim();
   const coachingId = req.session.user.coachingId;
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const adminProfile = await get(
@@ -3255,6 +3327,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const studentUsage = getStudentUsage(students.length, coaching);
   const batchSummaries = toBatchSummaries(students, batches);
   const studentBatchGroups = toStudentBatchGroups(students, batches);
+  const studentSearch = getStudentSearchResults(students, studentSearchQuery);
   const completedBatches = batches.filter((batch) => batch.status === 'completed' && !batch.is_retention_batch).map((batch) => ({
     ...batch,
     studentCount: students.filter((student) => Number(student.batch_id) === Number(batch.id) && !student.is_retained_record).length,
@@ -3280,6 +3353,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     batches,
     batchSummaries,
     studentBatchGroups,
+    studentSearch,
     completedBatches,
     studentUsage,
     papers,
@@ -3691,6 +3765,16 @@ app.post('/admin/batches/:id/retain-student', requireCoachingAdmin, async (req, 
   });
   req.session.flash = { type: 'success', text: `${student.roll_no} moved to retained student records.` };
   return res.redirect('/admin/dashboard?section=students');
+});
+
+app.get('/admin/search-student', requireCoachingAdmin, async (req, res) => {
+  const roll = String(req.query.roll || '').trim();
+
+  if (!roll) {
+    req.session.flash = { type: 'error', text: 'Please enter a roll number to search.' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+  return res.redirect(`/admin/dashboard?section=students&studentSearch=${encodeURIComponent(roll)}`);
 });
 
 app.get('/admin/students/:id/overview', requireCoachingAdmin, async (req, res) => {
@@ -4404,24 +4488,21 @@ app.get('/papers/:id/view', requireAuth, async (req, res) => {
   if (!paper) return res.status(404).send('Paper not found');
 
   const access = await getPaperAccess(paper, 'inline');
-  if (access.type === 'redirect') return res.redirect(access.url);
-  if (!fs.existsSync(access.filePath)) return res.status(404).send('File not available');
-
-  res.setHeader('Content-Disposition', `inline; filename="${paper.original_name}"`);
-  return res.sendFile(access.filePath);
-});
+  return res.redirect(access.url);
+});   // ✅ YE MISSING THA
 
 app.get('/papers/:id/download', requireAuth, async (req, res) => {
-  const paper = await getPaperForUser(req.params.id, req.session.user);
-  if (!paper) return res.status(404).send('Paper not found');
+  try {
+    const paper = await getPaperForUser(req.params.id, req.session.user);
+    if (!paper) return res.status(404).send('Paper not found');
 
-  const access = await getPaperAccess(paper, 'attachment');
-  if (access.type === 'redirect') return res.redirect(access.url);
-  if (!fs.existsSync(access.filePath)) return res.status(404).send('File not available');
-
-  return res.download(access.filePath, paper.original_name);
+    const access = await getPaperAccess(paper, 'attachment');
+    return res.redirect(access.url);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).send('Server error');
+  }
 });
-
 app.use((err, req, res, next) => {
   console.error(err);
 

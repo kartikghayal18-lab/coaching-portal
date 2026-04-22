@@ -222,6 +222,43 @@
     <% } %>
 
     <% if (!subscriptionState.accessBlocked && activeSection === 'students') { %>
+      <section class="card">
+        <h2>Search Student</h2>
+        <form method="get" action="/admin/search-student" class="inline-controls">
+          <label for="student-search-roll">Roll Number</label>
+          <input id="student-search-roll" type="text" name="roll" value="<%= studentSearch?.query || '' %>" placeholder="Enter Roll Number" />
+          <button type="submit" class="btn">Search</button>
+          <% if (studentSearch?.query) { %>
+            <a href="/admin/dashboard?section=students" class="btn secondary">Clear</a>
+          <% } %>
+        </form>
+        <p class="muted">Search by exact roll number, partial roll, student name, or contact number.</p>
+      </section>
+
+      <% if (studentSearch?.query) { %>
+        <section class="card">
+          <h2>Search Results</h2>
+          <% if (studentSearch.totalMatches) { %>
+            <p class="muted">Showing <strong><%= studentSearch.results.length %></strong> result(s) for "<strong><%= studentSearch.query %></strong>"<%= studentSearch.totalMatches > studentSearch.results.length ? ` out of ${studentSearch.totalMatches} matches` : '' %>.</p>
+            <table>
+              <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Batch</th><th>Action</th></tr>
+              <% studentSearch.results.forEach((student) => { %>
+                <tr>
+                  <td><%= student.roll_no %></td>
+                  <td><%= student.name %></td>
+                  <td><%= student.contact_phone || '-' %></td>
+                  <td><%= student.email || '-' %></td>
+                  <td><%= student.batch_name || '-' %></td>
+                  <td><a href="/admin/students/<%= student.id %>/overview">Open Dashboard</a></td>
+                </tr>
+              <% }) %>
+            </table>
+          <% } else { %>
+            <p class="muted">No student matched "<strong><%= studentSearch.query %></strong>". Try full roll number, name, or contact number.</p>
+          <% } %>
+        </section>
+      <% } %>
+
       <section class="grid two">
         <div class="card">
           <h2>Add Student</h2>
