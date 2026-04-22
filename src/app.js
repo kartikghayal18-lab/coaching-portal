@@ -37,7 +37,7 @@ function resolvePort(value) {
   return 3000;
 }
 
-const PORT = resolvePort(process.env.PORT);
+const PORT = process.env.PORT || 3000;
 const OWNER_SECTIONS = new Set(['overview', 'coachings', 'trial-requests']);
 const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes', 'settings']);
 const ALLOWED_UPLOAD_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/jpg']);
