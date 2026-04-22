@@ -4584,7 +4584,32 @@ app.use((err, req, res, next) => {
   }
   return res.redirect('/login');
 });
+// ✅ TEST MAIL ROUTE (FINAL PLACE)
+app.get('/test-mail', async (req, res) => {
+  try {
+    const transporter = require('nodemailer').createTransport({
+      host: process.env.SMTP_HOST,
+      port: process.env.SMTP_PORT,
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    });
 
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM,
+      to: process.env.SMTP_USER,
+      subject: 'Test Mail',
+      text: 'Working ✅',
+    });
+
+    res.send('OK');
+  } catch (err) {
+    console.error(err);
+    res.send('ERROR: ' + err.message);
+  }
+});
 Promise.resolve()
   .then(() => {
     initStorage();
