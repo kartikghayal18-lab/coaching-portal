@@ -10,9 +10,10 @@ neonConfig.webSocketConstructor = ws;
 
 function normalizeDatabaseUrl(rawValue) {
   const value = String(rawValue || '').trim();
-  if (!value || value.includes('YOUR_NEON_') || value.includes('<paste-neon-url-here>')) {
-    throw new Error('DATABASE_URL is not set. Paste your Neon PostgreSQL connection string into .env');
-  }
+  if (!value || value.includes('postgresql://neondb_owner:npg_edQsbt84TxCB@ep-damp-tooth-a16l7mg4-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require')) {
+  console.error("❌ DATABASE_URL missing or invalid");
+  return null; // crash मत कर
+}
 
   const url = new URL(value);
   if (!url.searchParams.has('sslmode')) {
