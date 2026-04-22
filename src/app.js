@@ -1788,15 +1788,18 @@ app.get('/login', async (req, res) => {
 app.get('/test-mail', async (req, res) => {
   const debugSecret = String(process.env.MAIL_DEBUG_SECRET || '').trim();
   const providedSecret = String(req.query.secret || '').trim();
-
-  if (!debugSecret || !providedSecret || !timingSafeEqualString(providedSecret, debugSecret)) {
-    return res.status(404).send('Not found');
-  }
-
   const smtpUser = String(process.env.SMTP_USER || '').trim();
   const smtpFrom = String(process.env.SMTP_FROM || '').trim();
   const ownerEmail = String(process.env.OWNER_2FA_EMAIL || '').trim();
   const targetEmail = String(req.query.to || ownerEmail || smtpUser).trim();
+
+  if (debugSecret && (!providedSecret || !timingSafeEqualString(providedSecret, debugSecret))) {
+    return res.status(403).json({
+      ok: false,
+      error: 'Invalid debug secret',
+      hint: 'Pass ?secret=YOUR_MAIL_DEBUG_SECRET',
+    });
+  }
 
   if (!targetEmail) {
     return res.status(400).json({
