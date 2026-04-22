@@ -1,3 +1,4 @@
+console.log("NEW DEPLOY WORKING");
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
