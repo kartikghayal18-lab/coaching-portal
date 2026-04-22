@@ -69,14 +69,13 @@ function getPurposeLabel(purpose) {
   return 'security verification';
 }
 
-async function sendEmailOtp({ to, otpCode, adminName, className, purpose }) {
+function buildSmtpTransporter() {
   const secure = String(process.env.SMTP_SECURE || '').toLowerCase() === 'true';
   const smtpHost = String(process.env.SMTP_HOST || '').trim();
   const smtpUser = String(process.env.SMTP_USER || '').trim();
   const smtpPass = String(process.env.SMTP_PASS || '').replace(/\s+/g, '');
-  const smtpFrom = String(process.env.SMTP_FROM || '').trim();
   const smtpFamily = Number(process.env.SMTP_FAMILY || 4);
-  const transporter = nodemailer.createTransport({
+  return nodemailer.createTransport({
     host: smtpHost,
     port: Number(process.env.SMTP_PORT),
     secure,
@@ -89,7 +88,11 @@ async function sendEmailOtp({ to, otpCode, adminName, className, purpose }) {
       pass: smtpPass,
     },
   });
+}
 
+async function sendEmailOtp({ to, otpCode, adminName, className, purpose }) {
+  const smtpFrom = String(process.env.SMTP_FROM || '').trim();
+  const transporter = buildSmtpTransporter();
   const purposeLabel = getPurposeLabel(purpose);
   const subject = `OTP for ${purposeLabel} - ${className}`;
   const text = [
@@ -113,6 +116,19 @@ async function sendEmailOtp({ to, otpCode, adminName, className, purpose }) {
   });
 }
 
+async function sendTestEmail({ to, subject, text }) {
+  const smtpFrom = String(process.env.SMTP_FROM || '').trim();
+  const transporter = buildSmtpTransporter();
+  await transporter.verify();
+  const info = await transporter.sendMail({
+    from: smtpFrom,
+    to,
+    subject,
+    text,
+  });
+  return info;
+}
+
 async function sendOtpMessage({ channel, destination, otpCode, adminName, className, purpose }) {
   if (channel === 'email') {
     await sendEmailOtp({
@@ -131,6 +147,8 @@ async function sendOtpMessage({ channel, destination, otpCode, adminName, classN
 module.exports = {
   OTP_TTL_MINUTES,
   generateOtpCode,
+  smtpConfigured,
   getOtpChannelOptions,
   sendOtpMessage,
+  sendTestEmail,
 };

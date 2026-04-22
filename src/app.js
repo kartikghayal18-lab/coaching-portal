@@ -9,7 +9,7 @@ require('dotenv').config({ quiet: true });
 
 const { getPool, run, get, all, withTransaction } = require('./db');
 const { initStorage, getStorageMode, uploadPaperFile, getPaperAccess, deleteStoredPaper } = require('./storage');
-const { OTP_TTL_MINUTES, generateOtpCode, getOtpChannelOptions, sendOtpMessage } = require('./otp-service');
+const { OTP_TTL_MINUTES, generateOtpCode, smtpConfigured, getOtpChannelOptions, sendOtpMessage, sendTestEmail } = require('./otp-service');
 
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
@@ -1782,6 +1782,69 @@ app.get('/', (req, res) => {
 app.get('/login', async (req, res) => {
   if (req.session.user) return res.redirect('/');
   return renderLoginPage(req, res);
+});
+
+app.get('/test-mail', async (req, res) => {
+  const debugSecret = String(process.env.MAIL_DEBUG_SECRET || '').trim();
+  const providedSecret = String(req.query.secret || '').trim();
+
+  if (!debugSecret || !providedSecret || !timingSafeEqualString(providedSecret, debugSecret)) {
+    return res.status(404).send('Not found');
+  }
+
+  const smtpUser = String(process.env.SMTP_USER || '').trim();
+  const smtpFrom = String(process.env.SMTP_FROM || '').trim();
+  const ownerEmail = String(process.env.OWNER_2FA_EMAIL || '').trim();
+  const targetEmail = String(req.query.to || ownerEmail || smtpUser).trim();
+
+  if (!targetEmail) {
+    return res.status(400).json({
+      ok: false,
+      error: 'No target email available. Set OWNER_2FA_EMAIL or pass ?to=',
+      config: {
+        smtpConfigured: smtpConfigured(),
+        smtpUserSet: Boolean(smtpUser),
+        smtpPassSet: Boolean(process.env.SMTP_PASS),
+        smtpFromSet: Boolean(smtpFrom),
+      },
+    });
+  }
+
+  try {
+    const info = await sendTestEmail({
+      to: targetEmail,
+      subject: 'TEST MAIL',
+      text: 'Working rocket',
+    });
+
+    return res.json({
+      ok: true,
+      message: 'MAIL SENT',
+      to: targetEmail,
+      smtpUser,
+      smtpFrom,
+      messageId: info.messageId || null,
+    });
+  } catch (err) {
+    console.error('MAIL ERROR:', err);
+    return res.status(500).json({
+      ok: false,
+      error: err.message || 'Mail send failed',
+      code: err.code || null,
+      command: err.command || null,
+      responseCode: err.responseCode || null,
+      smtp: {
+        host: String(process.env.SMTP_HOST || '').trim(),
+        port: Number(process.env.SMTP_PORT || 0),
+        secure: String(process.env.SMTP_SECURE || '').toLowerCase() === 'true',
+        family: Number(process.env.SMTP_FAMILY || 4),
+        smtpConfigured: smtpConfigured(),
+        smtpUserSet: Boolean(smtpUser),
+        smtpPassSet: Boolean(process.env.SMTP_PASS),
+        smtpFromSet: Boolean(smtpFrom),
+      },
+    });
+  }
 });
 
 app.get('/admin/forgot-password', async (req, res) => {
