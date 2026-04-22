@@ -3,7 +3,7 @@ require('dotenv').config({ quiet: true });
 
 const fs = require('fs');
 const path = require('path');
-const { initDb, db, all, run } = require('../src/db');
+const { db, all, run, getPool } = require('../src/db');
 const { initStorage, getStorageMode, uploadPaperFile } = require('../src/storage');
 
 const LOCAL_PAPER_DIR = process.env.LOCAL_PAPER_DIR
@@ -26,7 +26,7 @@ async function migrate() {
     throw new Error('Set FILE_STORAGE_MODE=s3 in .env before running migration.');
   }
 
-  await initDb();
+  await getPool().query('SELECT 1');
 
   const rows = await all(`
     SELECT id, original_name, stored_name, storage_type, storage_key, content_type

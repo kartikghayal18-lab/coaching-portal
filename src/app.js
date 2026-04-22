@@ -7,7 +7,7 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 require('dotenv').config({ quiet: true });
 
-const { initDb, run, get, all, withTransaction } = require('./db');
+const { getPool, run, get, all, withTransaction } = require('./db');
 const { initStorage, getStorageMode, uploadPaperFile, getPaperAccess, deleteStoredPaper } = require('./storage');
 const { OTP_TTL_MINUTES, generateOtpCode, getOtpChannelOptions, sendOtpMessage } = require('./otp-service');
 
@@ -4525,7 +4525,7 @@ app.use((err, req, res, next) => {
 Promise.resolve()
   .then(() => {
     initStorage();
-    return initDb();
+    return getPool().query('SELECT 1');
   })
   .then(() => cleanupDuplicateAnswerSubmissions())
   .then(() => {
