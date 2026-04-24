@@ -46,13 +46,21 @@ function smtpConfigured() {
   );
 }
 
+function resendConfigured() {
+  return Boolean(
+    process.env.RESEND_API_KEY
+    && process.env.RESEND_FROM
+  );
+}
+
 function getOtpChannelOptions({ email, contactPhone }) {
+  const emailDeliveryConfigured = smtpConfigured() || resendConfigured();
   return {
     email: {
-      available: Boolean(email) && smtpConfigured(),
+      available: Boolean(email) && emailDeliveryConfigured,
       value: String(email || '').trim().toLowerCase(),
       masked: maskEmail(email),
-      reason: !email ? 'No email saved for this admin account' : (!smtpConfigured() ? 'SMTP is not configured yet' : null),
+      reason: !email ? 'No email saved for this admin account' : (!emailDeliveryConfigured ? 'Email delivery is not configured yet' : null),
     },
     sms: {
       available: false,
@@ -68,6 +76,42 @@ function getPurposeLabel(purpose) {
   if (purpose === 'login-2fa') return 'sign in verification';
   if (purpose === 'settings-password-change') return 'password change';
   return 'security verification';
+}
+
+async function sendWithResend({ to, subject, text }) {
+  const apiKey = String(process.env.RESEND_API_KEY || '').trim();
+  const from = String(process.env.RESEND_FROM || '').trim();
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from,
+      to: [to],
+      subject,
+      text,
+    }),
+  });
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    const message = payload?.message || payload?.error || `Resend API failed with status ${response.status}`;
+    const error = new Error(message);
+    error.code = `RESEND_${response.status}`;
+    error.responseCode = response.status;
+    throw error;
+  }
+
+  return payload;
 }
 
 async function buildSmtpTransporter() {
@@ -107,8 +151,6 @@ async function buildSmtpTransporter() {
 }
 
 async function sendEmailOtp({ to, otpCode, adminName, className, purpose }) {
-  const smtpFrom = String(process.env.SMTP_FROM || '').trim();
-  const transporter = await buildSmtpTransporter();
   const purposeLabel = getPurposeLabel(purpose);
   const subject = `OTP for ${purposeLabel} - ${className}`;
   const text = [
@@ -124,6 +166,13 @@ async function sendEmailOtp({ to, otpCode, adminName, className, purpose }) {
     'If you did not request this, please ignore this message.',
   ].join('\n');
 
+  if (resendConfigured()) {
+    await sendWithResend({ to, subject, text });
+    return;
+  }
+
+  const smtpFrom = String(process.env.SMTP_FROM || '').trim();
+  const transporter = await buildSmtpTransporter();
   await transporter.sendMail({
     from: smtpFrom,
     to,
@@ -133,6 +182,10 @@ async function sendEmailOtp({ to, otpCode, adminName, className, purpose }) {
 }
 
 async function sendTestEmail({ to, subject, text }) {
+  if (resendConfigured()) {
+    return sendWithResend({ to, subject, text });
+  }
+
   const smtpFrom = String(process.env.SMTP_FROM || '').trim();
   const transporter = await buildSmtpTransporter();
   await transporter.verify();
@@ -164,6 +217,7 @@ module.exports = {
   OTP_TTL_MINUTES,
   generateOtpCode,
   smtpConfigured,
+  resendConfigured,
   getOtpChannelOptions,
   sendOtpMessage,
   sendTestEmail,

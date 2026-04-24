@@ -10,7 +10,7 @@ require('dotenv').config({ quiet: true });
 
 const { getPool, run, get, all, withTransaction } = require('./db');
 const { initStorage, getStorageMode, uploadPaperFile, getPaperAccess, deleteStoredPaper } = require('./storage');
-const { OTP_TTL_MINUTES, generateOtpCode, smtpConfigured, getOtpChannelOptions, sendOtpMessage, sendTestEmail } = require('./otp-service');
+const { OTP_TTL_MINUTES, generateOtpCode, smtpConfigured, resendConfigured, getOtpChannelOptions, sendOtpMessage, sendTestEmail } = require('./otp-service');
 
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
@@ -1790,8 +1790,10 @@ app.get('/test-mail', async (req, res) => {
   const providedSecret = String(req.query.secret || '').trim();
   const smtpUser = String(process.env.SMTP_USER || '').trim();
   const smtpFrom = String(process.env.SMTP_FROM || '').trim();
+  const resendFrom = String(process.env.RESEND_FROM || '').trim();
   const ownerEmail = String(process.env.OWNER_2FA_EMAIL || '').trim();
   const targetEmail = String(req.query.to || ownerEmail || smtpUser).trim();
+  const provider = resendConfigured() ? 'resend' : 'smtp';
 
   if (debugSecret && (!providedSecret || !timingSafeEqualString(providedSecret, debugSecret))) {
     return res.status(403).json({
@@ -1806,10 +1808,14 @@ app.get('/test-mail', async (req, res) => {
       ok: false,
       error: 'No target email available. Set OWNER_2FA_EMAIL or pass ?to=',
       config: {
+        provider,
         smtpConfigured: smtpConfigured(),
+        resendConfigured: resendConfigured(),
         smtpUserSet: Boolean(smtpUser),
         smtpPassSet: Boolean(process.env.SMTP_PASS),
         smtpFromSet: Boolean(smtpFrom),
+        resendFromSet: Boolean(resendFrom),
+        resendApiKeySet: Boolean(process.env.RESEND_API_KEY),
       },
     });
   }
@@ -1824,10 +1830,13 @@ app.get('/test-mail', async (req, res) => {
     return res.json({
       ok: true,
       message: 'MAIL SENT',
+      provider,
       to: targetEmail,
       smtpUser,
       smtpFrom,
+      resendFrom,
       messageId: info.messageId || null,
+      resendId: info.id || null,
     });
   } catch (err) {
     console.error('MAIL ERROR:', err);
@@ -1842,10 +1851,14 @@ app.get('/test-mail', async (req, res) => {
         port: Number(process.env.SMTP_PORT || 0),
         secure: String(process.env.SMTP_SECURE || '').toLowerCase() === 'true',
         family: Number(process.env.SMTP_FAMILY || 4),
+        provider,
         smtpConfigured: smtpConfigured(),
+        resendConfigured: resendConfigured(),
         smtpUserSet: Boolean(smtpUser),
         smtpPassSet: Boolean(process.env.SMTP_PASS),
         smtpFromSet: Boolean(smtpFrom),
+        resendFromSet: Boolean(resendFrom),
+        resendApiKeySet: Boolean(process.env.RESEND_API_KEY),
       },
     });
   }
