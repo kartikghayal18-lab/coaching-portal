@@ -3,10 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title><%= branding?.brandName || coaching?.name || 'Coaching Portal' %> - Admin Dashboard</title>
+  <title><%= branding?.brandName || coaching?.name || 'Edusync' %> - Admin Dashboard</title>
+  <link rel="icon" type="image/png" href="/public/edusync-logo.png" />
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
-<body style="<%= branding?.cssVars || '' %>">
+<body class="dashboard-shell" style="<%= branding?.cssVars || '' %>">
   <div class="container wide">
     <div class="topbar card hero-card">
       <div class="brand-lockup">
@@ -405,26 +406,32 @@
 
       <section class="card">
         <h2>Students by Batch</h2>
+        <p class="muted">Compact batch cards keep the page lighter. Open only the batch you want to work on.</p>
         <% if (!studentBatchGroups.length) { %>
           <p class="muted">No students available yet.</p>
         <% } %>
         <div class="batch-accordion-list">
-          <% studentBatchGroups.forEach((group, index) => { %>
-            <details class="batch-accordion" <%= index === 0 ? 'open' : '' %>>
+          <% studentBatchGroups.forEach((group) => { %>
+            <details class="batch-accordion batch-accordion--students">
               <summary class="batch-summary">
                 <span class="batch-summary-title"><%= group.label %></span>
                 <span class="batch-summary-count"><%= group.students.length %> students</span>
               </summary>
               <div class="batch-accordion-body">
-                <table>
-                  <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Action</th></tr>
+                <div class="student-card-list">
                   <% group.students.forEach((s) => { %>
-                    <tr>
-                      <td><%= s.roll_no %></td>
-                      <td><%= s.name %></td>
-                      <td><%= s.contact_phone || '-' %></td>
-                      <td><%= s.email || '-' %></td>
-                      <td>
+                    <article class="student-card-compact">
+                      <div class="student-card-head">
+                        <div>
+                          <div class="student-roll-pill">#<%= s.roll_no %></div>
+                          <h3><%= s.name %></h3>
+                        </div>
+                        <div class="student-contact-stack">
+                          <span><%= s.contact_phone || 'No phone' %></span>
+                          <span><%= s.email || 'No email' %></span>
+                        </div>
+                      </div>
+                      <div class="student-card-actions">
                         <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
                         <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
                           <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
@@ -434,10 +441,10 @@
                           <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                           <button type="submit" class="btn danger compact">Delete</button>
                         </form>
-                      </td>
-                    </tr>
+                      </div>
+                    </article>
                   <% }) %>
-                </table>
+                </div>
               </div>
             </details>
           <% }) %>
@@ -502,6 +509,8 @@
           <h2>Attendance By Date</h2>
           <form method="get" action="/admin/dashboard" class="inline-controls">
             <input type="hidden" name="section" value="attendance" />
+            <label>Month</label>
+            <input type="month" name="attendanceMonth" value="<%= attendanceMonthFilter %>" />
             <label>Date Filter</label>
             <select name="attendanceDate">
               <option value="">All Dates</option>
@@ -512,6 +521,10 @@
             <button type="submit" class="btn">Apply</button>
           </form>
           <a class="mini-link" href="/admin/dashboard?section=attendance">Clear Filter</a>
+          <div class="hero-chip-row">
+            <span class="info-chip">Attendance Entries <strong><%= attendanceThisMonthCount %></strong></span>
+            <span class="info-chip">Month <strong><%= attendanceMonthFilter %></strong></span>
+          </div>
 
           <% if (!Object.keys(attendanceByDate || {}).length) { %>
             <p class="muted">No attendance records found for selected date.</p>
@@ -566,6 +579,17 @@
 
         <div class="card">
           <h2>Fee Records</h2>
+          <form method="get" action="/admin/dashboard" class="inline-controls">
+            <input type="hidden" name="section" value="fees" />
+            <label>Month</label>
+            <input type="month" name="feesMonth" value="<%= feesMonthFilter %>" />
+            <button type="submit" class="btn">Apply</button>
+            <a class="mini-link" href="/admin/dashboard?section=fees">Clear Filter</a>
+          </form>
+          <div class="hero-chip-row">
+            <span class="info-chip">Paid This Month <strong><%= feesPaidThisMonth.length %></strong></span>
+            <span class="info-chip">Month <strong><%= feesMonthFilter %></strong></span>
+          </div>
           <table>
             <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Amount</th><th>Due</th><th>Payment</th><th>Status</th><th>Notes</th></tr>
             <% fees.forEach((f) => { %>
@@ -640,6 +664,17 @@
 
       <section class="card">
         <h2>All Test Papers</h2>
+        <form method="get" action="/admin/dashboard" class="inline-controls">
+          <input type="hidden" name="section" value="papers" />
+          <label>Month</label>
+          <input type="month" name="papersMonth" value="<%= papersMonthFilter %>" />
+          <button type="submit" class="btn">Apply</button>
+          <a class="mini-link" href="/admin/dashboard?section=papers">Clear Filter</a>
+        </form>
+        <div class="hero-chip-row">
+          <span class="info-chip">Papers This Month <strong><%= papersThisMonthCount %></strong></span>
+          <span class="info-chip">Month <strong><%= papersMonthFilter %></strong></span>
+        </div>
         <table>
           <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Test</th><th>Type</th><th>Uploaded By</th><th>Marks</th><th>Upload Date</th><th>Actions</th></tr>
           <% papers.forEach((p) => { %>

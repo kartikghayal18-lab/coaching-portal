@@ -18,6 +18,8 @@ const sessionSecret = String(process.env.SESSION_SECRET || '').trim() || crypto.
 const requestAttemptStore = new Map();
 const CAPTCHA_TTL_MS = 10 * 60 * 1000;
 const sessionCookieSecure = isProduction ? 'auto' : false;
+const OTP_SEND_LIMIT = 6;
+const OTP_SEND_WINDOW_MS = 10 * 60 * 1000;
 
 function resolvePort(value) {
   const raw = String(value || '').trim();
@@ -36,6 +38,13 @@ function resolvePort(value) {
   }
 
   return 3000;
+}
+
+function getCurrentMonthValue() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
 }
 
 const PORT = process.env.PORT || 3000;
@@ -367,6 +376,16 @@ function requireStudent(req, res, next) {
 
 app.use((req, res, next) => {
   if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    return next();
+  }
+
+  // The 2FA flow is already protected by the authenticated pending-login session
+  // plus the one-time code itself. Exempt it from CSRF token checks to avoid
+  // proxy/custom-domain session edge cases breaking OTP verification.
+  if (
+    req.method === 'POST'
+    && (req.path === '/auth/2fa/send-otp' || req.path === '/auth/2fa/verify')
+  ) {
     return next();
   }
 
@@ -777,12 +796,12 @@ function buildBranding(coaching = null) {
   const themePrimary = normalizeHexColor(coaching?.theme_primary, DEFAULT_THEME.brand);
   const themeBackground = normalizeHexColor(coaching?.theme_background, DEFAULT_THEME.background);
   const themeSurface = normalizeHexColor(coaching?.theme_surface, DEFAULT_THEME.surface);
-  const brandName = String(coaching?.brand_name || coaching?.name || 'Coaching Classes Portal').trim();
+  const brandName = String(coaching?.brand_name || coaching?.name || 'Edusync').trim();
 
   return {
     brandName,
     coachingName: coaching?.name || brandName,
-    logoUrl: normalizeLogoUrl(coaching?.logo_url),
+    logoUrl: normalizeLogoUrl(coaching?.logo_url || '/public/edusync-logo.png'),
     themePrimary,
     themeBackground,
     themeSurface,
@@ -1935,10 +1954,10 @@ app.post('/admin/forgot-password', async (req, res) => {
 });
 
 app.post('/admin/reset-password/send-otp', async (req, res) => {
-  const retryAfter = enforceRateLimit(req, 'admin-reset-password-otp', 3, 10 * 60 * 1000);
+  const retryAfter = enforceRateLimit(req, 'admin-reset-password-otp', OTP_SEND_LIMIT, OTP_SEND_WINDOW_MS);
   if (retryAfter) {
     res.set('Retry-After', String(retryAfter));
-    req.session.flash = { type: 'error', text: 'Too many OTP requests. Please wait a few minutes and try again.' };
+    req.session.flash = { type: 'error', text: `Too many OTP requests. Please wait ${retryAfter}s and try again.` };
     return res.redirect('/admin/reset-password');
   }
 
@@ -2139,10 +2158,10 @@ app.get('/owner/reset-password', async (req, res) => {
 });
 
 app.post('/owner/reset-password/send-otp', async (req, res) => {
-  const retryAfter = enforceRateLimit(req, 'owner-reset-password-otp', 3, 10 * 60 * 1000);
+  const retryAfter = enforceRateLimit(req, 'owner-reset-password-otp', OTP_SEND_LIMIT, OTP_SEND_WINDOW_MS);
   if (retryAfter) {
     res.set('Retry-After', String(retryAfter));
-    req.session.flash = { type: 'error', text: 'Too many OTP requests. Please wait a few minutes and try again.' };
+    req.session.flash = { type: 'error', text: `Too many OTP requests. Please wait ${retryAfter}s and try again.` };
     return res.redirect('/owner/reset-password');
   }
 
@@ -2448,10 +2467,10 @@ app.get('/auth/2fa', async (req, res) => {
 });
 
 app.post('/auth/2fa/send-otp', async (req, res) => {
-  const retryAfter = enforceRateLimit(req, 'auth-2fa-send-otp', 3, 10 * 60 * 1000);
+  const retryAfter = enforceRateLimit(req, 'auth-2fa-send-otp', OTP_SEND_LIMIT, OTP_SEND_WINDOW_MS);
   if (retryAfter) {
     res.set('Retry-After', String(retryAfter));
-    req.session.flash = { type: 'error', text: 'Too many OTP requests. Please wait a few minutes and try again.' };
+    req.session.flash = { type: 'error', text: `Too many OTP requests. Please wait ${retryAfter}s and try again.` };
     return res.redirect('/auth/2fa');
   }
 
@@ -3234,6 +3253,10 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const subscriptionState = req.subscriptionState || getSubscriptionState(req.currentCoaching);
   const activeSection = subscriptionState.accessBlocked ? 'overview' : getAdminSection(req.query.section);
   const attendanceDateFilter = (req.query.attendanceDate || '').trim();
+  const currentMonth = getCurrentMonthValue();
+  const attendanceMonthFilter = (req.query.attendanceMonth || currentMonth).trim();
+  const papersMonthFilter = (req.query.papersMonth || currentMonth).trim();
+  const feesMonthFilter = (req.query.feesMonth || currentMonth).trim();
   const studentSearchQuery = (req.query.studentSearch || '').trim();
   const coachingId = req.session.user.coachingId;
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
@@ -3284,9 +3307,10 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      LEFT JOIN batches b ON b.id = u.batch_id
      LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
      WHERE tp.coaching_id = ?
+       AND CAST(tp.upload_date AS TEXT) LIKE ?
      ORDER BY tp.upload_date DESC
      LIMIT 250`,
-    [coachingId]
+    [coachingId, `${papersMonthFilter}%`]
   );
 
   let attendanceSql = `
@@ -3300,6 +3324,9 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   if (attendanceDateFilter) {
     attendanceSql += ` AND a.attendance_date = ? `;
     attendanceParams.push(attendanceDateFilter);
+  } else if (attendanceMonthFilter) {
+    attendanceSql += ` AND CAST(a.attendance_date AS TEXT) LIKE ? `;
+    attendanceParams.push(`${attendanceMonthFilter}%`);
   }
   attendanceSql += ` ORDER BY a.attendance_date DESC, a.id DESC LIMIT 300 `;
   const attendance = await all(attendanceSql, attendanceParams);
@@ -3319,9 +3346,13 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      JOIN users u ON u.id = f.student_id
      LEFT JOIN batches b ON b.id = u.batch_id
      WHERE f.coaching_id = ?
+       AND (
+         CAST(COALESCE(f.payment_date, '') AS TEXT) LIKE ?
+         OR CAST(COALESCE(f.due_date, '') AS TEXT) LIKE ?
+       )
      ORDER BY f.created_at DESC
      LIMIT 150`,
-    [coachingId]
+    [coachingId, `${feesMonthFilter}%`, `${feesMonthFilter}%`]
   );
 
   const notes = await all(
@@ -3404,6 +3435,9 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     notesCount: notes.length,
     activeAnswerRequests: answerRequestSummaries.filter((item) => item.state.isActive).length,
   };
+  const feesPaidThisMonth = fees.filter((item) => item.status === 'paid' && String(item.payment_date || '').startsWith(feesMonthFilter));
+  const papersThisMonthCount = papers.length;
+  const attendanceThisMonthCount = attendance.length;
   const studentUsage = getStudentUsage(students.length, coaching);
   const batchSummaries = toBatchSummaries(students, batches);
   const studentBatchGroups = toStudentBatchGroups(students, batches);
@@ -3441,12 +3475,18 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     attendanceByDate: groupAttendanceByDate(attendance),
     attendanceDates,
     attendanceDateFilter,
+    attendanceMonthFilter,
+    papersMonthFilter,
+    feesMonthFilter,
     fees,
+    feesPaidThisMonth,
     notes,
     answerRequestSummaries,
     overviewStudents,
     defaultAnswerRequestStart,
     stats,
+    papersThisMonthCount,
+    attendanceThisMonthCount,
     activeSection,
     storageMode: getStorageMode(),
     flash: req.session.flash,
@@ -4564,12 +4604,27 @@ app.get('/student/dashboard', requireStudent, async (req, res) => {
 });
 
 app.get('/papers/:id/view', requireAuth, async (req, res) => {
-  const paper = await getPaperForUser(req.params.id, req.session.user);
-  if (!paper) return res.status(404).send('Paper not found');
+  try {
+    const paper = await getPaperForUser(req.params.id, req.session.user);
+    if (!paper) return res.status(404).send('Paper not found');
 
-  const access = await getPaperAccess(paper, 'inline');
-  return res.redirect(access.url);
-});   // ✅ YE MISSING THA
+    const access = await getPaperAccess(paper, 'inline');
+    if (!access) return res.status(404).send('Paper access not available');
+
+    if (access.type === 'redirect' && access.url) {
+      return res.redirect(access.url);
+    }
+
+    if (access.type === 'local' && access.filePath) {
+      return res.sendFile(access.filePath);
+    }
+
+    return res.status(500).send('Paper access is misconfigured');
+  } catch (err) {
+    console.error(err);
+    return res.status(500).send('Server error');
+  }
+});
 
 app.get('/papers/:id/download', requireAuth, async (req, res) => {
   try {
@@ -4577,7 +4632,17 @@ app.get('/papers/:id/download', requireAuth, async (req, res) => {
     if (!paper) return res.status(404).send('Paper not found');
 
     const access = await getPaperAccess(paper, 'attachment');
-    return res.redirect(access.url);
+    if (!access) return res.status(404).send('Paper access not available');
+
+    if (access.type === 'redirect' && access.url) {
+      return res.redirect(access.url);
+    }
+
+    if (access.type === 'local' && access.filePath) {
+      return res.download(access.filePath, paper.original_name || paper.stored_name || 'paper');
+    }
+
+    return res.status(500).send('Paper access is misconfigured');
   } catch (err) {
     console.error(err);
     return res.status(500).send('Server error');
