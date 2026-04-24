@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const dns = require('dns').promises;
 const nodemailer = require('nodemailer');
 const OTP_LENGTH = 6;
 const OTP_TTL_MINUTES = 10;
@@ -69,20 +70,35 @@ function getPurposeLabel(purpose) {
   return 'security verification';
 }
 
-function buildSmtpTransporter() {
-  const secure = String(process.env.SMTP_SECURE || '').toLowerCase() === 'true';
+async function buildSmtpTransporter() {
   const smtpHost = String(process.env.SMTP_HOST || '').trim();
+  const smtpPort = Number(process.env.SMTP_PORT || 0);
   const smtpUser = String(process.env.SMTP_USER || '').trim();
   const smtpPass = String(process.env.SMTP_PASS || '').replace(/\s+/g, '');
   const smtpFamily = Number(process.env.SMTP_FAMILY || 4);
+
+  let resolvedHost = smtpHost;
+  if (smtpHost) {
+    try {
+      const lookup = await dns.lookup(smtpHost, { family: smtpFamily === 6 ? 6 : 4 });
+      resolvedHost = lookup.address || smtpHost;
+    } catch {
+      resolvedHost = smtpHost;
+    }
+  }
+
+  const secureSetting = String(process.env.SMTP_SECURE || '').toLowerCase();
+  const secure = secureSetting === 'true' || smtpPort === 465;
+
   return nodemailer.createTransport({
-    host: smtpHost,
-    port: Number(process.env.SMTP_PORT),
+    host: resolvedHost,
+    port: smtpPort,
     secure,
     family: Number.isInteger(smtpFamily) && (smtpFamily === 4 || smtpFamily === 6) ? smtpFamily : 4,
     connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT || 20000),
     greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT || 15000),
     socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT || 30000),
+    tls: smtpHost ? { servername: smtpHost } : undefined,
     auth: {
       user: smtpUser,
       pass: smtpPass,
@@ -92,7 +108,7 @@ function buildSmtpTransporter() {
 
 async function sendEmailOtp({ to, otpCode, adminName, className, purpose }) {
   const smtpFrom = String(process.env.SMTP_FROM || '').trim();
-  const transporter = buildSmtpTransporter();
+  const transporter = await buildSmtpTransporter();
   const purposeLabel = getPurposeLabel(purpose);
   const subject = `OTP for ${purposeLabel} - ${className}`;
   const text = [
@@ -118,7 +134,7 @@ async function sendEmailOtp({ to, otpCode, adminName, className, purpose }) {
 
 async function sendTestEmail({ to, subject, text }) {
   const smtpFrom = String(process.env.SMTP_FROM || '').trim();
-  const transporter = buildSmtpTransporter();
+  const transporter = await buildSmtpTransporter();
   await transporter.verify();
   const info = await transporter.sendMail({
     from: smtpFrom,
