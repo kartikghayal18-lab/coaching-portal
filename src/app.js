@@ -4086,10 +4086,16 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
     return res.redirect('/admin/dashboard?section=papers');
   }
 
-  const report = { assigned: 0, skipped: 0, failed: 0, duplicates: 0 };
+  const report = { assigned: 0, skipped: 0, failed: 0, duplicates: 0, details: [] };
 
   for (const file of files) {
     const paperMeta = parsePaperMetaFromFileName(file.originalname);
+    if (!String(paperMeta.rollNo || '').trim()) {
+      report.failed += 1;
+      report.details.push({ file: file.originalname, reason: 'Could not detect roll number from filename' });
+      continue;
+    }
+
     const student = await get(
       `SELECT id FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
       [coachingId, paperMeta.rollNo]
@@ -4097,6 +4103,7 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
 
     if (!student) {
       report.skipped += 1;
+      report.details.push({ file: file.originalname, reason: `No student found for roll number "${paperMeta.rollNo}"` });
       continue;
     }
 
@@ -4114,24 +4121,69 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
 
       if (result.status === 'duplicate') {
         report.duplicates += 1;
+        report.details.push({ file: file.originalname, reason: `Duplicate ignored for roll number "${paperMeta.rollNo}"` });
       } else {
         report.assigned += 1;
+        report.details.push({ file: file.originalname, reason: `Assigned to roll number "${paperMeta.rollNo}"` });
       }
     } catch (err) {
       console.error('Upload failed for', file.originalname, err);
       report.failed += 1;
+      report.details.push({ file: file.originalname, reason: err.message || 'Upload failed while saving file' });
     }
   }
 
   req.session.flash = {
     type: report.failed ? 'error' : 'success',
     text: `Upload complete. Assigned: ${report.assigned}, Duplicate ignored: ${report.duplicates}, Skipped: ${report.skipped}, Failed: ${report.failed}`,
+    details: report.details.slice(0, 20),
   };
   await auditActor(req, 'paper_uploaded_bulk', {
     targetType: 'paper_batch',
     details: report,
   });
   return res.redirect('/admin/dashboard?section=papers');
+});
+
+app.get('/admin/papers/:id/debug', requireCoachingAdmin, async (req, res) => {
+  const paper = await getPaperForUser(req.params.id, req.session.user);
+  if (!paper) {
+    return res.status(404).json({ ok: false, error: 'Paper not found' });
+  }
+
+  try {
+    const access = await getPaperAccess(paper, 'inline');
+    return res.json({
+      ok: true,
+      paper: {
+        id: paper.id,
+        originalName: paper.original_name,
+        storedName: paper.stored_name,
+        storageType: paper.storage_type || 'local',
+        storageKey: paper.storage_key || null,
+        publicUrl: paper.public_url || null,
+        contentType: paper.content_type || null,
+        uploadDate: paper.upload_date || null,
+        coachingId: paper.coaching_id || null,
+        studentId: paper.student_id || null,
+      },
+      access,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error.message || 'Failed to inspect paper',
+      paper: {
+        id: paper.id,
+        originalName: paper.original_name,
+        storedName: paper.stored_name,
+        storageType: paper.storage_type || 'local',
+        storageKey: paper.storage_key || null,
+        publicUrl: paper.public_url || null,
+        contentType: paper.content_type || null,
+      },
+    });
+  }
 });
 
 app.post('/admin/answer-requests', requireCoachingAdmin, async (req, res) => {

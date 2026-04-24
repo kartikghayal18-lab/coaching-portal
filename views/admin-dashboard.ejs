@@ -32,6 +32,24 @@
 
     <% if (flash) { %>
       <div class="alert <%= flash.type %>"><%= flash.text %></div>
+      <% if (activeSection === 'papers' && flash.details?.length) { %>
+        <section class="card">
+          <h3>Upload Details</h3>
+          <div class="student-card-list">
+            <% flash.details.forEach((item) => { %>
+              <article class="student-card-compact">
+                <div class="student-card-head">
+                  <div>
+                    <div class="student-roll-pill">File</div>
+                    <h3><%= item.file %></h3>
+                  </div>
+                </div>
+                <p class="muted"><%= item.reason %></p>
+              </article>
+            <% }) %>
+          </div>
+        </section>
+      <% } %>
     <% } %>
 
     <% if (subscriptionState.accessBlocked) { %>
@@ -696,6 +714,7 @@
               <td>
                 <a href="/papers/<%= p.id %>/view" target="_blank" rel="noopener">Open</a>
                 <a href="/papers/<%= p.id %>/download">Download</a>
+                <a href="/admin/papers/<%= p.id %>/debug" target="_blank" rel="noopener">Debug</a>
                 <form method="post" action="/papers/<%= p.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this paper?');">
                   <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                   <input type="hidden" name="redirectTo" value="/admin/dashboard?section=papers" />
