@@ -3,846 +3,885 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title><%= branding?.brandName || coaching?.name || 'Edusync' %> - Admin Dashboard</title>
+  <title><%= branding?.brandName || coaching?.name || 'Edusync' %> · Admin</title>
   <link rel="icon" type="image/png" href="/public/edusync-logo.png" />
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
-<body class="dashboard-shell" style="<%= branding?.cssVars || '' %>">
-  <div class="container wide">
-    <div class="topbar card hero-card">
-      <div class="brand-lockup">
+<body class="dashboard-shell ops-dashboard-v2" style="<%= branding?.cssVars || '' %>">
+  <%
+    const sectionMetaMap = {
+      overview: {
+        label: 'Control Center',
+        title: 'Run your institute from one operating layer',
+        copy: 'Attendance, fees, uploads, and academic operations stay in one compact admin system.',
+        actionHref: '/admin/dashboard?section=students',
+        actionLabel: 'Open Students'
+      },
+      students: {
+        label: 'Student Ops',
+        title: 'Admissions, batches, and retention',
+        copy: 'Keep student operations tight, searchable, and batch-aware without drowning the screen in forms.',
+        actionHref: '#student-create-panel',
+        actionLabel: 'Add Student'
+      },
+      attendance: {
+        label: 'Attendance Desk',
+        title: 'Mark, audit, and detect risk quickly',
+        copy: 'Save attendance in seconds and review monthly movement without switching tools.',
+        actionHref: '#attendance-form-panel',
+        actionLabel: 'Mark Attendance'
+      },
+      fees: {
+        label: 'Finance Desk',
+        title: 'Collections, dues, and follow-up',
+        copy: 'Track who paid, what is pending, and where recovery work is needed this month.',
+        actionHref: '#fees-form-panel',
+        actionLabel: 'Add Fee'
+      },
+      papers: {
+        label: 'Academic Records',
+        title: 'Uploads, papers, and answer windows',
+        copy: 'Manage paper uploads, answer windows, and storage diagnostics from one academic operations space.',
+        actionHref: '#paper-upload-panel',
+        actionLabel: 'Upload Paper'
+      },
+      notes: {
+        label: 'Learning Hub',
+        title: 'Notes, links, and announcements',
+        copy: 'Publish batch resources and keep latest learning material visible without extra clutter.',
+        actionHref: '#notes-publish-panel',
+        actionLabel: 'Publish Note'
+      },
+      settings: {
+        label: 'Settings',
+        title: 'Branding, profile, and access control',
+        copy: 'Update workspace identity and admin security from a cleaner control space.',
+        actionHref: '#settings-profile-panel',
+        actionLabel: 'Open Settings'
+      }
+    };
+
+    const currentSectionMeta = sectionMetaMap[activeSection] || sectionMetaMap.overview;
+    const todayLabel = new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' });
+    const feesPaidThisMonthAmount = (feesPaidThisMonth || []).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const activeBatchesCount = (batches || []).filter((batch) => batch.status !== 'completed').length;
+    const completedBatchesCount = (batches || []).filter((batch) => batch.status === 'completed').length;
+    const activeUploadWindows = (answerRequestSummaries || []).filter((item) => item.state.isActive).length;
+    const upcomingUploadWindows = (answerRequestSummaries || []).filter((item) => item.state.isUpcoming).length;
+    const topPerformers = [...(overviewStudents || [])]
+      .filter((student) => student.latestPercent !== null)
+      .sort((a, b) => Number(b.latestPercent) - Number(a.latestPercent))
+      .slice(0, 5);
+
+    const attendanceByRoll = {};
+    (attendance || []).forEach((entry) => {
+      const key = entry.roll_no || entry.name;
+      if (!attendanceByRoll[key]) {
+        attendanceByRoll[key] = { name: entry.name, roll: entry.roll_no, absent: 0, late: 0, present: 0 };
+      }
+      if (entry.status === 'absent') attendanceByRoll[key].absent += 1;
+      if (entry.status === 'late') attendanceByRoll[key].late += 1;
+      if (entry.status === 'present') attendanceByRoll[key].present += 1;
+    });
+    const lowAttendanceAlerts = Object.values(attendanceByRoll)
+      .filter((item) => item.absent > 0 || item.late > 1)
+      .sort((a, b) => (b.absent + b.late) - (a.absent + a.late))
+      .slice(0, 6);
+
+    const recentActivities = [
+      ...(papers || []).slice(0, 4).map((paper) => ({
+        type: 'paper',
+        title: `${paper.name || paper.roll_no} uploaded ${paper.test_label || paper.original_name}`,
+        meta: paper.batch_name || '-',
+        timestamp: paper.upload_date,
+      })),
+      ...(fees || []).filter((fee) => fee.status === 'paid').slice(0, 4).map((fee) => ({
+        type: 'fee',
+        title: `Fee received from ${fee.name}`,
+        meta: `₹${fee.amount}`,
+        timestamp: fee.payment_date || fee.due_date || '',
+      })),
+      ...(attendance || []).slice(0, 4).map((item) => ({
+        type: 'attendance',
+        title: `Attendance marked for ${item.name}`,
+        meta: item.status,
+        timestamp: item.attendance_date,
+      })),
+      ...(notes || []).slice(0, 3).map((note) => ({
+        type: 'note',
+        title: `Note published: ${note.title}`,
+        meta: note.batch_name || '-',
+        timestamp: note.created_at,
+      }))
+    ].sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0)).slice(0, 8);
+
+    const actionItems = [
+      { label: 'Add Student', href: '/admin/dashboard?section=students#student-create-panel' },
+      { label: 'Mark Attendance', href: '/admin/dashboard?section=attendance#attendance-form-panel' },
+      { label: 'Collect Fees', href: '/admin/dashboard?section=fees#fees-form-panel' },
+      { label: 'Upload Paper', href: '/admin/dashboard?section=papers#paper-upload-panel' }
+    ];
+
+    const metricCards = [
+      { label: 'Total Students', value: stats.totalStudents, change: `${studentUsage.limit === null ? 'Unlimited plan' : `${studentUsage.remaining} seats left`}`, tone: 'primary' },
+      { label: 'Attendance Entries', value: attendanceThisMonthCount || 0, change: attendanceMonthFilter || 'This month', tone: 'success' },
+      { label: 'Collected Fees', value: `₹${feesPaidThisMonthAmount.toFixed(0)}`, change: `${feesPaidThisMonth.length} paid entries`, tone: 'success' },
+      { label: 'Pending Fees', value: stats.pendingFees, change: 'Requires action', tone: 'warning' },
+      { label: 'Upload Activity', value: papersThisMonthCount || 0, change: `${activeUploadWindows} active windows`, tone: 'primary' },
+      { label: 'Active Batches', value: activeBatchesCount, change: `${completedBatchesCount} completed`, tone: 'neutral' }
+    ];
+  %>
+
+  <div class="ops2-shell">
+    <aside class="ops2-sidebar">
+      <div class="ops2-sidebar__brand">
         <% if (branding?.logoUrl) { %>
-          <img src="<%= branding.logoUrl %>" alt="<%= branding.brandName %> logo" class="brand-logo" />
+          <img src="<%= branding.logoUrl %>" alt="<%= branding.brandName || coaching?.name || 'Edusync' %> logo" class="ops2-sidebar__logo" />
         <% } %>
         <div>
-          <p class="eyebrow"><%= branding?.brandName || 'Coaching Management' %></p>
-          <h1>Admin Dashboard</h1>
-          <p class="muted">Welcome, <%= user.name %> | <strong><%= coaching?.name || user.coachingName || '-' %></strong> | Plan: <%= coaching?.plan_name || user.coachingPlan || '-' %></p>
-          <div class="hero-chip-row">
-            <span class="info-chip">Subscription <strong><%= coaching?.subscription_status || user.coachingSubscriptionStatus || '-' %></strong></span>
-            <span class="info-chip">Storage <strong><%= (storageMode || 'local').toUpperCase() %></strong></span>
-            <span class="info-chip">Batches <strong><%= batches.length %></strong></span>
-            <span class="info-chip">Seats <strong><%= studentUsage.limit === null ? 'Unlimited' : `${studentUsage.count}/${studentUsage.limit}` %></strong></span>
-          </div>
+          <p class="ops2-eyebrow">Workspace</p>
+          <h2><%= coaching?.name || branding?.brandName || 'Edusync' %></h2>
         </div>
       </div>
-      <form method="post" action="/logout">
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="btn secondary">Logout</button></form>
-    </div>
 
-    <% if (flash) { %>
-      <div class="alert <%= flash.type %>"><%= flash.text %></div>
-      <% if (activeSection === 'papers' && flash.details?.length) { %>
-        <section class="card">
-          <h3>Upload Details</h3>
-          <div class="student-card-list">
-            <% flash.details.forEach((item) => { %>
-              <article class="student-card-compact">
-                <div class="student-card-head">
+      <nav class="ops2-nav" aria-label="Admin Navigation">
+        <a class="ops2-nav__item <%= activeSection === 'overview' ? 'is-active' : '' %>" href="/admin/dashboard?section=overview"><span>●</span><span>Dashboard</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'students' ? 'is-active' : '' %>" href="/admin/dashboard?section=students"><span>◐</span><span>Students</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'attendance' ? 'is-active' : '' %>" href="/admin/dashboard?section=attendance"><span>◌</span><span>Attendance</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'fees' ? 'is-active' : '' %>" href="/admin/dashboard?section=fees"><span>◈</span><span>Fees</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'papers' ? 'is-active' : '' %>" href="/admin/dashboard?section=papers"><span>◆</span><span>Test Papers</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'notes' ? 'is-active' : '' %>" href="/admin/dashboard?section=notes"><span>◫</span><span>Notes</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'settings' ? 'is-active' : '' %>" href="/admin/dashboard?section=settings"><span>⎈</span><span>Settings</span></a>
+      </nav>
+
+      <div class="ops2-sidebar__footer">
+        <div class="ops2-user">
+          <span class="ops2-user__avatar"><%= (user.name || 'A').trim().charAt(0).toUpperCase() %></span>
+          <div>
+            <strong><%= user.name %></strong>
+            <span><%= coaching?.plan_name || user.coachingPlan || 'Plan' %></span>
+          </div>
+        </div>
+        <form method="post" action="/logout">
+          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+          <button type="submit" class="ops2-logout">Logout</button>
+        </form>
+      </div>
+    </aside>
+
+    <div class="ops2-stage">
+      <header class="ops2-topbar">
+        <form method="get" action="/admin/search-student" class="ops2-searchbar">
+          <span class="ops2-searchbar__icon">⌕</span>
+          <input type="text" name="roll" value="<%= studentSearch?.query || '' %>" placeholder="Search students, rolls, notes, batches" />
+        </form>
+        <div class="ops2-topbar__actions">
+          <button type="button" class="ops2-ghost-btn">Ctrl + K</button>
+          <a href="<%= currentSectionMeta.actionHref %>" class="ops2-primary-btn"><%= currentSectionMeta.actionLabel %></a>
+          <div class="ops2-topbar__user">
+            <span class="ops2-topbar__dot"></span>
+            <span class="ops2-topbar__meta"><strong><%= user.name %></strong><small><%= todayLabel %></small></span>
+          </div>
+        </div>
+      </header>
+
+      <% if (flash) { %>
+        <div class="alert <%= flash.type %>"><%= flash.text %></div>
+        <% if (activeSection === 'papers' && flash.details?.length) { %>
+          <section class="ops2-panel ops2-panel--logs">
+            <div class="ops2-panel__header compact">
+              <div>
+                <p class="ops2-eyebrow">Upload Debug</p>
+                <h3>Upload Details</h3>
+              </div>
+            </div>
+            <div class="ops2-log-list">
+              <% flash.details.forEach((item) => { %>
+                <div class="ops2-log-item">
+                  <strong><%= item.file %></strong>
+                  <span><%= item.reason %></span>
+                </div>
+              <% }) %>
+            </div>
+          </section>
+        <% } %>
+      <% } %>
+
+      <% if (subscriptionState.accessBlocked) { %>
+        <section class="ops2-panel blocked-card">
+          <div class="ops2-panel__header compact">
+            <div>
+              <p class="ops2-eyebrow">Subscription Blocked</p>
+              <h3><%= subscriptionState.blockedTitle %></h3>
+            </div>
+          </div>
+          <p class="muted"><%= subscriptionState.blockedMessage %></p>
+        </section>
+      <% } else { %>
+        <% if (subscriptionNotice) { %>
+          <div class="alert warning"><%= subscriptionNotice %></div>
+        <% } %>
+
+        <main class="ops2-main">
+          <section class="ops2-hero">
+            <div class="ops2-hero__copy">
+              <p class="ops2-eyebrow"><%= currentSectionMeta.label %></p>
+              <h1><%= currentSectionMeta.title %></h1>
+              <p><%= currentSectionMeta.copy %></p>
+              <div class="ops2-action-row">
+                <% actionItems.forEach((item) => { %>
+                  <a href="<%= item.href %>" class="ops2-chip-link"><%= item.label %></a>
+                <% }) %>
+              </div>
+            </div>
+            <div class="ops2-hero__meta">
+              <div class="ops2-insight-card">
+                <span class="ops2-insight-card__label">Today</span>
+                <strong><%= todayLabel %></strong>
+                <small><%= stats.absentEntries %> absent entries recorded</small>
+              </div>
+              <div class="ops2-insight-card ops2-insight-card--accent">
+                <span class="ops2-insight-card__label">Ops Pulse</span>
+                <strong><%= activeBatchesCount %> live batches</strong>
+                <small><%= activeUploadWindows %> upload windows running</small>
+              </div>
+            </div>
+          </section>
+
+          <% if (activeSection === 'overview') { %>
+            <section class="ops2-metrics-grid">
+              <% metricCards.forEach((metric, index) => { %>
+                <article class="ops2-metric-card ops2-metric-card--<%= metric.tone %>" style="animation-delay:<%= index * 0.05 %>s">
+                  <div class="ops2-metric-card__top">
+                    <span class="ops2-metric-card__icon"><%= ['◔','◑','◒','◕','◈','◎'][index] %></span>
+                    <span class="ops2-metric-card__trend">+<%= index + 3 %>%</span>
+                  </div>
+                  <strong><%= metric.value %></strong>
+                  <span class="ops2-metric-card__label"><%= metric.label %></span>
+                  <small><%= metric.change %></small>
+                  <div class="ops2-sparkbars">
+                    <% [35, 62, 48, 72, 58].forEach((height, sparkIndex) => { %>
+                      <span style="height:<%= height + (index * 2) - sparkIndex %>%"></span>
+                    <% }) %>
+                  </div>
+                </article>
+              <% }) %>
+            </section>
+
+            <section class="ops2-split-grid">
+              <section class="ops2-panel ops2-panel--chartwide">
+                <div class="ops2-panel__header">
                   <div>
-                    <div class="student-roll-pill">File</div>
-                    <h3><%= item.file %></h3>
+                    <p class="ops2-eyebrow">Insights</p>
+                    <h3>Attendance & collection trends</h3>
+                  </div>
+                  <span class="ops2-kicker">This month</span>
+                </div>
+                <div class="ops2-chart-stack">
+                  <div class="ops2-line-chart">
+                    <svg viewBox="0 0 600 180" preserveAspectRatio="none" aria-hidden="true">
+                      <defs>
+                        <linearGradient id="opsLineA" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stop-color="rgba(37,99,235,0.35)" />
+                          <stop offset="100%" stop-color="rgba(37,99,235,0)" />
+                        </linearGradient>
+                      </defs>
+                      <path d="M0 150 C70 120, 100 60, 160 78 S260 155, 330 118 430 28, 600 82" fill="none" stroke="#2563eb" stroke-width="4" stroke-linecap="round" />
+                      <path d="M0 180 L0 150 C70 120, 100 60, 160 78 S260 155, 330 118 430 28, 600 82 L600 180 Z" fill="url(#opsLineA)" />
+                    </svg>
+                  </div>
+                  <div class="ops2-bars-grid">
+                    <div><span style="height: 66%"></span><small>Mon</small></div>
+                    <div><span style="height: 74%"></span><small>Tue</small></div>
+                    <div><span style="height: 48%"></span><small>Wed</small></div>
+                    <div><span style="height: 81%"></span><small>Thu</small></div>
+                    <div><span style="height: 70%"></span><small>Fri</small></div>
+                    <div><span style="height: 55%"></span><small>Sat</small></div>
                   </div>
                 </div>
-                <p class="muted"><%= item.reason %></p>
-              </article>
-            <% }) %>
-          </div>
-        </section>
-      <% } %>
-    <% } %>
+              </section>
 
-    <% if (subscriptionState.accessBlocked) { %>
-      <section class="card blocked-card">
-        <h2><%= subscriptionState.blockedTitle %></h2>
-        <p class="muted"><%= subscriptionState.blockedMessage %></p>
-        <p class="muted">Portal access is restricted until the owner renews or reactivates the coaching subscription.</p>
-      </section>
-    <% } else { %>
-      <section class="section-switcher card">
-        <a class="sec-btn <%= activeSection === 'overview' ? 'active' : '' %>" href="/admin/dashboard?section=overview">Overview</a>
-        <a class="sec-btn <%= activeSection === 'attendance' ? 'active' : '' %>" href="/admin/dashboard?section=attendance">Attendance</a>
-        <a class="sec-btn <%= activeSection === 'students' ? 'active' : '' %>" href="/admin/dashboard?section=students">Student List</a>
-        <a class="sec-btn <%= activeSection === 'fees' ? 'active' : '' %>" href="/admin/dashboard?section=fees">Fees Management</a>
-        <a class="sec-btn <%= activeSection === 'papers' ? 'active' : '' %>" href="/admin/dashboard?section=papers">Test Papers</a>
-        <a class="sec-btn <%= activeSection === 'notes' ? 'active' : '' %>" href="/admin/dashboard?section=notes">Batch Notes</a>
-        <a class="sec-btn <%= activeSection === 'settings' ? 'active' : '' %>" href="/admin/dashboard?section=settings">Settings</a>
-      </section>
-    <% } %>
-
-    <% if (subscriptionNotice) { %>
-      <div class="alert warning"><%= subscriptionNotice %></div>
-    <% } %>
-
-    <% if (activeSection === 'overview') { %>
-      <section class="stats-grid">
-        <div class="stat-card"><p>Total Students</p><h3><%= stats.totalStudents %></h3></div>
-        <div class="stat-card"><p>Total Papers</p><h3><%= stats.totalPapers %></h3></div>
-        <div class="stat-card"><p>Pending/Overdue Fees</p><h3><%= stats.pendingFees %></h3></div>
-        <div class="stat-card"><p>Absent Entries</p><h3><%= stats.absentEntries %></h3></div>
-        <div class="stat-card"><p>Batch Notes</p><h3><%= stats.notesCount %></h3></div>
-        <div class="stat-card"><p>Active Upload Windows</p><h3><%= stats.activeAnswerRequests %></h3></div>
-        <div class="stat-card"><p>File Storage</p><h3><%= (storageMode || 'local').toUpperCase() %></h3></div>
-        <div class="stat-card"><p>Student Limit</p><h3><%= studentUsage.limit === null ? 'Unlimited' : `${studentUsage.count}/${studentUsage.limit}` %></h3></div>
-      </section>
-
-      <section class="grid two">
-        <div class="card">
-          <h2>Quick Access</h2>
-          <p class="muted">Use the top buttons to open Attendance, Student List, Fees Management, Papers, and Batch Notes.</p>
-          <% if (studentUsage.limit !== null) { %>
-            <p class="muted">Remaining student seats on this plan: <strong><%= studentUsage.remaining %></strong></p>
-          <% } %>
-          <p class="muted">The overview below now shows student contacts, uploaded papers, progress snapshot, and the 24-hour answer upload tracker.</p>
-        </div>
-
-        <div class="card">
-          <h2>Announce Answer Upload</h2>
-          <p class="muted">Create a 24-hour upload window. Students in that batch can upload their answer paper from their dashboard.</p>
-          <form method="post" action="/admin/answer-requests" data-single-submit>
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-            <label>Title</label>
-            <input type="text" name="title" placeholder="Physics Test 5 Answer Upload" required />
-
-            <label>Batch</label>
-            <select name="batchId" required>
-              <option value="">Select batch</option>
-              <% batches.forEach((batch) => { %>
-                <option value="<%= batch.id %>"><%= batch.name %></option>
-              <% }) %>
-            </select>
-
-            <label>Start Time</label>
-            <input type="datetime-local" name="startsAt" value="<%= defaultAnswerRequestStart %>" required />
-
-            <label>Description (optional)</label>
-            <textarea name="description" rows="3" placeholder="Upload today's handwritten answer paper."></textarea>
-
-            <button type="submit" class="btn" <%= batches.length ? '' : 'disabled' %>>Create 24 Hour Window</button>
-          </form>
-          <% if (!batches.length) { %>
-            <p class="muted">Create a custom batch first, then you can announce upload windows for it.</p>
-          <% } %>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>Student Overview</h2>
-        <p class="muted">Admin can open a full student dashboard view, see uploaded papers, progress, contact details, and latest upload activity.</p>
-        <table>
-          <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Phone</th><th>Email</th><th>Papers</th><th>Latest Score</th><th>Last Upload</th><th>Dashboard</th></tr>
-          <% overviewStudents.forEach((student) => { %>
-            <tr>
-              <td><%= student.roll_no %></td>
-              <td><%= student.name %></td>
-              <td><%= student.batch_name || ((student.standard || student.course) ? `${student.standard || ''}${student.standard && student.course ? ' - ' : ''}${student.course ? student.course.toUpperCase() : ''}` : '-') %></td>
-              <td><%= student.contact_phone || '-' %></td>
-              <td><%= student.email || '-' %></td>
-              <td><%= student.paperCount %></td>
-              <td>
-                <% if (student.latestPercent !== null) { %>
-                  <%= student.latestPercent %>%
-                  <div class="tiny-note"><%= student.latestMarkedLabel || '-' %></div>
-                <% } else { %>
-                  -
-                <% } %>
-              </td>
-              <td><%= student.lastUpload || '-' %></td>
-              <td><a href="/admin/students/<%= student.id %>/overview">View Dashboard</a></td>
-            </tr>
-          <% }) %>
-        </table>
-      </section>
-
-      <section class="card">
-        <h2>24 Hour Upload Tracker</h2>
-        <% if (!answerRequestSummaries.length) { %>
-          <p class="muted">No answer upload windows created yet.</p>
-        <% } %>
-
-        <% answerRequestSummaries.forEach((request) => { %>
-          <div class="tracker-card">
-            <div class="tracker-head">
-              <div>
-                <h3><%= request.title %></h3>
-                <p class="muted"><%= request.batch_name || ((request.standard || request.course) ? `${request.standard || ''}${request.standard && request.course ? ' - ' : ''}${request.course ? request.course.toUpperCase() : ''}` : '-') %></p>
-                <% if (request.description) { %>
-                  <p class="muted"><%= request.description %></p>
-                <% } %>
-              </div>
-              <div class="tracker-meta">
-                <span class="status <%= request.state.isActive ? 'paid' : request.state.isUpcoming ? 'pending' : 'overdue' %>"><%= request.state.phase %></span>
-                <div class="tiny-note">Start: <%= request.state.startsAtLabel %></div>
-                <div class="tiny-note">End: <%= request.state.endsAtLabel %></div>
-              </div>
-            </div>
-
-            <div class="stats-grid compact-grid">
-              <div class="stat-card"><p>Total Students</p><h3><%= request.totalStudents %></h3></div>
-              <div class="stat-card"><p>Uploaded</p><h3><%= request.uploadedCount %></h3></div>
-              <div class="stat-card"><p>Pending</p><h3><%= request.pendingCount %></h3></div>
-              <div class="stat-card"><p>Time Left</p><h3><%= request.state.isActive ? `${request.state.remainingHours} hrs` : '-' %></h3></div>
-            </div>
-
-            <div class="tracker-filter-row">
-              <label for="trackerFilter-<%= request.id %>">Show</label>
-              <select id="trackerFilter-<%= request.id %>" class="tracker-filter" data-tracker-id="<%= request.id %>">
-                <option value="uploaded">Students who submit</option>
-                <option value="pending">Students who don't submit</option>
-              </select>
-            </div>
-
-            <div class="card embedded-card tracker-panel active" data-tracker-panel="<%= request.id %>" data-tracker-mode="uploaded">
-              <h3>Students who submit</h3>
-              <% if (!request.uploadedStudents.length) { %>
-                <p class="muted">No student has uploaded yet.</p>
-              <% } %>
-              <table>
-                <tr><th>Status</th><th>Roll</th><th>Name</th><th>Uploaded At</th><th>Actions</th></tr>
-                <% request.uploadedStudents.forEach((student) => { %>
-                  <tr>
-                    <td>✅</td>
-                    <td><%= student.roll_no %></td>
-                    <td><%= student.name %></td>
-                    <td><%= student.submission.upload_date %></td>
-                    <td>
-                      <a href="/papers/<%= student.submission.id %>/view" target="_blank" rel="noopener">Open</a>
-                      <form method="post" action="/papers/<%= student.submission.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this uploaded paper?');">
-                        <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                        <input type="hidden" name="redirectTo" value="/admin/dashboard?section=overview" />
-                        <button type="submit" class="btn danger compact">Delete</button>
-                      </form>
-                    </td>
-                  </tr>
-                <% }) %>
-              </table>
-            </div>
-
-            <div class="card embedded-card tracker-panel" data-tracker-panel="<%= request.id %>" data-tracker-mode="pending">
-              <h3>Students who don't submit</h3>
-              <% if (!request.pendingStudents.length) { %>
-                <p class="muted">All students in this batch have uploaded.</p>
-              <% } %>
-              <table>
-                <tr><th>Roll</th><th>Name</th><th>Contact</th><th>Email</th></tr>
-                <% request.pendingStudents.forEach((student) => { %>
-                  <tr>
-                    <td><%= student.roll_no %></td>
-                    <td><%= student.name %></td>
-                    <td><%= student.contact_phone || '-' %></td>
-                    <td><%= student.email || '-' %></td>
-                  </tr>
-                <% }) %>
-              </table>
-            </div>
-          </div>
-        <% }) %>
-      </section>
-    <% } %>
-
-    <% if (!subscriptionState.accessBlocked && activeSection === 'students') { %>
-      <section class="card">
-        <h2>Search Student</h2>
-        <form method="get" action="/admin/search-student" class="inline-controls">
-          <label for="student-search-roll">Roll Number</label>
-          <input id="student-search-roll" type="text" name="roll" value="<%= studentSearch?.query || '' %>" placeholder="Enter Roll Number" />
-          <button type="submit" class="btn">Search</button>
-          <% if (studentSearch?.query) { %>
-            <a href="/admin/dashboard?section=students" class="btn secondary">Clear</a>
-          <% } %>
-        </form>
-        <p class="muted">Search by exact roll number, partial roll, student name, or contact number.</p>
-      </section>
-
-      <% if (studentSearch?.query) { %>
-        <section class="card">
-          <h2>Search Results</h2>
-          <% if (studentSearch.totalMatches) { %>
-            <p class="muted">Showing <strong><%= studentSearch.results.length %></strong> result(s) for "<strong><%= studentSearch.query %></strong>"<%= studentSearch.totalMatches > studentSearch.results.length ? ` out of ${studentSearch.totalMatches} matches` : '' %>.</p>
-            <table>
-              <tr><th>Roll</th><th>Name</th><th>Phone</th><th>Email</th><th>Batch</th><th>Action</th></tr>
-              <% studentSearch.results.forEach((student) => { %>
-                <tr>
-                  <td><%= student.roll_no %></td>
-                  <td><%= student.name %></td>
-                  <td><%= student.contact_phone || '-' %></td>
-                  <td><%= student.email || '-' %></td>
-                  <td><%= student.batch_name || '-' %></td>
-                  <td><a href="/admin/students/<%= student.id %>/overview">Open Dashboard</a></td>
-                </tr>
-              <% }) %>
-            </table>
-          <% } else { %>
-            <p class="muted">No student matched "<strong><%= studentSearch.query %></strong>". Try full roll number, name, or contact number.</p>
-          <% } %>
-        </section>
-      <% } %>
-
-      <section class="grid two">
-        <div class="card">
-          <h2>Add Student</h2>
-          <p class="muted">If you leave password empty, the student logs in with roll number as password.</p>
-          <% if (studentUsage.limit !== null) { %>
-            <p class="muted">Current plan allows <strong><%= studentUsage.limit %></strong> students. Added: <strong><%= studentUsage.count %></strong>. Remaining: <strong><%= studentUsage.remaining %></strong>.</p>
-          <% } %>
-          <form method="post" action="/admin/students">
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-            <label>Roll Number</label>
-            <input type="text" name="rollNo" required />
-
-            <label>Name</label>
-            <input type="text" name="name" />
-
-            <label>Contact Number</label>
-            <input type="text" name="contactPhone" placeholder="9876543210" />
-
-            <label>Email ID</label>
-            <input type="email" name="email" placeholder="student@example.com" />
-
-            <label>Batch</label>
-            <select name="batchId" required>
-              <option value="">Select batch</option>
-              <% batches.forEach((batch) => { %>
-                <option value="<%= batch.id %>"><%= batch.name %></option>
-              <% }) %>
-            </select>
-
-            <label>Password (optional, default = roll no)</label>
-            <input type="text" name="password" />
-
-            <button type="submit" class="btn" <%= batches.length ? '' : 'disabled' %>>Create Student</button>
-          </form>
-          <% if (!batches.length) { %>
-            <p class="muted">Create at least one batch first. Then you can add students into it.</p>
-          <% } %>
-        </div>
-
-        <div class="card">
-          <h2>Batch Setup</h2>
-          <form method="post" action="/admin/batches" data-single-submit>
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-            <label>Custom Batch Name</label>
-            <input type="text" name="batchName" placeholder="11th-A, 11th-B, MHT-CET, Repeater Batch" required />
-            <button type="submit" class="btn">Create Batch</button>
-          </form>
-
-          <form method="post" action="/admin/batches/rename" class="batch-rename-form">
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-            <h3>Promote / Rename Batch</h3>
-            <label>Current Batch</label>
-            <select name="batchId" required>
-              <option value="">Select batch</option>
-              <% batches.forEach((batch) => { %>
-                <option value="<%= batch.id %>"><%= batch.name %></option>
-              <% }) %>
-            </select>
-
-            <label>New Batch Name</label>
-            <input type="text" name="newBatchName" placeholder="12th-A, 12th-B, Repeater Batch, MHT-CET" required />
-            <button type="submit" class="btn secondary">Update Batch</button>
-          </form>
-
-          <h3 style="margin-top: 20px;">Existing Batches</h3>
-          <table>
-            <tr><th>Batch</th><th>Status</th><th>Created</th><th>Completed</th><th>Count</th><th>Action</th></tr>
-            <% batchSummaries.forEach((batch) => { %>
-              <tr>
-                <td><%= batch.name %></td>
-                <td><%= batch.status || (batch.isUnassigned ? '-' : 'active') %></td>
-                <td><%= batch.createdDaysAgo || '-' %></td>
-                <td><%= batch.completedDaysAgo || '-' %></td>
-                <td><%= batch.count %></td>
-                <td>
-                  <% if (batch.id && !batch.is_retention_batch) { %>
-                    <% if (batch.status === 'completed') { %>
-                      <form method="post" action="/admin/batches/<%= batch.id %>/activate" style="display:inline-block; margin-right: 8px;">
-                        <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                        <button type="submit" class="btn secondary compact">Make Active</button>
-                      </form>
-                    <% } else { %>
-                      <form method="post" action="/admin/batches/<%= batch.id %>/complete" style="display:inline-block; margin-right: 8px;">
-                        <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                        <button type="submit" class="btn secondary compact">Mark Complete</button>
-                      </form>
-                    <% } %>
-                    <form method="post" action="/admin/batches/<%= batch.id %>/delete" onsubmit="return confirm('Delete batch <%= batch.name %>? Students must be removed from this batch first. Related notes and answer windows for this batch will also be removed.');">
-                      <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                      <button type="submit" class="btn danger compact">Delete Batch</button>
-                    </form>
-                  <% } else if (batch.is_retention_batch) { %>
-                    <span class="muted">Protected retention batch</span>
-                  <% } else { %>
-                    <span class="muted">-</span>
+              <section class="ops2-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Signals</p>
+                    <h3>Upcoming reminders</h3>
+                  </div>
+                </div>
+                <div class="ops2-timeline-list">
+                  <% if (!answerRequestSummaries.length && !lowAttendanceAlerts.length && !stats.pendingFees) { %>
+                    <p class="muted">No alerts right now. Operations look stable.</p>
                   <% } %>
-                </td>
-              </tr>
-            <% }) %>
-          </table>
-          <p class="tiny-note">You can delete only an empty batch. Completed batches can keep up to 5 retained students for future admissions or parent references.</p>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>Completed Batch Retention</h2>
-        <% if (!completedBatches.length) { %>
-          <p class="muted">No completed batches yet.</p>
-        <% } %>
-        <% completedBatches.forEach((batch) => { %>
-          <details class="batch-accordion">
-            <summary class="batch-summary">
-              <span class="batch-summary-title"><%= batch.name %></span>
-              <span class="batch-summary-count"><%= batch.studentCount %> active records | retained <%= batch.retainedCount %>/<%= 5 %></span>
-            </summary>
-            <div class="batch-accordion-body">
-              <p class="muted">Created <strong><%= batch.createdDaysAgo || '-' %></strong>. Completed <strong><%= batch.completedDaysAgo || '-' %></strong> ago. Keep only up to 5 students from this batch in retained records.</p>
-              <% if (!batch.eligibleRetentionStudents.length) { %>
-                <p class="muted">No eligible students left in this batch to move.</p>
-              <% } else if (batch.retentionRemaining <= 0) { %>
-                <p class="muted">Retention limit already reached for this batch.</p>
-              <% } else { %>
-                <table>
-                  <tr><th>Roll</th><th>Name</th><th>Move To Retention</th></tr>
-                  <% batch.eligibleRetentionStudents.forEach((student) => { %>
-                    <tr>
-                      <td><%= student.roll_no %></td>
-                      <td><%= student.name %></td>
-                      <td>
-                        <form method="post" action="/admin/batches/<%= batch.id %>/retain-student">
-                          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                          <input type="hidden" name="studentId" value="<%= student.id %>" />
-                          <button type="submit" class="btn compact" <%= batch.retentionRemaining <= 0 ? 'disabled' : '' %>>Move</button>
-                        </form>
-                      </td>
-                    </tr>
+                  <% answerRequestSummaries.slice(0, 3).forEach((request) => { %>
+                    <article class="ops2-timeline-item">
+                      <strong><%= request.title %></strong>
+                      <span><%= request.batch_name || '-' %> · <%= request.state.phase %></span>
+                    </article>
                   <% }) %>
-                </table>
-              <% } %>
-            </div>
-          </details>
-        <% }) %>
-      </section>
+                  <% lowAttendanceAlerts.slice(0, 3).forEach((alert) => { %>
+                    <article class="ops2-timeline-item danger">
+                      <strong><%= alert.name %></strong>
+                      <span><%= alert.absent %> absent · <%= alert.late %> late</span>
+                    </article>
+                  <% }) %>
+                  <% if (stats.pendingFees) { %>
+                    <article class="ops2-timeline-item warn">
+                      <strong>Pending fee records</strong>
+                      <span><%= stats.pendingFees %> entries need follow-up</span>
+                    </article>
+                  <% } %>
+                </div>
+              </section>
+            </section>
 
-      <section class="card">
-        <h2>Students by Batch</h2>
-        <p class="muted">Compact batch cards keep the page lighter. Open only the batch you want to work on.</p>
-        <% if (!studentBatchGroups.length) { %>
-          <p class="muted">No students available yet.</p>
-        <% } %>
-        <div class="batch-accordion-list">
-          <% studentBatchGroups.forEach((group) => { %>
-            <details class="batch-accordion batch-accordion--students">
-              <summary class="batch-summary">
-                <span class="batch-summary-title"><%= group.label %></span>
-                <span class="batch-summary-count"><%= group.students.length %> students</span>
-              </summary>
-              <div class="batch-accordion-body">
-                <div class="student-card-list">
-                  <% group.students.forEach((s) => { %>
-                    <article class="student-card-compact">
-                      <div class="student-card-head">
-                        <div>
-                          <div class="student-roll-pill">#<%= s.roll_no %></div>
-                          <h3><%= s.name %></h3>
-                        </div>
-                        <div class="student-contact-stack">
-                          <span><%= s.contact_phone || 'No phone' %></span>
-                          <span><%= s.email || 'No email' %></span>
-                        </div>
-                      </div>
-                      <div class="student-card-actions">
-                        <a href="/admin/students/<%= s.id %>/overview" class="mini-link">View Dashboard</a>
-                        <form method="post" action="/admin/students/<%= s.id %>/reset-password" style="display:inline-block; margin-right: 8px;">
-                          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                          <button type="submit" class="btn secondary compact">Reset Password</button>
-                        </form>
-                        <form method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
-                          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                          <button type="submit" class="btn danger compact">Delete</button>
-                        </form>
+            <section class="ops2-dual-grid">
+              <section class="ops2-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Activity</p>
+                    <h3>Recent activity feed</h3>
+                  </div>
+                </div>
+                <div class="ops2-activity-list">
+                  <% if (!recentActivities.length) { %>
+                    <p class="muted">No activity yet.</p>
+                  <% } %>
+                  <% recentActivities.forEach((item) => { %>
+                    <article class="ops2-activity-row ops2-activity-row--<%= item.type %>">
+                      <span class="ops2-activity-avatar"><%= (item.title || 'A').trim().charAt(0).toUpperCase() %></span>
+                      <div>
+                        <strong><%= item.title %></strong>
+                        <span><%= item.meta %> · <%= item.timestamp || '-' %></span>
                       </div>
                     </article>
                   <% }) %>
                 </div>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Rankings</p>
+                    <h3>Top performers</h3>
+                  </div>
+                </div>
+                <div class="ops2-ranking-list">
+                  <% if (!topPerformers.length) { %>
+                    <p class="muted">No marked papers yet.</p>
+                  <% } %>
+                  <% topPerformers.forEach((student, index) => { %>
+                    <article class="ops2-ranking-row">
+                      <span class="ops2-ranking-rank">#<%= index + 1 %></span>
+                      <div>
+                        <strong><%= student.name %></strong>
+                        <span><%= student.batch_name || '-' %></span>
+                      </div>
+                      <span class="ops2-ranking-score"><%= student.latestPercent %>%</span>
+                    </article>
+                  <% }) %>
+                </div>
+              </section>
+            </section>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header">
+                <div>
+                  <p class="ops2-eyebrow">Student Snapshot</p>
+                  <h3>High signal student overview</h3>
+                </div>
+                <a href="/admin/dashboard?section=students" class="ops2-inline-link">Open student workspace</a>
               </div>
-            </details>
-          <% }) %>
-        </div>
-      </section>
-    <% } %>
-
-    <% if (!subscriptionState.accessBlocked && activeSection === 'attendance') { %>
-      <section class="grid two">
-        <div class="card">
-          <h2>Mark Attendance</h2>
-          <div class="tab-buttons" role="tablist">
-            <button type="button" class="tab-btn active" data-tab="single">Single Student</button>
-            <button type="button" class="tab-btn" data-tab="bulk">Bulk by Batch</button>
-          </div>
-
-          <div id="tab-single" class="tab-panel active">
-            <form method="post" action="/admin/attendance">
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-              <label>Roll Number</label>
-              <input type="text" name="rollNo" required />
-              <label>Date</label>
-              <input type="date" name="attendanceDate" required />
-              <label>Status</label>
-              <select name="status" required>
-                <option value="present">Present</option>
-                <option value="absent">Absent</option>
-                <option value="late">Late</option>
-              </select>
-              <label>Notes</label>
-              <input type="text" name="notes" />
-              <button type="submit" class="btn">Save Attendance</button>
-            </form>
-          </div>
-
-          <div id="tab-bulk" class="tab-panel">
-            <form method="post" action="/admin/attendance-bulk">
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-              <label>Batch</label>
-              <select name="batchId" required>
-                <option value="">Select batch</option>
-                <% batches.forEach((batch) => { %>
-                  <option value="<%= batch.id %>"><%= batch.name %></option>
-                <% }) %>
-              </select>
-
-              <label>Date</label>
-              <input type="date" name="attendanceDate" required />
-
-              <label>Absent Roll Numbers (comma/new line/space)</label>
-              <textarea name="absentRollNos" rows="3" placeholder="101, 105, 108"></textarea>
-
-              <label>Notes (optional)</label>
-              <input type="text" name="notes" placeholder="Special class note" />
-
-              <button type="submit" class="btn">Mark Attendance (others present)</button>
-            </form>
-          </div>
-        </div>
-
-        <div class="card">
-          <h2>Attendance By Date</h2>
-          <form method="get" action="/admin/dashboard" class="inline-controls">
-            <input type="hidden" name="section" value="attendance" />
-            <label>Month</label>
-            <input type="month" name="attendanceMonth" value="<%= attendanceMonthFilter %>" />
-            <label>Date Filter</label>
-            <select name="attendanceDate">
-              <option value="">All Dates</option>
-              <% attendanceDates.forEach((d) => { %>
-                <option value="<%= d.attendance_date %>" <%= attendanceDateFilter === d.attendance_date ? 'selected' : '' %>><%= d.attendance_date %></option>
-              <% }) %>
-            </select>
-            <button type="submit" class="btn">Apply</button>
-          </form>
-          <a class="mini-link" href="/admin/dashboard?section=attendance">Clear Filter</a>
-          <div class="hero-chip-row">
-            <span class="info-chip">Attendance Entries <strong><%= attendanceThisMonthCount %></strong></span>
-            <span class="info-chip">Month <strong><%= attendanceMonthFilter %></strong></span>
-          </div>
-
-          <% if (!Object.keys(attendanceByDate || {}).length) { %>
-            <p class="muted">No attendance records found for selected date.</p>
-          <% } %>
-        </div>
-      </section>
-
-      <% Object.keys(attendanceByDate || {}).forEach((day) => { %>
-        <section class="card">
-          <h3>Attendance Date: <%= day %></h3>
-          <table>
-            <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Status</th><th>Notes</th></tr>
-            <% attendanceByDate[day].forEach((a) => { %>
-              <tr>
-                <td><%= a.roll_no %></td>
-                <td><%= a.name %></td>
-                <td><%= a.batch_name || ((a.standard || a.course) ? `${a.standard || ''}${a.standard && a.course ? ' - ' : ''}${a.course ? a.course.toUpperCase() : ''}` : '-') %></td>
-                <td><span class="status <%= a.status %>"><%= a.status %></span></td>
-                <td><%= a.notes || '-' %></td>
-              </tr>
-            <% }) %>
-          </table>
-        </section>
-      <% }) %>
-    <% } %>
-
-    <% if (!subscriptionState.accessBlocked && activeSection === 'fees') { %>
-      <section class="grid two">
-        <div class="card">
-          <h2>Add Fee Record</h2>
-          <form method="post" action="/admin/fees">
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-            <label>Roll Number</label>
-            <input type="text" name="rollNo" required />
-            <label>Amount</label>
-            <input type="number" name="amount" step="0.01" min="0" required />
-            <label>Due Date</label>
-            <input type="date" name="dueDate" />
-            <label>Payment Date</label>
-            <input type="date" name="paymentDate" />
-            <label>Status</label>
-            <select name="status" required>
-              <option value="pending">Pending</option>
-              <option value="paid">Paid</option>
-              <option value="overdue">Overdue</option>
-            </select>
-            <label>Notes</label>
-            <input type="text" name="notes" />
-            <button type="submit" class="btn">Save Fee</button>
-          </form>
-        </div>
-
-        <div class="card">
-          <h2>Fee Records</h2>
-          <form method="get" action="/admin/dashboard" class="inline-controls">
-            <input type="hidden" name="section" value="fees" />
-            <label>Month</label>
-            <input type="month" name="feesMonth" value="<%= feesMonthFilter %>" />
-            <button type="submit" class="btn">Apply</button>
-            <a class="mini-link" href="/admin/dashboard?section=fees">Clear Filter</a>
-          </form>
-          <div class="hero-chip-row">
-            <span class="info-chip">Paid This Month <strong><%= feesPaidThisMonth.length %></strong></span>
-            <span class="info-chip">Month <strong><%= feesMonthFilter %></strong></span>
-          </div>
-          <table>
-            <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Amount</th><th>Due</th><th>Payment</th><th>Status</th><th>Notes</th></tr>
-            <% fees.forEach((f) => { %>
-              <tr>
-                <td><%= f.roll_no %></td>
-                <td><%= f.name %></td>
-                <td><%= f.batch_name || ((f.standard || f.course) ? `${f.standard || ''}${f.standard && f.course ? ' - ' : ''}${f.course ? f.course.toUpperCase() : ''}` : '-') %></td>
-                <td><%= f.amount %></td>
-                <td><%= f.due_date || '-' %></td>
-                <td><%= f.payment_date || '-' %></td>
-                <td><span class="status <%= f.status %>"><%= f.status %></span></td>
-                <td><%= f.notes || '-' %></td>
-              </tr>
-            <% }) %>
-          </table>
-        </div>
-      </section>
-    <% } %>
-
-    <% if (!subscriptionState.accessBlocked && activeSection === 'papers') { %>
-      <section class="grid two">
-        <div class="card">
-          <h2>Assign Paper to Student</h2>
-          <p class="muted">Admins can upload a student paper directly. Optional marks update the progress chart immediately.</p>
-          <form method="post" action="<%= appendCsrfToUrl('/admin/upload-paper-single') %>" enctype="multipart/form-data" data-single-submit>
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-            <label>Student Roll Number</label>
-            <input type="text" name="rollNo" required />
-
-            <label>Test Title</label>
-            <input type="text" name="testLabel" placeholder="Weekly Chemistry Test" />
-
-            <div class="grid two compact-grid">
-              <div>
-                <label>Marks Obtained</label>
-                <input type="number" name="marksObtained" step="0.01" min="0" />
+              <div class="ops2-table-shell">
+                <table class="ops2-table ops2-table--wide">
+                  <thead>
+                    <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Phone</th><th>Papers</th><th>Latest Score</th><th>Last Upload</th><th>Open</th></tr>
+                  </thead>
+                  <tbody>
+                    <% overviewStudents.forEach((student) => { %>
+                      <tr>
+                        <td><%= student.roll_no %></td>
+                        <td><%= student.name %></td>
+                        <td><%= student.batch_name || '-' %></td>
+                        <td><%= student.contact_phone || '-' %></td>
+                        <td><%= student.paperCount %></td>
+                        <td><%= student.latestPercent !== null ? `${student.latestPercent}%` : '-' %></td>
+                        <td><%= student.lastUpload || '-' %></td>
+                        <td><a href="/admin/students/<%= student.id %>/overview" class="ops2-inline-link">View</a></td>
+                      </tr>
+                    <% }) %>
+                  </tbody>
+                </table>
               </div>
-              <div>
-                <label>Max Marks</label>
-                <input type="number" name="maxMarks" step="0.01" min="0" />
-              </div>
-            </div>
+            </section>
 
-            <label>Link to Upload Window (optional)</label>
-            <select name="answerRequestId">
-              <option value="">General Paper</option>
-              <% answerRequestSummaries.forEach((request) => { %>
-                <option value="<%= request.id %>"><%= request.title %> | <%= request.batch_name || ((request.standard || request.course) ? `${request.standard || ''}${request.standard && request.course ? ' - ' : ''}${request.course ? request.course.toUpperCase() : ''}` : '-') %></option>
-              <% }) %>
-            </select>
-
-            <label>Select File</label>
-            <input type="file" name="paper" required />
-            <button type="submit" class="btn">Upload for Student</button>
-          </form>
-        </div>
-
-        <div class="card">
-          <h2>Bulk Upload Test Papers</h2>
-          <p class="muted">Filename rules:</p>
-          <p class="muted"><code>101.pdf</code> (only assign paper)</p>
-          <p class="muted"><code>101_78_100.pdf</code> (auto-save marks 78/100)</p>
-          <p class="muted">Pattern: <code>rollno_marks_max.ext</code></p>
-          <form method="post" action="<%= appendCsrfToUrl('/admin/upload-papers') %>" enctype="multipart/form-data" data-single-submit>
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-            <label>Select Files</label>
-            <input type="file" name="papers" multiple required />
-            <button type="submit" class="btn">Upload and Assign</button>
-          </form>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>All Test Papers</h2>
-        <form method="get" action="/admin/dashboard" class="inline-controls">
-          <input type="hidden" name="section" value="papers" />
-          <label>Month</label>
-          <input type="month" name="papersMonth" value="<%= papersMonthFilter %>" />
-          <button type="submit" class="btn">Apply</button>
-          <a class="mini-link" href="/admin/dashboard?section=papers">Clear Filter</a>
-        </form>
-        <div class="hero-chip-row">
-          <span class="info-chip">Papers This Month <strong><%= papersThisMonthCount %></strong></span>
-          <span class="info-chip">Month <strong><%= papersMonthFilter %></strong></span>
-        </div>
-        <table>
-          <tr><th>Roll</th><th>Name</th><th>Batch</th><th>Test</th><th>Type</th><th>Uploaded By</th><th>Marks</th><th>Upload Date</th><th>Actions</th></tr>
-          <% papers.forEach((p) => { %>
-            <tr>
-              <td><%= p.roll_no %></td>
-              <td><%= p.name %></td>
-              <td><%= p.batch_name || ((p.standard || p.course) ? `${p.standard || ''}${p.standard && p.course ? ' - ' : ''}${p.course ? p.course.toUpperCase() : ''}` : '-') %></td>
-              <td><%= p.test_label || p.original_name %></td>
-              <td><%= p.paper_type === 'answer_submission' ? 'Answer Upload' : 'General' %></td>
-              <td><%= p.uploaded_by_name || '-' %> (<%= p.uploaded_by_role || '-' %>)</td>
-              <td>
-                <% if (p.marks_obtained !== null && p.max_marks !== null) { %>
-                  <%= p.marks_obtained %>/<%= p.max_marks %>
-                <% } else { %>
-                  -
-                <% } %>
-              </td>
-              <td><%= p.upload_date %></td>
-              <td>
-                <a href="/papers/<%= p.id %>/view" target="_blank" rel="noopener">Open</a>
-                <a href="/papers/<%= p.id %>/download">Download</a>
-                <a href="/admin/papers/<%= p.id %>/debug" target="_blank" rel="noopener">Debug</a>
-                <form method="post" action="/papers/<%= p.id %>/delete" style="display:inline-block" onsubmit="return confirm('Delete this paper?');">
+            <section class="ops2-dual-grid">
+              <section class="ops2-panel" id="answer-request-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Upload Windows</p>
+                    <h3>Create 24-hour answer windows</h3>
+                  </div>
+                </div>
+                <form method="post" action="/admin/answer-requests" data-single-submit class="ops2-form-grid">
                   <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                  <input type="hidden" name="redirectTo" value="/admin/dashboard?section=papers" />
-                  <button type="submit" class="btn danger compact">Delete</button>
+                  <div class="ops2-field full"><label>Title</label><input type="text" name="title" placeholder="Physics Test 5 Answer Upload" required /></div>
+                  <div class="ops2-field"><label>Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                  <div class="ops2-field"><label>Start Time</label><input type="datetime-local" name="startsAt" value="<%= defaultAnswerRequestStart %>" required /></div>
+                  <div class="ops2-field full"><label>Description</label><textarea name="description" rows="3" placeholder="Upload today's handwritten answer paper."></textarea></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn" <%= batches.length ? '' : 'disabled' %>>Create Window</button></div>
                 </form>
-              </td>
-            </tr>
-          <% }) %>
-        </table>
-      </section>
-    <% } %>
+              </section>
 
-    <% if (!subscriptionState.accessBlocked && activeSection === 'notes') { %>
-      <section class="grid two">
-        <div class="card">
-          <h2>Add Batch Note / Video Link</h2>
-          <form method="post" action="/admin/notes">
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-            <label>Batch</label>
-            <select name="batchId" required>
-              <option value="">Select batch</option>
-              <% batches.forEach((batch) => { %>
-                <option value="<%= batch.id %>"><%= batch.name %></option>
-              <% }) %>
-            </select>
+              <section class="ops2-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Trackers</p>
+                    <h3>Active upload windows</h3>
+                  </div>
+                </div>
+                <div class="ops2-window-list">
+                  <% if (!answerRequestSummaries.length) { %>
+                    <p class="muted">No upload windows created yet.</p>
+                  <% } %>
+                  <% answerRequestSummaries.forEach((request) => { %>
+                    <article class="ops2-window-card">
+                      <div class="ops2-window-card__top">
+                        <div>
+                          <strong><%= request.title %></strong>
+                          <span><%= request.batch_name || '-' %></span>
+                        </div>
+                        <span class="status <%= request.state.isActive ? 'paid' : request.state.isUpcoming ? 'pending' : 'overdue' %>"><%= request.state.phase %></span>
+                      </div>
+                      <div class="ops2-window-metrics">
+                        <span>Total <strong><%= request.totalStudents %></strong></span>
+                        <span>Uploaded <strong><%= request.uploadedCount %></strong></span>
+                        <span>Pending <strong><%= request.pendingCount %></strong></span>
+                      </div>
+                      <small>Start <%= request.state.startsAtLabel %> · End <%= request.state.endsAtLabel %></small>
+                      <% if (request.state.isExpired) { %>
+                        <form method="post" action="/admin/answer-requests/<%= request.id %>/delete" onsubmit="return confirm('Remove this expired upload session? Uploaded papers will stay saved, only this session card will be removed.');">
+                          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                          <button type="submit" class="text-delete-btn">Remove Session</button>
+                        </form>
+                      <% } %>
+                    </article>
+                  <% }) %>
+                </div>
+              </section>
+            </section>
+          <% } %>
 
-            <label>Title</label>
-            <input type="text" name="title" placeholder="Physics Revision Notes" required />
+          <% if (activeSection === 'students') { %>
+            <section class="ops2-students-shell">
+              <div class="ops2-students-main">
+                <section class="ops2-panel">
+                  <div class="ops2-panel__header">
+                    <div>
+                      <p class="ops2-eyebrow">Registry</p>
+                      <h3>Students by batch</h3>
+                    </div>
+                    <span class="ops2-kicker"><%= students.length %> students</span>
+                  </div>
+                  <% if (studentSearch?.query) { %>
+                    <div class="ops2-search-inline-result">
+                      <strong><%= studentSearch.results.length %></strong> result(s) for “<%= studentSearch.query %>”
+                      <a href="/admin/dashboard?section=students" class="ops2-inline-link">Clear</a>
+                    </div>
+                  <% } %>
+                  <div class="ops2-batch-list">
+                    <% studentBatchGroups.forEach((group, groupIndex) => { %>
+                      <details class="ops2-batch-item" <%= groupIndex === 0 ? 'open' : '' %>>
+                        <summary class="ops2-batch-item__summary">
+                          <div>
+                            <strong><%= group.label %></strong>
+                            <span><%= group.students.length %> students</span>
+                          </div>
+                          <span class="ops2-batch-item__chevron">⌄</span>
+                        </summary>
+                        <div class="ops2-table-shell ops2-table-shell--compact">
+                          <table class="ops2-table ops2-table--students">
+                            <thead>
+                              <tr><th>Roll</th><th>Name</th><th>Class</th><th>Actions</th></tr>
+                            </thead>
+                            <tbody>
+                              <% group.students.forEach((s) => { %>
+                                <tr>
+                                  <td><%= s.roll_no %></td>
+                                  <td><%= s.name %></td>
+                                  <td><%= group.label %></td>
+                                  <td class="ops2-actions-inline">
+                                    <a href="/admin/students/<%= s.id %>/overview" class="ops2-inline-link">View Dashboard</a>
+                                    <form class="inline-delete-form" method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
+                                      <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                                      <button type="submit" class="text-delete-btn">Delete</button>
+                                    </form>
+                                  </td>
+                                </tr>
+                              <% }) %>
+                            </tbody>
+                          </table>
+                        </div>
+                      </details>
+                    <% }) %>
+                  </div>
+                </section>
 
-            <label>Resource URL (Google Drive / YouTube)</label>
-            <input type="url" name="resourceUrl" placeholder="https://..." required />
+                <section class="ops2-dual-grid ops2-dual-grid--tight">
+                  <section class="ops2-panel">
+                    <div class="ops2-panel__header compact">
+                      <div>
+                        <p class="ops2-eyebrow">Batch Manager</p>
+                        <h3>Promote and rename batches</h3>
+                      </div>
+                    </div>
+                    <form method="post" action="/admin/batches/rename" class="ops2-form-grid">
+                      <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                      <div class="ops2-field"><label>Current Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                      <div class="ops2-field"><label>New Batch Name</label><input type="text" name="newBatchName" placeholder="12th-A, Repeater, CET" required /></div>
+                      <div class="ops2-actions"><button type="submit" class="ops2-primary-btn">Update Batch</button></div>
+                    </form>
+                  </section>
 
-            <label>Description (optional)</label>
-            <textarea name="description" rows="3"></textarea>
+                  <section class="ops2-panel">
+                    <div class="ops2-panel__header compact">
+                      <div>
+                        <p class="ops2-eyebrow">Completed Batches</p>
+                        <h3>Retention controls</h3>
+                      </div>
+                    </div>
+                    <div class="ops2-batch-status-list">
+                      <% batchSummaries.forEach((batch) => { %>
+                        <article class="ops2-batch-status-row">
+                          <div>
+                            <strong><%= batch.name %></strong>
+                            <span><%= batch.status || (batch.isUnassigned ? '-' : 'active') %> · <%= batch.count %> students</span>
+                          </div>
+                          <div class="ops2-batch-status-actions">
+                            <% if (batch.id && !batch.is_retention_batch) { %>
+                              <% if (batch.status === 'completed') { %>
+                                <form method="post" action="/admin/batches/<%= batch.id %>/activate"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="ops2-inline-link-btn">Make Active</button></form>
+                              <% } else { %>
+                                <form method="post" action="/admin/batches/<%= batch.id %>/complete"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="ops2-inline-link-btn">Mark Complete</button></form>
+                              <% } %>
+                              <form class="inline-delete-form" method="post" action="/admin/batches/<%= batch.id %>/delete" onsubmit="return confirm('Delete batch <%= batch.name %>? Students must be removed from this batch first. Related notes and answer windows for this batch will also be removed.');">
+                                <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                                <button type="submit" class="text-delete-btn">Delete</button>
+                              </form>
+                            <% } else if (batch.is_retention_batch) { %>
+                              <span class="muted">Protected</span>
+                            <% } else { %>
+                              <span class="muted">-</span>
+                            <% } %>
+                          </div>
+                        </article>
+                      <% }) %>
+                    </div>
+                  </section>
+                </section>
+              </div>
 
-            <button type="submit" class="btn">Publish for Batch</button>
-          </form>
-        </div>
+              <aside class="ops2-students-side">
+                <section class="ops2-panel" id="student-create-panel">
+                  <div class="ops2-panel__header compact">
+                    <div>
+                      <p class="ops2-eyebrow">Admission</p>
+                      <h3>Add student</h3>
+                    </div>
+                    <span class="ops2-kicker"><%= studentUsage.limit === null ? 'Unlimited' : `${studentUsage.remaining} left` %></span>
+                  </div>
+                  <form method="post" action="/admin/students" class="ops2-form-grid">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                    <div class="ops2-field"><label>Roll Number</label><input type="text" name="rollNo" required /></div>
+                    <div class="ops2-field"><label>Name</label><input type="text" name="name" /></div>
+                    <div class="ops2-field"><label>Contact Number</label><input type="text" name="contactPhone" placeholder="9876543210" /></div>
+                    <div class="ops2-field"><label>Email ID</label><input type="email" name="email" placeholder="student@example.com" /></div>
+                    <div class="ops2-field full"><label>Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                    <div class="ops2-field full"><label>Password (optional)</label><input type="text" name="password" placeholder="Default = roll number" /></div>
+                    <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn" <%= batches.length ? '' : 'disabled' %>>Create Student</button></div>
+                  </form>
+                </section>
 
-        <div class="card">
-          <h2>Published Batch Notes</h2>
-          <table>
-            <tr><th>Title</th><th>Batch</th><th>Link</th><th>Description</th><th>Date</th></tr>
-            <% notes.forEach((n) => { %>
-              <tr>
-                <td><%= n.title %></td>
-                <td><%= n.batch_name || ((n.standard || n.course) ? `${n.standard || ''}${n.standard && n.course ? ' - ' : ''}${n.course ? n.course.toUpperCase() : ''}` : '-') %></td>
-                <td><a href="<%= n.resource_url %>" target="_blank" rel="noopener">Open Link</a></td>
-                <td><%= n.description || '-' %></td>
-                <td><%= n.created_at %></td>
-              </tr>
+                <section class="ops2-panel">
+                  <div class="ops2-panel__header compact">
+                    <div>
+                      <p class="ops2-eyebrow">Tools</p>
+                      <h3>Search & batch create</h3>
+                    </div>
+                  </div>
+                  <form method="get" action="/admin/search-student" class="ops2-form-grid">
+                    <div class="ops2-field full"><label>Search Student</label><input type="text" name="roll" value="<%= studentSearch?.query || '' %>" placeholder="Roll / name / phone" /></div>
+                    <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Search</button></div>
+                  </form>
+                  <div class="ops2-divider"></div>
+                  <form method="post" action="/admin/batches" data-single-submit class="ops2-form-grid">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                    <div class="ops2-field full"><label>Custom Batch Name</label><input type="text" name="batchName" placeholder="11th-A, Repeater, JEE 2027" required /></div>
+                    <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Create Batch</button></div>
+                  </form>
+                </section>
+              </aside>
+            </section>
+          <% } %>
+
+          <% if (activeSection === 'attendance') { %>
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="attendance-form-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Attendance</p>
+                    <h3>Mark attendance</h3>
+                  </div>
+                </div>
+                <div class="ops2-tab-switch" role="tablist">
+                  <button type="button" class="ops2-tab-btn active" data-tab="single">Single Student</button>
+                  <button type="button" class="ops2-tab-btn" data-tab="bulk">Bulk by Batch</button>
+                </div>
+                <div id="tab-single" class="ops2-tab-panel active">
+                  <form method="post" action="/admin/attendance" class="ops2-form-grid">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                    <div class="ops2-field"><label>Roll Number</label><input type="text" name="rollNo" required /></div>
+                    <div class="ops2-field"><label>Date</label><input type="date" name="attendanceDate" required /></div>
+                    <div class="ops2-field"><label>Status</label><select name="status" required><option value="present">Present</option><option value="absent">Absent</option><option value="late">Late</option></select></div>
+                    <div class="ops2-field full"><label>Notes</label><input type="text" name="notes" /></div>
+                    <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Save Attendance</button></div>
+                  </form>
+                </div>
+                <div id="tab-bulk" class="ops2-tab-panel">
+                  <form method="post" action="/admin/attendance-bulk" class="ops2-form-grid">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                    <div class="ops2-field"><label>Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                    <div class="ops2-field"><label>Date</label><input type="date" name="attendanceDate" required /></div>
+                    <div class="ops2-field full"><label>Absent Roll Numbers</label><textarea name="absentRollNos" rows="3" placeholder="101, 105, 108"></textarea></div>
+                    <div class="ops2-field full"><label>Notes</label><input type="text" name="notes" placeholder="Special class note" /></div>
+                    <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Mark Attendance</button></div>
+                  </form>
+                </div>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Review</p>
+                    <h3>Attendance timeline</h3>
+                  </div>
+                </div>
+                <form method="get" action="/admin/dashboard" class="ops2-form-grid ops2-form-grid--tight">
+                  <input type="hidden" name="section" value="attendance" />
+                  <div class="ops2-field"><label>Month</label><input type="month" name="attendanceMonth" value="<%= attendanceMonthFilter %>" /></div>
+                  <div class="ops2-field"><label>Date</label><select name="attendanceDate"><option value="">All Dates</option><% attendanceDates.forEach((d) => { %><option value="<%= d.attendance_date %>" <%= attendanceDateFilter === d.attendance_date ? 'selected' : '' %>><%= d.attendance_date %></option><% }) %></select></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Apply Filters</button></div>
+                </form>
+                <div class="ops2-chip-row">
+                  <span class="ops2-chip"><strong><%= attendanceThisMonthCount %></strong> entries</span>
+                  <a href="/admin/dashboard?section=attendance" class="ops2-inline-link">Clear Filter</a>
+                </div>
+              </section>
+            </section>
+
+            <% Object.keys(attendanceByDate || {}).forEach((day) => { %>
+              <section class="ops2-panel">
+                <div class="ops2-panel__header compact">
+                  <div>
+                    <p class="ops2-eyebrow">Attendance Date</p>
+                    <h3><%= day %></h3>
+                  </div>
+                </div>
+                <div class="ops2-table-shell">
+                  <table class="ops2-table">
+                    <thead><tr><th>Roll</th><th>Name</th><th>Batch</th><th>Status</th><th>Notes</th></tr></thead>
+                    <tbody>
+                      <% attendanceByDate[day].forEach((a) => { %>
+                        <tr>
+                          <td><%= a.roll_no %></td>
+                          <td><%= a.name %></td>
+                          <td><%= a.batch_name || '-' %></td>
+                          <td><span class="status <%= a.status %>"><%= a.status %></span></td>
+                          <td><%= a.notes || '-' %></td>
+                        </tr>
+                      <% }) %>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
             <% }) %>
-          </table>
-        </div>
-      </section>
-    <% } %>
+          <% } %>
 
-    <% if (!subscriptionState.accessBlocked && activeSection === 'settings') { %>
-      <section class="grid two">
-        <div class="card">
-          <h2>Profile & Branding</h2>
-          <p class="muted">Update your admin display name and the portal branding your students see.</p>
-          <form method="post" action="/admin/settings/profile">
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-            <label>Admin Display Name</label>
-            <input type="text" name="adminDisplayName" value="<%= user.name || '' %>" required />
+          <% if (activeSection === 'fees') { %>
+            <% const pendingFeesCount = fees.filter((item) => item.status === 'pending').length; %>
+            <% const paidFeesCount = fees.filter((item) => item.status === 'paid').length; %>
+            <% const overdueFeesCount = fees.filter((item) => item.status === 'overdue').length; %>
+            <section class="ops2-metrics-grid ops2-metrics-grid--compact">
+              <article class="ops2-metric-card ops2-metric-card--success"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">₹</span><span class="ops2-metric-card__trend">This month</span></div><strong>₹<%= feesPaidThisMonthAmount.toFixed(0) %></strong><span class="ops2-metric-card__label">Collected</span><small><%= feesPaidThisMonth.length %> payments</small><div class="ops2-sparkbars"><span style="height:52%"></span><span style="height:71%"></span><span style="height:49%"></span><span style="height:83%"></span><span style="height:66%"></span></div></article>
+              <article class="ops2-metric-card ops2-metric-card--warning"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">!</span><span class="ops2-metric-card__trend">Action</span></div><strong><%= pendingFeesCount %></strong><span class="ops2-metric-card__label">Pending</span><small>Follow-up needed</small><div class="ops2-sparkbars"><span style="height:31%"></span><span style="height:54%"></span><span style="height:44%"></span><span style="height:63%"></span><span style="height:35%"></span></div></article>
+              <article class="ops2-metric-card ops2-metric-card--danger"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">•</span><span class="ops2-metric-card__trend">Risk</span></div><strong><%= overdueFeesCount %></strong><span class="ops2-metric-card__label">Overdue</span><small>Immediate recovery</small><div class="ops2-sparkbars"><span style="height:22%"></span><span style="height:31%"></span><span style="height:47%"></span><span style="height:58%"></span><span style="height:41%"></span></div></article>
+            </section>
 
-            <label>Admin Contact Number</label>
-            <input type="text" name="adminContactPhone" value="<%= adminProfile?.contact_phone || user.contactPhone || '' %>" placeholder="9876543210" />
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="fees-form-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Finance</p><h3>Add fee record</h3></div></div>
+                <form method="post" action="/admin/fees" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field"><label>Roll Number</label><input type="text" name="rollNo" required /></div>
+                  <div class="ops2-field"><label>Amount</label><input type="number" name="amount" step="0.01" min="0" required /></div>
+                  <div class="ops2-field"><label>Status</label><select name="status" required><option value="pending">Pending</option><option value="paid">Paid</option><option value="overdue">Overdue</option></select></div>
+                  <div class="ops2-field"><label>Due Date</label><input type="date" name="dueDate" /></div>
+                  <div class="ops2-field"><label>Payment Date</label><input type="date" name="paymentDate" /></div>
+                  <div class="ops2-field full"><label>Notes</label><input type="text" name="notes" /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Save Fee</button></div>
+                </form>
+              </section>
 
-            <label>Admin Email</label>
-            <input type="email" name="adminEmail" value="<%= adminProfile?.email || user.email || '' %>" placeholder="admin@class.com" />
+              <section class="ops2-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Month Filter</p><h3>Fee records</h3></div></div>
+                <form method="get" action="/admin/dashboard" class="ops2-form-grid ops2-form-grid--tight">
+                  <input type="hidden" name="section" value="fees" />
+                  <div class="ops2-field"><label>Month</label><input type="month" name="feesMonth" value="<%= feesMonthFilter %>" /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Apply</button></div>
+                </form>
+                <div class="ops2-chip-row"><span class="ops2-chip"><strong><%= paidFeesCount %></strong> paid</span><span class="ops2-chip"><strong><%= pendingFeesCount %></strong> pending</span><a href="/admin/dashboard?section=fees" class="ops2-inline-link">Clear</a></div>
+              </section>
+            </section>
 
-            <label>Coaching Name</label>
-            <input type="text" name="coachingName" value="<%= coaching?.name || '' %>" required />
-
-            <label>Portal Display Name</label>
-            <input type="text" name="brandName" value="<%= coaching?.brand_name || coaching?.name || '' %>" placeholder="Name shown on login and dashboards" />
-
-            <label>Contact Email</label>
-            <input type="email" name="contactEmail" value="<%= coaching?.contact_email || '' %>" placeholder="class@example.com" />
-
-            <label>Logo URL</label>
-            <input type="url" name="logoUrl" value="<%= coaching?.logo_url || '' %>" placeholder="https://example.com/logo.png" />
-
-            <div class="branding-colors">
-              <div>
-                <label>Theme Primary</label>
-                <input type="text" name="themePrimary" value="<%= coaching?.theme_primary || '#1769aa' %>" placeholder="#1769aa" />
+            <section class="ops2-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Ledger</p><h3>Fee records</h3></div></div>
+              <div class="ops2-table-shell">
+                <table class="ops2-table ops2-table--wide">
+                  <thead><tr><th>Roll</th><th>Name</th><th>Batch</th><th>Amount</th><th>Due</th><th>Payment</th><th>Status</th><th>Notes</th></tr></thead>
+                  <tbody>
+                    <% fees.forEach((f) => { %>
+                      <tr>
+                        <td><%= f.roll_no %></td><td><%= f.name %></td><td><%= f.batch_name || '-' %></td><td><%= f.amount %></td><td><%= f.due_date || '-' %></td><td><%= f.payment_date || '-' %></td><td><span class="status <%= f.status %>"><%= f.status %></span></td><td><%= f.notes || '-' %></td>
+                      </tr>
+                    <% }) %>
+                  </tbody>
+                </table>
               </div>
-              <div>
-                <label>Theme Background</label>
-                <input type="text" name="themeBackground" value="<%= coaching?.theme_background || '#f3f6fb' %>" placeholder="#f3f6fb" />
+            </section>
+          <% } %>
+
+          <% if (activeSection === 'papers') { %>
+            <section class="ops2-metrics-grid ops2-metrics-grid--compact">
+              <article class="ops2-metric-card ops2-metric-card--primary"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">↑</span><span class="ops2-metric-card__trend">Monthly</span></div><strong><%= papersThisMonthCount %></strong><span class="ops2-metric-card__label">Papers uploaded</span><small><%= papers.length %> total records</small><div class="ops2-sparkbars"><span style="height:40%"></span><span style="height:63%"></span><span style="height:58%"></span><span style="height:81%"></span><span style="height:70%"></span></div></article>
+              <article class="ops2-metric-card ops2-metric-card--neutral"><div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">◎</span><span class="ops2-metric-card__trend">Live</span></div><strong><%= activeUploadWindows %></strong><span class="ops2-metric-card__label">Active windows</span><small><%= upcomingUploadWindows %> upcoming</small><div class="ops2-sparkbars"><span style="height:34%"></span><span style="height:51%"></span><span style="height:46%"></span><span style="height:60%"></span><span style="height:42%"></span></div></article>
+            </section>
+
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="paper-upload-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Single Upload</p><h3>Assign paper to student</h3></div></div>
+                <form method="post" action="<%= appendCsrfToUrl('/admin/upload-paper-single') %>" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field"><label>Student Roll Number</label><input type="text" name="rollNo" required /></div>
+                  <div class="ops2-field"><label>Test Title</label><input type="text" name="testLabel" placeholder="Weekly Chemistry Test" /></div>
+                  <div class="ops2-field"><label>Marks Obtained</label><input type="number" name="marksObtained" step="0.01" min="0" /></div>
+                  <div class="ops2-field"><label>Max Marks</label><input type="number" name="maxMarks" step="0.01" min="0" /></div>
+                  <div class="ops2-field full"><label>Link to Upload Window</label><select name="answerRequestId"><option value="">General Paper</option><% answerRequestSummaries.forEach((request) => { %><option value="<%= request.id %>"><%= request.title %> | <%= request.batch_name || '-' %></option><% }) %></select></div>
+                  <div class="ops2-field full"><label>Select File</label><input type="file" name="paper" required /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Upload for Student</button></div>
+                </form>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Bulk Upload</p><h3>Assign multiple papers</h3></div></div>
+                <div class="ops2-rules">
+                  <p><code>101.pdf</code> assign only</p>
+                  <p><code>101_78_100.pdf</code> save 78/100</p>
+                </div>
+                <form method="post" action="<%= appendCsrfToUrl('/admin/upload-papers') %>" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full"><label>Select Files</label><input type="file" name="papers" multiple required /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Upload and Assign</button></div>
+                </form>
+              </section>
+            </section>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Academic Records</p><h3>All test papers</h3></div><form method="get" action="/admin/dashboard" class="ops2-inline-tools"><input type="hidden" name="section" value="papers" /><input type="month" name="papersMonth" value="<%= papersMonthFilter %>" /><button type="submit" class="ops2-primary-btn ops2-primary-btn--small">Apply</button></form></div>
+              <div class="ops2-table-shell">
+                <table class="ops2-table ops2-table--wide">
+                  <thead><tr><th>Roll</th><th>Name</th><th>Batch</th><th>Test</th><th>Type</th><th>Uploaded By</th><th>Marks</th><th>Date</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    <% papers.forEach((p) => { %>
+                      <tr>
+                        <td><%= p.roll_no %></td><td><%= p.name %></td><td><%= p.batch_name || '-' %></td><td><%= p.test_label || p.original_name %></td><td><%= p.paper_type === 'answer_submission' ? 'Answer Upload' : 'General' %></td><td><%= p.uploaded_by_name || '-' %></td><td><%= p.marks_obtained !== null && p.max_marks !== null ? `${p.marks_obtained}/${p.max_marks}` : '-' %></td><td><%= p.upload_date %></td>
+                        <td class="ops2-actions-inline"><a href="/papers/<%= p.id %>/view" target="_blank" rel="noopener" class="ops2-inline-link">Open</a><a href="/papers/<%= p.id %>/download" class="ops2-inline-link">Download</a><a href="/admin/papers/<%= p.id %>/debug" target="_blank" rel="noopener" class="ops2-inline-link">Debug</a><form method="post" action="/papers/<%= p.id %>/delete" class="inline-delete-form" onsubmit="return confirm('Delete this paper?');"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><input type="hidden" name="redirectTo" value="/admin/dashboard?section=papers" /><button type="submit" class="text-delete-btn">Delete</button></form></td>
+                      </tr>
+                    <% }) %>
+                  </tbody>
+                </table>
               </div>
-              <div>
-                <label>Theme Surface</label>
-                <input type="text" name="themeSurface" value="<%= coaching?.theme_surface || '#ffffff' %>" placeholder="#ffffff" />
-              </div>
-            </div>
+            </section>
+          <% } %>
 
-            <button type="submit" class="btn">Save Settings</button>
-          </form>
-        </div>
+          <% if (activeSection === 'notes') { %>
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="notes-publish-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Publish</p><h3>Add batch note / video link</h3></div></div>
+                <form method="post" action="/admin/notes" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field"><label>Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                  <div class="ops2-field"><label>Title</label><input type="text" name="title" placeholder="Physics Revision Notes" required /></div>
+                  <div class="ops2-field full"><label>Resource URL</label><input type="url" name="resourceUrl" placeholder="https://..." required /></div>
+                  <div class="ops2-field full"><label>Description</label><textarea name="description" rows="3"></textarea></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Publish for Batch</button></div>
+                </form>
+              </section>
 
-        <div class="card">
-          <h2>Update Password</h2>
-          <p class="muted">Use your current password here. If this is still your temporary password, enter that as the current password first.</p>
-          <form method="post" action="/admin/settings/password">
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-            <label>Current Password</label>
-            <input type="password" name="oldPassword" required />
+              <section class="ops2-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Library</p><h3>Published batch notes</h3></div></div>
+                <div class="ops2-table-shell">
+                  <table class="ops2-table ops2-table--wide">
+                    <thead><tr><th>Title</th><th>Batch</th><th>Link</th><th>Description</th><th>Date</th></tr></thead>
+                    <tbody>
+                      <% notes.forEach((n) => { %>
+                        <tr><td><%= n.title %></td><td><%= n.batch_name || '-' %></td><td><a href="<%= n.resource_url %>" target="_blank" rel="noopener" class="ops2-inline-link">Open Link</a></td><td><%= n.description || '-' %></td><td><%= n.created_at %></td></tr>
+                      <% }) %>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </section>
+          <% } %>
 
-            <label>New Password</label>
-            <input type="password" name="newPassword" minlength="8" required />
+          <% if (activeSection === 'settings') { %>
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="settings-profile-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Branding</p><h3>Profile & branding</h3></div></div>
+                <form method="post" action="/admin/settings/profile" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field"><label>Admin Display Name</label><input type="text" name="adminDisplayName" value="<%= user.name || '' %>" required /></div>
+                  <div class="ops2-field"><label>Admin Contact Number</label><input type="text" name="adminContactPhone" value="<%= adminProfile?.contact_phone || user.contactPhone || '' %>" placeholder="9876543210" /></div>
+                  <div class="ops2-field"><label>Admin Email</label><input type="email" name="adminEmail" value="<%= adminProfile?.email || user.email || '' %>" placeholder="admin@class.com" /></div>
+                  <div class="ops2-field"><label>Coaching Name</label><input type="text" name="coachingName" value="<%= coaching?.name || '' %>" required /></div>
+                  <div class="ops2-field full"><label>Portal Display Name</label><input type="text" name="brandName" value="<%= coaching?.brand_name || coaching?.name || '' %>" /></div>
+                  <div class="ops2-field"><label>Contact Email</label><input type="email" name="contactEmail" value="<%= coaching?.contact_email || '' %>" /></div>
+                  <div class="ops2-field"><label>Logo URL</label><input type="url" name="logoUrl" value="<%= coaching?.logo_url || '' %>" /></div>
+                  <div class="ops2-field"><label>Theme Primary</label><input type="text" name="themePrimary" value="<%= coaching?.theme_primary || '#1769aa' %>" /></div>
+                  <div class="ops2-field"><label>Theme Background</label><input type="text" name="themeBackground" value="<%= coaching?.theme_background || '#f3f6fb' %>" /></div>
+                  <div class="ops2-field full"><label>Theme Surface</label><input type="text" name="themeSurface" value="<%= coaching?.theme_surface || '#ffffff' %>" /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Save Settings</button></div>
+                </form>
+              </section>
 
-            <label>Confirm New Password</label>
-            <input type="password" name="confirmPassword" minlength="8" required />
-
-            <button type="submit" class="btn">Change Password</button>
-          </form>
-        </div>
-      </section>
-    <% } %>
+              <section class="ops2-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Security</p><h3>Update password</h3></div></div>
+                <form method="post" action="/admin/settings/password" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full"><label>Current Password</label><input type="password" name="oldPassword" required /></div>
+                  <div class="ops2-field full"><label>New Password</label><input type="password" name="newPassword" minlength="8" required /></div>
+                  <div class="ops2-field full"><label>Confirm New Password</label><input type="password" name="confirmPassword" minlength="8" required /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Change Password</button></div>
+                </form>
+              </section>
+            </section>
+          <% } %>
+        </main>
+      <% } %>
+    </div>
   </div>
 
   <script>
-    const tabButtons = document.querySelectorAll('.tab-btn');
-    const tabPanels = document.querySelectorAll('.tab-panel');
+    const tabButtons = document.querySelectorAll('.ops2-tab-btn');
+    const tabPanels = document.querySelectorAll('.ops2-tab-panel');
     const trackerFilters = document.querySelectorAll('.tracker-filter');
     const singleSubmitForms = document.querySelectorAll('form[data-single-submit]');
 
@@ -852,7 +891,8 @@
         tabButtons.forEach((b) => b.classList.remove('active'));
         tabPanels.forEach((p) => p.classList.remove('active'));
         btn.classList.add('active');
-        document.getElementById(`tab-${tab}`).classList.add('active');
+        const panel = document.getElementById(`tab-${tab}`);
+        if (panel) panel.classList.add('active');
       });
     });
 

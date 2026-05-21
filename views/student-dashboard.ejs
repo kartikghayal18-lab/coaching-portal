@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/public/edusync-logo.png" />
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
-<body style="<%= branding?.cssVars || '' %>">
+<body class="student-shell" style="<%= branding?.cssVars || '' %>">
   <div class="container wide">
     <div class="topbar card hero-card">
       <div class="brand-lockup">
@@ -299,30 +299,6 @@
       const chartW = width - pad.left - pad.right;
       const chartH = height - pad.top - pad.bottom;
       const maxY = 100;
-
-      ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = surfaceColor;
-      ctx.fillRect(0, 0, width, height);
-
-      ctx.strokeStyle = lineColor;
-      ctx.lineWidth = 1;
-      for (let i = 0; i <= 5; i += 1) {
-        const y = pad.top + (chartH / 5) * i;
-        ctx.beginPath();
-        ctx.moveTo(pad.left, y);
-        ctx.lineTo(width - pad.right, y);
-        ctx.stroke();
-      }
-
-      ctx.fillStyle = textColor;
-      ctx.font = '12px sans-serif';
-      ctx.textAlign = 'left';
-      for (let i = 0; i <= 5; i += 1) {
-        const val = maxY - (maxY / 5) * i;
-        const y = pad.top + (chartH / 5) * i + 4;
-        ctx.fillText(`${val}%`, 6, y);
-      }
-
       const points = progressData.map((d, idx) => {
         const x = pad.left + (chartW * idx) / Math.max(progressData.length - 1, 1);
         const y = pad.top + chartH - (d.percent / maxY) * chartH;
@@ -331,56 +307,100 @@
       const labelStep = Math.max(1, Math.ceil(points.length / 6));
       const valueStep = Math.max(1, Math.ceil(points.length / 8));
 
-      if (points.length > 1) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.moveTo(points[0].x, height - pad.bottom);
-        points.forEach((p) => ctx.lineTo(p.x, p.y));
-        ctx.lineTo(points[points.length - 1].x, height - pad.bottom);
-        ctx.closePath();
-        ctx.globalAlpha = 0.12;
-        ctx.fillStyle = brandColor;
-        ctx.fill();
-        ctx.restore();
-      }
-
-      ctx.strokeStyle = brandColor;
-      ctx.lineWidth = 3;
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      points.forEach((p, idx) => {
-        if (idx === 0) ctx.moveTo(p.x, p.y);
-        else ctx.lineTo(p.x, p.y);
-      });
-      ctx.stroke();
-
-      points.forEach((p, idx) => {
-        ctx.fillStyle = brandColor;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
-        ctx.fill();
-
+      const drawChart = (progress = 1) => {
+        ctx.clearRect(0, 0, width, height);
         ctx.fillStyle = surfaceColor;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.fillRect(0, 0, width, height);
+
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 5; i += 1) {
+          const y = pad.top + (chartH / 5) * i;
+          ctx.beginPath();
+          ctx.moveTo(pad.left, y);
+          ctx.lineTo(width - pad.right, y);
+          ctx.stroke();
+        }
 
         ctx.fillStyle = textColor;
-        const showValue = idx === points.length - 1 || idx === 0 || idx % valueStep === 0;
-        if (showValue) {
-          ctx.textAlign = 'center';
-          ctx.fillText(`${p.d.percent}%`, p.x, p.y - 12);
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'left';
+        for (let i = 0; i <= 5; i += 1) {
+          const val = maxY - (maxY / 5) * i;
+          const y = pad.top + (chartH / 5) * i + 4;
+          ctx.fillText(`${val}%`, 6, y);
         }
 
-        const showLabel = idx === 0 || idx === points.length - 1 || idx % labelStep === 0;
-        if (showLabel) {
-          const rawLabel = progressData[idx].label || `Test ${idx + 1}`;
-          const label = rawLabel.length > 12 ? `T${idx + 1}` : rawLabel;
-          ctx.textAlign = 'center';
-          ctx.fillText(label, p.x, height - 10);
+        const animatedPoints = points.map((p) => ({
+          ...p,
+          y: pad.top + chartH - ((pad.top + chartH - p.y) * progress),
+        }));
+
+        if (animatedPoints.length > 1) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.moveTo(animatedPoints[0].x, height - pad.bottom);
+          animatedPoints.forEach((p) => ctx.lineTo(p.x, p.y));
+          ctx.lineTo(animatedPoints[animatedPoints.length - 1].x, height - pad.bottom);
+          ctx.closePath();
+          ctx.globalAlpha = 0.12;
+          ctx.fillStyle = brandColor;
+          ctx.fill();
+          ctx.restore();
         }
-      });
+
+        ctx.strokeStyle = brandColor;
+        ctx.lineWidth = 3;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        animatedPoints.forEach((p, idx) => {
+          if (idx === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        });
+        ctx.stroke();
+
+        animatedPoints.forEach((p, idx) => {
+          ctx.fillStyle = brandColor;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = surfaceColor;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          if (progress < 0.95) return;
+
+          ctx.fillStyle = textColor;
+          const showValue = idx === points.length - 1 || idx === 0 || idx % valueStep === 0;
+          if (showValue) {
+            ctx.textAlign = 'center';
+            ctx.fillText(`${p.d.percent}%`, p.x, p.y - 12);
+          }
+
+          const showLabel = idx === 0 || idx === points.length - 1 || idx % labelStep === 0;
+          if (showLabel) {
+            const rawLabel = progressData[idx].label || `Test ${idx + 1}`;
+            const label = rawLabel.length > 12 ? `T${idx + 1}` : rawLabel;
+            ctx.textAlign = 'center';
+            ctx.fillText(label, p.x, height - 10);
+          }
+        });
+      };
+
+      let start = null;
+      const animate = (timestamp) => {
+        if (!start) start = timestamp;
+        const elapsed = timestamp - start;
+        const progress = Math.min(elapsed / 680, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        drawChart(eased);
+        if (progress < 1) requestAnimationFrame(animate);
+      };
+
+      requestAnimationFrame(animate);
     }
   </script>
 </body>

@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/public/edusync-logo.png" />
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
-<body>
+<body class="dashboard-shell">
   <div class="container wide">
     <div class="topbar card hero-card">
       <div>
@@ -30,6 +30,16 @@
     <% } %>
 
     <section class="section-switcher card">
+      <div class="sidebar-brand">
+        <div class="sidebar-brand-top">
+          <img src="/public/edusync-logo.png" alt="Edusync logo" class="brand-logo" />
+          <div>
+            <p class="sidebar-kicker">Owner Console</p>
+            <p class="sidebar-title">Edusync Control</p>
+          </div>
+        </div>
+        <p class="sidebar-copy">Manage coaching tenants, subscriptions, and trial approvals from one calm command panel.</p>
+      </div>
       <a class="sec-btn <%= activeSection === 'overview' ? 'active' : '' %>" href="/owner/dashboard?section=overview">Overview</a>
       <a class="sec-btn <%= activeSection === 'coachings' ? 'active' : '' %>" href="/owner/dashboard?section=coachings">Coaching Tenants</a>
       <a class="sec-btn <%= activeSection === 'trial-requests' ? 'active' : '' %>" href="/owner/dashboard?section=trial-requests">Trial Requests</a>

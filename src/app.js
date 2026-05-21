@@ -4246,6 +4246,62 @@ app.post('/admin/answer-requests', requireCoachingAdmin, async (req, res) => {
   return res.redirect('/admin/dashboard?section=overview');
 });
 
+app.post('/admin/answer-requests/:id/delete', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const requestId = Number.parseInt(req.params.id, 10);
+
+  if (!Number.isInteger(requestId) || requestId <= 0) {
+    req.session.flash = { type: 'error', text: 'Invalid upload session selected' };
+    return res.redirect('/admin/dashboard?section=overview');
+  }
+
+  const answerRequest = await get(
+    `SELECT id, title, batch_id, standard, course, starts_at, ends_at
+     FROM answer_upload_requests
+     WHERE coaching_id = ? AND id = ?
+     LIMIT 1`,
+    [coachingId, requestId]
+  );
+
+  if (!answerRequest) {
+    req.session.flash = { type: 'error', text: 'Upload session not found' };
+    return res.redirect('/admin/dashboard?section=overview');
+  }
+
+  const requestState = getAnswerRequestState(answerRequest);
+  if (!requestState.isExpired) {
+    req.session.flash = { type: 'error', text: 'Only expired upload sessions can be removed' };
+    return res.redirect('/admin/dashboard?section=overview');
+  }
+
+  await withTransaction(async (tx) => {
+    await tx.run(
+      `UPDATE test_papers
+       SET answer_request_id = NULL
+       WHERE coaching_id = ? AND answer_request_id = ?`,
+      [coachingId, requestId]
+    );
+    await tx.run(
+      `DELETE FROM answer_upload_requests
+       WHERE coaching_id = ? AND id = ?`,
+      [coachingId, requestId]
+    );
+  });
+
+  await auditActor(req, 'answer_request_deleted', {
+    targetType: 'answer_request',
+    targetId: requestId,
+    details: {
+      title: answerRequest.title,
+      batchId: answerRequest.batch_id || null,
+      standard: answerRequest.standard || null,
+      course: answerRequest.course || null,
+    },
+  });
+  req.session.flash = { type: 'success', text: `Expired upload session "${answerRequest.title}" removed` };
+  return res.redirect('/admin/dashboard?section=overview');
+});
+
 app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const rollNo = (req.body.rollNo || '').trim();
