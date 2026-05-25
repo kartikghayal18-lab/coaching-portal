@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Edusync - Owner Dashboard</title>
-  <link rel="icon" type="image/png" href="/public/edusync-logo.png" />
+  <title><%= branding?.brandName || 'Demo Coaching' %> - Owner Dashboard</title>
+  <link rel="icon" type="image/x-icon" href="<%= branding?.faviconUrl || '/branding/favicon.ico' %>" />
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
-<body class="dashboard-shell">
+<body class="dashboard-shell" style="<%= branding?.cssVars || '' %>">
   <div class="container wide">
     <div class="topbar card hero-card">
       <div>
@@ -32,10 +32,10 @@
     <section class="section-switcher card">
       <div class="sidebar-brand">
         <div class="sidebar-brand-top">
-          <img src="/public/edusync-logo.png" alt="Edusync logo" class="brand-logo" />
+          <img src="<%= branding?.logoUrl || '/branding/logo.png' %>" alt="<%= branding?.brandName || 'Demo Coaching' %> logo" class="brand-logo" />
           <div>
             <p class="sidebar-kicker">Owner Console</p>
-            <p class="sidebar-title">Edusync Control</p>
+            <p class="sidebar-title"><%= branding?.ownerConsoleLabel || ((branding?.brandName || 'Demo Coaching') + ' Control') %></p>
           </div>
         </div>
         <p class="sidebar-copy">Manage coaching tenants, subscriptions, and trial approvals from one calm command panel.</p>

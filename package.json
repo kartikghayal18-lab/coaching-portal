@@ -1,7 +1,7 @@
 {
   "name": "coaching-classes-system",
   "version": "1.0.0",
-  "description": "Coaching classes management system with admin/student login, paper assignment, attendance, and fees",
+  "description": "Reusable client deployment template for the EduSync coaching portal",
   "main": "src/app.js",
   "scripts": {
     "start": "node src/app.js",

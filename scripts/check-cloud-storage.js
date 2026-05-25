@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-require('dotenv').config({ quiet: true });
+require('../config/env');
 
 const { S3Client, HeadBucketCommand, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 
@@ -17,19 +17,22 @@ async function main() {
     throw new Error('FILE_STORAGE_MODE is not s3. Set FILE_STORAGE_MODE=s3 in .env first.');
   }
 
-  const endpoint = required('S3_ENDPOINT');
-  const region = process.env.S3_REGION || 'auto';
+  const endpoint = String(process.env.S3_ENDPOINT || '').trim();
+  const region = process.env.S3_REGION || 'ap-south-1';
   const bucket = required('S3_BUCKET_NAME');
   const accessKeyId = required('S3_ACCESS_KEY_ID');
   const secretAccessKey = required('S3_SECRET_ACCESS_KEY');
   const forcePathStyle = String(process.env.S3_FORCE_PATH_STYLE || 'false').toLowerCase() === 'true';
 
-  const s3 = new S3Client({
+  const clientConfig = {
     region,
-    endpoint,
     forcePathStyle,
     credentials: { accessKeyId, secretAccessKey },
-  });
+  };
+  if (endpoint) {
+    clientConfig.endpoint = endpoint;
+  }
+  const s3 = new S3Client(clientConfig);
 
   await s3.send(new HeadBucketCommand({ Bucket: bucket }));
   const testKey = `healthchecks/${Date.now()}_codex_check.txt`;

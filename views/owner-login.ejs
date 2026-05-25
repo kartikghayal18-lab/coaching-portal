@@ -3,17 +3,17 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Edusync - Owner Login</title>
-  <link rel="icon" type="image/png" href="/public/edusync-logo.png" />
+  <title><%= branding?.ownerLoginTitle || ((branding?.brandName || 'Demo Coaching') + ' Owner Login') %></title>
+  <link rel="icon" type="image/x-icon" href="<%= branding?.faviconUrl || '/branding/favicon.ico' %>" />
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
-<body>
+<body style="<%= branding?.cssVars || '' %>">
   <div class="container wide auth-page">
     <div class="auth-layout auth-layout--owner">
       <section class="card auth-panel auth-panel--hero login-hero">
         <div>
           <p class="eyebrow">Private Owner Access</p>
-          <h1>Owner Control Room</h1>
+          <h1><%= branding?.ownerConsoleLabel || ((branding?.brandName || 'Demo Coaching') + ' Control') %></h1>
           <p class="muted auth-lead">Manage coachings, seat limits, subscription status, branding, and trial approvals from one control room.</p>
 
           <div class="hero-chip-row">

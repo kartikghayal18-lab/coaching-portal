@@ -1,14 +1,15 @@
 #!/usr/bin/env node
-require('dotenv').config({ quiet: true });
+require('../config/env');
 
 const fs = require('fs');
 const path = require('path');
 const { db, all, run, getPool } = require('../src/db');
 const { initStorage, getStorageMode, uploadPaperFile } = require('../src/storage');
 
+const ROOT_DIR = path.join(__dirname, '..');
 const LOCAL_PAPER_DIR = process.env.LOCAL_PAPER_DIR
   ? path.resolve(process.env.LOCAL_PAPER_DIR)
-  : path.join(__dirname, '..', 'papers');
+  : (fs.existsSync(path.join(ROOT_DIR, 'uploads')) ? path.join(ROOT_DIR, 'uploads') : path.join(ROOT_DIR, 'papers'));
 const deleteLocal = process.argv.includes('--delete-local');
 
 function mimeFromName(name = '') {

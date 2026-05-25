@@ -1,33 +1,63 @@
-# Coaching Classes Management System
+# EduSync Client Deployment Template
 
-A deploy-ready coaching management website with:
-- Owner SaaS dashboard
-- Coaching admin + student login
-- Multi-tenant coaching isolation by coaching code
-- Owner-managed subscription plans (`basic`, `mid`, `premium`)
-- Student creation by roll number + batch (`11th/12th`, `JEE/NEET`)
-- Student delete (also deletes linked papers/attendance/fees)
-- Bulk paper upload and auto-assignment from filename = roll no
-- Auto marks parsing from filename (`roll_marks_max.ext`)
-- Attendance (single + bulk absent entry)
-- Fees management
-- Batch notes (Google Drive / YouTube links)
-- Student dashboard with papers, attendance, fees, notes
-- Cloud file storage support (S3-compatible)
+This project keeps the existing production coaching portal behavior intact and reorganizes the codebase so the same app can be copied, rebranded, configured, and deployed separately for multiple coaching clients.
 
-## Supported Upload Types
-- `pdf`
-- `jpeg`
-- `jpg`
-- `png`
+All core working flows remain in place:
+- owner/admin/student authentication
+- OTP login and recovery
+- trusted device login
+- attendance
+- paper uploads
+- AWS S3-compatible storage
+- settings
+- student management
 
-## Default Owner Credentials
-- Username: `Scc@coaching`
-- Password: `Scc@8208`
+## Template Architecture
 
-These are controlled by env variables in `.env`.
+```text
+project-root/
+  branding/
+    logo.png
+    favicon.ico
+    colors.json
+  config/
+    client.json
+    client.js
+    env.js
+    database.js
+  routes/
+    app-routes.js
+  shared/
+    auth/
+      otp-service.js
+    uploads/
+      storage.js
+    mail/
+      mailer.js
+    utils/
+      branding.js
+      server.js
+  uploads/
+  public/
+  views/
+  src/
+    app.js
+    db.js
+    otp-service.js
+    storage.js
+```
+
+## Where To Configure Each Client
+
+- Branding: [config/client.json](/Users/kartiiik_001/Documents/edusync-template/config/client.json), [branding/colors.json](/Users/kartiiik_001/Documents/edusync-template/branding/colors.json), [branding/logo.png](/Users/kartiiik_001/Documents/edusync-template/branding/logo.png), [branding/favicon.ico](/Users/kartiiik_001/Documents/edusync-template/branding/favicon.ico)
+- Environment variables: [.env.template](/Users/kartiiik_001/Documents/edusync-template/.env.template) then copied to `.env`
+- Database config: [config/database.js](/Users/kartiiik_001/Documents/edusync-template/config/database.js)
+- Deployment env normalization and aliases: [config/env.js](/Users/kartiiik_001/Documents/edusync-template/config/env.js)
+- Route wiring: [routes/app-routes.js](/Users/kartiiik_001/Documents/edusync-template/routes/app-routes.js)
+- Shared reusable services: [shared](/Users/kartiiik_001/Documents/edusync-template/shared)
 
 ## Quick Start
+
 1. Install dependencies
 ```bash
 npm install
@@ -35,98 +65,80 @@ npm install
 
 2. Create env file
 ```bash
-cp .env.example .env
+cp .env.template .env
 ```
 
-3. Verify cloud storage credentials (when FILE_STORAGE_MODE=s3)
+3. Edit client branding
 ```bash
-npm run check:cloud
+open config/client.json
 ```
 
-4. Start
+4. Start locally
 ```bash
 npm start
 ```
 
 5. Open
-- `http://localhost:3000/login`
+- [http://localhost:3000/login](http://localhost:3000/login)
 
-## SaaS Login Flow
-- Owner logs in from `/login` with role `Owner`
-- Coaching admin logs in from `/login` with role `Coaching Admin` + `Coaching Code`
-- Student logs in from `/login` with role `Student` + `Coaching Code`
-- You can also share direct portal links like:
-  - `http://your-domain.com/login?coaching=alpha-jee-academy`
+## Client Duplication Workflow
 
-This is how 10 different coaching classes use the same website but still see separate dashboards. Every session is bound to one `coaching_id`, and all student/admin data queries are filtered by that tenant.
+1. Copy the entire project folder.
+2. Rename the copied folder for the client.
+3. Update [config/client.json](/Users/kartiiik_001/Documents/edusync-template/config/client.json) with the client name, domain, primary color, and support email.
+4. Replace [branding/logo.png](/Users/kartiiik_001/Documents/edusync-template/branding/logo.png) and [branding/favicon.ico](/Users/kartiiik_001/Documents/edusync-template/branding/favicon.ico) with client assets.
+5. Copy [.env.template](/Users/kartiiik_001/Documents/edusync-template/.env.template) to `.env` and fill client-specific values.
+6. Point `DATABASE_URL` to that client’s separate database.
+7. Set that client’s own AWS/S3 bucket credentials and mail credentials.
+8. Deploy the copied folder to the client’s separate domain.
 
-## Paper Filename Format
-- Assignment only: `101.pdf`
-- Assignment + marks: `101_78_100.pdf` (roll `101`, marks `78/100`)
-- Pattern for auto marks: `rollno_marks_max.ext`
+## Branding Behavior
 
-## Storage Modes
-### Cloud (recommended for deployment)
-Set `FILE_STORAGE_MODE=s3` and fill S3-compatible credentials in `.env`.
+- Deployment-level branding now comes from `config/client.json`.
+- View titles, favicon, default logo, owner console labels, and OTP email branding now resolve from that file.
+- Existing coaching-level branding stored in the database still works and continues to override deployment defaults where appropriate.
+- UI layout and styling structure were not redesigned.
 
-### Local (dev fallback)
-Set `FILE_STORAGE_MODE=local` (files stored in `papers/`).
+## Upload Behavior
 
-## Local-to-Cloud Migration
-After enabling cloud mode, migrate existing local files:
+- Shared upload logic now lives in [shared/uploads/storage.js](/Users/kartiiik_001/Documents/edusync-template/shared/uploads/storage.js).
+- Uploads are stored under a client-specific prefix derived from `client.json`.
+- Example object path:
+  - `demo-coaching/uploads/2026-05-21/<timestamp>_<uuid>_paper.pdf`
+- Existing S3 access flow, signed URL flow, and local fallback flow remain intact.
+
+## Environment Notes
+
+The app now accepts template-friendly env names and maps them automatically:
+
+- `AWS_ACCESS_KEY_ID` -> `S3_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY` -> `S3_SECRET_ACCESS_KEY`
+- `AWS_REGION` -> `S3_REGION`
+- `AWS_BUCKET` -> `S3_BUCKET_NAME`
+- `JWT_SECRET` -> `SESSION_SECRET`
+
+That means each client copy can use the cleaner `.env.template` values without changing runtime code.
+
+## Verification Commands
+
+Start the app:
+
+```bash
+npm start
+```
+
+Check storage credentials:
+
+```bash
+npm run check:cloud
+```
+
+Migrate existing local uploads to cloud storage:
 
 ```bash
 npm run migrate:papers:cloud
 ```
 
-To migrate and remove local copies:
-
-```bash
-npm run migrate:papers:cloud -- --delete-local
-```
-
-## Environment Variables
-See [.env.example](/Users/kartiiik_001/Documents/Playground/.env.example).
-
-Important keys:
-- `SESSION_SECRET`
-- `DATA_DIR`
-- `LOCAL_PAPER_DIR`
-- `ADMIN_USERNAME`
-- `ADMIN_PASSWORD`
-- `ADMIN_FORCE_RESET`
-- `FILE_STORAGE_MODE`
-- `S3_ENDPOINT`
-- `S3_REGION`
-- `S3_BUCKET_NAME`
-- `S3_ACCESS_KEY_ID`
-- `S3_SECRET_ACCESS_KEY`
-- `S3_FORCE_PATH_STYLE`
-- `S3_PUBLIC_BASE_URL`
-- `S3_SIGNED_URL_TTL_SECONDS`
-
 ## Deployment
-### Docker
-Build:
-```bash
-docker build -t coaching-app .
-```
 
-Run:
-```bash
-docker run -p 3000:3000 --env-file .env coaching-app
-```
-
-### Platform Deploy (Render/Railway/Fly/etc.)
-- Set all env vars from `.env.example` in platform settings.
-- Keep `FILE_STORAGE_MODE=s3` for production.
-- Use managed cloud storage bucket for all uploads.
-- Persist `data/coaching.db` if you stay on SQLite, or move to managed DB for scale.
-- Full step-by-step: [DEPLOYMENT.md](/Users/kartiiik_001/Documents/Playground/DEPLOYMENT.md)
-
-## Important Paths
-- App entry: `src/app.js`
-- DB setup: `src/db.js`
-- Storage module: `src/storage.js`
-- Migration script: `scripts/migrate-papers-to-cloud.js`
-- SQLite DB: `data/coaching.db`
+Use the per-client deployment workflow in [DEPLOYMENT.md](/Users/kartiiik_001/Documents/edusync-template/DEPLOYMENT.md).

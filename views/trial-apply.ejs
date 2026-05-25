@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Edusync - Apply for Trial</title>
-  <link rel="icon" type="image/png" href="/public/edusync-logo.png" />
+  <title><%= branding?.brandName || 'Demo Coaching' %> - Apply for Trial</title>
+  <link rel="icon" type="image/x-icon" href="<%= branding?.faviconUrl || '/branding/favicon.ico' %>" />
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
 <body style="<%= branding?.cssVars || '' %>">
@@ -19,7 +19,7 @@
           <div class="hero-chip-row">
             <span class="info-chip">Manual Review</span>
             <span class="info-chip">Branding Ready</span>
-            <span class="info-chip">Separate Coaching Portal</span>
+            <span class="info-chip"><%= branding?.portalLabel || 'Coaching Portal' %></span>
           </div>
         </div>
 
