@@ -12,6 +12,10 @@ const { initStorage, getStorageMode, uploadPaperFile, getPaperAccess, deleteStor
 const { PostgresSessionStore, ensureSessionTable } = require('./session-store');
 const { OTP_TTL_MINUTES, generateOtpCode, smtpConfigured, resendConfigured, getOtpChannelOptions, sendOtpMessage, sendTestEmail } = require('./otp-service');
 
+console.log('[BOOT] Starting app');
+console.log('[BOOT] DATABASE_URL present:', Boolean(process.env.DATABASE_URL));
+console.log('[BOOT] Storage mode:', process.env.FILE_STORAGE_MODE || '(auto)');
+
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
 const isVercel = Boolean(process.env.VERCEL);
@@ -4886,16 +4890,24 @@ async function prepareApp() {
   if (!appReadyPromise) {
     appReadyPromise = Promise.resolve()
       .then(() => {
+        console.log('[BOOT] Storage mode:', process.env.FILE_STORAGE_MODE || getStorageMode());
         initStorage();
+        console.log('[BOOT] Preparing database');
         return getPool().query('SELECT 1');
       })
       .then(() => ensureSessionTable())
-      .then(() => cleanupDuplicateAnswerSubmissions())
+      .then(async () => {
+        console.log('[BOOT] Database ready');
+        if (process.env.RUN_STARTUP_MAINTENANCE === 'true') {
+          await cleanupDuplicateAnswerSubmissions();
+        }
+      })
       .then(() => {
         console.log(`File storage mode: ${getStorageMode()}`);
         if (isVercel) console.log('Running on Vercel serverless runtime');
       })
       .catch((error) => {
+        console.error('[BOOT ERROR]', error);
         appReadyPromise = null;
         throw error;
       });
@@ -4930,8 +4942,12 @@ if (require.main === module) {
   });
 }
 
-module.exports = {
-  app,
-  prepareApp,
-  startServer,
-};
+async function serverlessHandler(req, res) {
+  await prepareApp();
+  return app(req, res);
+}
+
+module.exports = serverlessHandler;
+module.exports.app = app;
+module.exports.prepareApp = prepareApp;
+module.exports.startServer = startServer;

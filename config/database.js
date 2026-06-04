@@ -10,6 +10,14 @@ let pool = null;
 
 neonConfig.webSocketConstructor = ws;
 
+function isServerlessRuntime() {
+  return Boolean(
+    process.env.VERCEL
+    || process.env.AWS_LAMBDA_FUNCTION_NAME
+    || process.env.NETLIFY
+  );
+}
+
 function normalizeDatabaseUrl(rawValue) {
   const value = String(rawValue || '').trim();
 
@@ -39,7 +47,7 @@ function getPool() {
 
     pool = new PoolImpl({
       connectionString,
-      max: 10,
+      max: isServerlessRuntime() ? 1 : 10,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 15000,
     });

@@ -2,10 +2,22 @@
   "version": 2,
   "functions": {
     "api/index.js": {
-      "maxDuration": 30
+      "maxDuration": 30,
+      "includeFiles": [
+        "views/**",
+        "public/**"
+      ]
     }
   },
   "rewrites": [
+    {
+      "source": "/favicon.ico",
+      "destination": "/public/edusync-logo.png"
+    },
+    {
+      "source": "/favicon.png",
+      "destination": "/public/edusync-logo.png"
+    },
     {
       "source": "/(.*)",
       "destination": "/api/index.js"

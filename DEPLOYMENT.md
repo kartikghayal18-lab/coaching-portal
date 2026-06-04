@@ -55,6 +55,7 @@ Required for Vercel:
 - `SESSION_SECRET` must be a stable random string.
 - `FILE_STORAGE_MODE=s3` is required because Vercel cannot persist local uploads.
 - `S3_*` variables must point to Cloudflare R2, AWS S3, or another S3-compatible bucket.
+- Existing `local` paper records must be migrated to S3/R2 before Vercel can serve those files.
 - Large file uploads are limited by Vercel request limits. Use direct browser-to-S3 uploads later if you need large PDFs.
 
 Deploy:
@@ -69,6 +70,14 @@ Vercel entrypoint:
 - `api/index.js` imports `src/app.js`.
 - `src/app.js` exports `app`, `prepareApp`, and `startServer`.
 - `vercel.json` rewrites app traffic to the Vercel function.
+
+Database migration:
+
+```bash
+psql "$DATABASE_URL" -f migrations/001_vercel_sessions.sql
+```
+
+The app also creates this session table automatically during startup, but running the migration first makes deployment failures easier to diagnose.
 
 ## 4. Deploy on Render / Railway / Fly / VM
 

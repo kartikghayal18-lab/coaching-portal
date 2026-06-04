@@ -95,15 +95,20 @@ function validateS3Config() {
 }
 
 function initStorage() {
-  ensureLocalDir();
-
   if (storageMode === 's3') {
     validateS3Config();
+    return;
   }
 
   if (!['local', 's3'].includes(storageMode)) {
     throw new Error(`Unsupported FILE_STORAGE_MODE: ${storageMode}`);
   }
+
+  if (process.env.VERCEL) {
+    throw new Error('Vercel deployments require FILE_STORAGE_MODE=s3 because local uploaded files are not persistent.');
+  }
+
+  ensureLocalDir();
 }
 
 function getStorageMode() {
@@ -199,6 +204,10 @@ async function getPaperAccess(paper, dispositionType) {
     return { type: 'redirect', url: signedUrl };
   }
 
+  if (process.env.VERCEL) {
+    return null;
+  }
+
   const storageKey = resolveStorageKey(paper);
   const filePath = path.join(LOCAL_PAPER_DIR, storageKey);
   return { type: 'local', filePath };
@@ -216,6 +225,10 @@ async function deleteStoredPaper(paper) {
         Key: storageKey,
       })
     );
+    return;
+  }
+
+  if (process.env.VERCEL) {
     return;
   }
 

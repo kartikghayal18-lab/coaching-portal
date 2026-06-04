@@ -9,6 +9,7 @@ require('../config/env');
 const { getPool, run, get, all, withTransaction } = require('../config/database');
 const { getBrandingColors, getClientConfig } = require('../config/client');
 const { initStorage, getStorageMode, uploadPaperFile, getPaperAccess, deleteStoredPaper } = require('../shared/uploads/storage');
+const { PostgresSessionStore, ensureSessionTable } = require('../src/session-store');
 const { OTP_TTL_MINUTES, generateOtpCode, smtpConfigured, resendConfigured, getOtpChannelOptions, sendOtpMessage, sendTestEmail } = require('../shared/auth/otp-service');
 const brandingUtils = require('../shared/utils/branding');
 const { resolvePort } = require('../shared/utils/server');
@@ -72,6 +73,7 @@ app.use(
   session({
     name: 'coaching.sid',
     secret: sessionSecret,
+    store: new PostgresSessionStore(),
     resave: false,
     saveUninitialized: false,
     cookie: {
@@ -4721,32 +4723,65 @@ app.use((err, req, res, next) => {
   }
   return res.redirect('/login');
 });
-Promise.resolve()
-  .then(() => {
-    initStorage();
-    return getPool().query('SELECT 1');
-  })
-  .then(() => cleanupDuplicateAnswerSubmissions())
-  .then(() => {
-    const server = app.listen(PORT, () => {
-      console.log(`Server started on http://localhost:${PORT}`);
-      console.log(`File storage mode: ${getStorageMode()}`);
-    });
+let appReadyPromise = null;
 
-    server.on('error', (err) => {
-      if (err.code === 'EADDRINUSE') {
-        const suggestedPort = Number(PORT) + 1;
-        console.error(`Port ${PORT} is already in use. Start with another port, for example: PORT=${suggestedPort} npm start`);
-        process.exit(1);
-      }
+async function prepareApp() {
+  if (!appReadyPromise) {
+    appReadyPromise = Promise.resolve()
+      .then(() => {
+        initStorage();
+        return getPool().query('SELECT 1');
+      })
+      .then(() => ensureSessionTable())
+      .then(async () => {
+        if (process.env.RUN_STARTUP_MAINTENANCE === 'true') {
+          await cleanupDuplicateAnswerSubmissions();
+        }
+      })
+      .then(() => {
+        console.log(`File storage mode: ${getStorageMode()}`);
+      })
+      .catch((error) => {
+        appReadyPromise = null;
+        throw error;
+      });
+  }
 
-      console.error('Startup server error', err);
+  return appReadyPromise;
+}
+
+async function startServer() {
+  await prepareApp();
+
+  const server = app.listen(PORT, () => {
+    console.log(`Server started on http://localhost:${PORT}`);
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      const suggestedPort = Number(PORT) + 1;
+      console.error(`Port ${PORT} is already in use. Start with another port, for example: PORT=${suggestedPort} npm start`);
       process.exit(1);
-    });
-  })
-  .catch((err) => {
+    }
+
+    console.error('Startup server error', err);
+    process.exit(1);
+  });
+}
+
+if (require.main === module) {
+  startServer().catch((err) => {
     console.error('Startup failed', err);
     process.exit(1);
   });
+}
 
-module.exports = app;
+async function serverlessHandler(req, res) {
+  await prepareApp();
+  return app(req, res);
+}
+
+module.exports = serverlessHandler;
+module.exports.app = app;
+module.exports.prepareApp = prepareApp;
+module.exports.startServer = startServer;

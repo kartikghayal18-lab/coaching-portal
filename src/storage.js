@@ -163,6 +163,10 @@ async function getPaperAccess(paper, dispositionType) {
     return { type: 'redirect', url: signedUrl };
   }
 
+  if (process.env.VERCEL) {
+    return null;
+  }
+
   const fileName = resolveStorageKey(paper);
   const filePath = path.join(LOCAL_PAPER_DIR, fileName);
   return { type: 'local', filePath };
@@ -180,6 +184,10 @@ async function deleteStoredPaper(paper) {
         Key: storageKey,
       })
     );
+    return;
+  }
+
+  if (process.env.VERCEL) {
     return;
   }
 
