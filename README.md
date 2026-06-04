@@ -139,11 +139,6 @@ Migrate existing local uploads to cloud storage:
 npm run migrate:papers:cloud
 ```
 
-<<<<<<< HEAD
-## Deployment
-
-Use the per-client deployment workflow in [DEPLOYMENT.md](/Users/kartiiik_001/Documents/edusync-template/DEPLOYMENT.md).
-=======
 To migrate and remove local copies:
 
 ```bash
@@ -196,4 +191,3 @@ docker run -p 3000:3000 --env-file .env coaching-app
 - DB setup: `src/db.js`
 - Storage module: `src/storage.js`
 - Migration script: `scripts/migrate-papers-to-cloud.js`
->>>>>>> c4e26f7 (updated coaching portal features)

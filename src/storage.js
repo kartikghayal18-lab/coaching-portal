@@ -1,7 +1,3 @@
-<<<<<<< HEAD
-// Upload storage stays backward-compatible through this re-export.
-module.exports = require('../shared/uploads/storage');
-=======
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -200,4 +196,3 @@ module.exports = {
   getPaperAccess,
   deleteStoredPaper,
 };
->>>>>>> c4e26f7 (updated coaching portal features)
