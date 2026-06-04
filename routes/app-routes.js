@@ -2414,7 +2414,7 @@ app.get('/auth/2fa', async (req, res) => {
   return renderTwoFactorPage(req, res);
 });
 
-app.post('/auth/2fa/send-otp', async (req, res) => {
+async function handleTwoFactorSendOtp(req, res) {
   const retryAfter = enforceRateLimit(req, 'auth-2fa-send-otp', OTP_SEND_LIMIT, OTP_SEND_WINDOW_MS);
   if (retryAfter) {
     res.set('Retry-After', String(retryAfter));
@@ -2450,9 +2450,9 @@ app.post('/auth/2fa/send-otp', async (req, res) => {
   }
 
   return res.redirect('/auth/2fa');
-});
+}
 
-app.post('/auth/2fa/verify', async (req, res) => {
+async function handleTwoFactorVerify(req, res) {
   const retryAfter = enforceRateLimit(req, 'auth-2fa-verify', 8, 15 * 60 * 1000);
   if (retryAfter) {
     res.set('Retry-After', String(retryAfter));
@@ -2499,7 +2499,20 @@ app.post('/auth/2fa/verify', async (req, res) => {
     req,
   });
   return finishAuthenticatedLogin(req, res, context.user, coaching);
+}
+
+app.post('/auth/2fa', async (req, res) => {
+  const submittedOtp = String(req.body?.otp || '').trim();
+  if (submittedOtp) {
+    return handleTwoFactorVerify(req, res);
+  }
+
+  return handleTwoFactorSendOtp(req, res);
 });
+
+app.post('/auth/2fa/send-otp', handleTwoFactorSendOtp);
+
+app.post('/auth/2fa/verify', handleTwoFactorVerify);
 
 app.post('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
