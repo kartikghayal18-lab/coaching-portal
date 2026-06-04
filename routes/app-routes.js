@@ -374,7 +374,7 @@ app.use((req, res, next) => {
   // proxy/custom-domain session edge cases breaking OTP verification.
   if (
     req.method === 'POST'
-    && (req.path === '/auth/2fa/send-otp' || req.path === '/auth/2fa/verify')
+    && (req.path === '/auth/2fa' || req.path === '/auth/2fa/send-otp' || req.path === '/auth/2fa/verify')
   ) {
     return next();
   }
@@ -2452,12 +2452,20 @@ async function handleTwoFactorSendOtp(req, res) {
   return res.redirect('/auth/2fa');
 }
 
-async function handleTwoFactorVerify(req, res) {
+async function handleTwoFactorVerify(req, res, options = {}) {
+  const failTwoFactor = (flash) => {
+    req.session.flash = flash;
+    if (options.renderOnFailure) {
+      return renderTwoFactorPage(req, res);
+    }
+
+    return res.redirect('/auth/2fa');
+  };
+
   const retryAfter = enforceRateLimit(req, 'auth-2fa-verify', 8, 15 * 60 * 1000);
   if (retryAfter) {
     res.set('Retry-After', String(retryAfter));
-    req.session.flash = { type: 'error', text: 'Too many verification attempts. Please wait a few minutes and try again.' };
-    return res.redirect('/auth/2fa');
+    return failTwoFactor({ type: 'error', text: 'Too many verification attempts. Please wait a few minutes and try again.' });
   }
 
   const context = await getPendingTwoFactorContext(req);
@@ -2470,19 +2478,16 @@ async function handleTwoFactorVerify(req, res) {
   }
 
   if (!otpSession || otpSession.userId !== context.user.id) {
-    req.session.flash = { type: 'error', text: 'Request a verification code first.' };
-    return res.redirect('/auth/2fa');
+    return failTwoFactor({ type: 'error', text: 'Request a verification code first.' });
   }
 
   if (otpSession.expired) {
     delete req.session.loginOtp;
-    req.session.flash = { type: 'error', text: 'Verification code expired. Request a new one.' };
-    return res.redirect('/auth/2fa');
+    return failTwoFactor({ type: 'error', text: 'Verification code expired. Request a new one.' });
   }
 
   if (!timingSafeEqualString(code, otpSession.code)) {
-    req.session.flash = { type: 'error', text: 'Invalid verification code.' };
-    return res.redirect('/auth/2fa');
+    return failTwoFactor({ type: 'error', text: 'Invalid verification code.' });
   }
 
   const coaching = context.user.coaching_id ? await getCoachingContextById(context.user.coaching_id) : null;
@@ -2504,10 +2509,13 @@ async function handleTwoFactorVerify(req, res) {
 app.post('/auth/2fa', async (req, res) => {
   const submittedOtp = String(req.body?.otp || '').trim();
   if (submittedOtp) {
-    return handleTwoFactorVerify(req, res);
+    return handleTwoFactorVerify(req, res, { renderOnFailure: true });
   }
 
-  return handleTwoFactorSendOtp(req, res);
+  return renderTwoFactorPage(req, res, {
+    type: 'error',
+    text: 'Use the Send Code button first, then submit the verification code.',
+  });
 });
 
 app.post('/auth/2fa/send-otp', handleTwoFactorSendOtp);
