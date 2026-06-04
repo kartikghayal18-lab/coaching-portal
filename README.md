@@ -139,6 +139,61 @@ Migrate existing local uploads to cloud storage:
 npm run migrate:papers:cloud
 ```
 
+<<<<<<< HEAD
 ## Deployment
 
 Use the per-client deployment workflow in [DEPLOYMENT.md](/Users/kartiiik_001/Documents/edusync-template/DEPLOYMENT.md).
+=======
+To migrate and remove local copies:
+
+```bash
+npm run migrate:papers:cloud -- --delete-local
+```
+
+## Environment Variables
+Important keys:
+- `DATABASE_URL`
+- `SESSION_SECRET`
+- `FILE_STORAGE_MODE`
+- `S3_ENDPOINT`
+- `S3_REGION`
+- `S3_BUCKET_NAME`
+- `S3_ACCESS_KEY_ID`
+- `S3_SECRET_ACCESS_KEY`
+- `S3_FORCE_PATH_STYLE`
+- `S3_PUBLIC_BASE_URL`
+- `S3_SIGNED_URL_TTL_SECONDS`
+
+## Deployment
+### Vercel
+- Set `DATABASE_URL` to a Postgres/Neon database.
+- Set a stable `SESSION_SECRET`.
+- Set `FILE_STORAGE_MODE=s3` and all required `S3_*` variables.
+- Keep uploads small on Vercel, or move large paper uploads to direct browser-to-S3 later.
+- Deploy with Vercel Git integration or `npx vercel --prod`.
+
+### Docker
+Build:
+```bash
+docker build -t coaching-app .
+```
+
+Run:
+```bash
+docker run -p 3000:3000 --env-file .env coaching-app
+```
+
+### Platform Deploy (Render/Railway/Fly/etc.)
+- Set all required env vars in platform settings.
+- Keep `FILE_STORAGE_MODE=s3` for production.
+- Use managed cloud storage bucket for all uploads.
+- Use managed Postgres/Neon via `DATABASE_URL`.
+- Full step-by-step: [DEPLOYMENT.md](/Users/kartiiik_001/Documents/Playground/DEPLOYMENT.md)
+
+## Important Paths
+- App entry: `src/app.js`
+- Vercel entry: `api/index.js`
+- DB setup: `src/db.js`
+- Storage module: `src/storage.js`
+- Migration script: `scripts/migrate-papers-to-cloud.js`
+>>>>>>> c4e26f7 (updated coaching portal features)

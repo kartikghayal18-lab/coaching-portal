@@ -30,8 +30,7 @@
       <div class="inline-actions">
         <a href="/admin/dashboard?section=overview" class="sec-btn">Back to Overview</a>
         <a href="/admin/dashboard?section=students" class="sec-btn">Student List</a>
-        <form method="post" action="/logout">
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="btn secondary compact">Logout</button></form>
+        <a href="/admin/dashboard?section=students" class="btn secondary compact">Return to Admin Page</a>
       </div>
     </div>
 

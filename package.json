@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Reusable client deployment template for the EduSync coaching portal",
   "main": "src/app.js",
+  "engines": {
+    "node": ">=20 <25"
+  },
   "scripts": {
     "start": "node src/app.js",
     "dev": "node src/app.js",

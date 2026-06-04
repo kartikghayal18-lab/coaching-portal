@@ -1,7 +1,21 @@
 # Deployment Guide
 
+<<<<<<< HEAD
 This project is now structured as a reusable single-client deployment template.
 Each copied project should have:
+=======
+This project now supports both a normal long-running Node server (`npm start`, useful for Render) and Vercel Serverless Functions (`api/index.js`, configured by `vercel.json`).
+
+## 1) Create Cloud Storage (Cloudflare R2)
+1. Create a Cloudflare account.
+2. Open R2 and create a bucket (private recommended).
+3. Create R2 API token with read/write bucket access.
+4. Note values:
+   - Account ID
+   - Bucket name
+   - Access key ID
+   - Secret access key
+>>>>>>> c4e26f7 (updated coaching portal features)
 
 - its own folder
 - its own `.env`
@@ -10,6 +24,7 @@ Each copied project should have:
 - its own storage bucket or bucket prefix
 - its own domain
 
+<<<<<<< HEAD
 ## 1. Prepare A New Client Copy
 
 1. Duplicate the project folder.
@@ -86,14 +101,52 @@ Behavior:
 - local fallback writes under `./uploads` when configured
 
 Run a storage check before deploy:
+=======
+## 2) Configure Environment Variables
+Use `.env.example` as base and set at least:
+- `DATABASE_URL=postgresql://...`
+- `SESSION_SECRET`
+- `FILE_STORAGE_MODE=s3`
+- `S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com`
+- `S3_REGION=auto`
+- `S3_BUCKET_NAME=<YOUR_BUCKET>`
+- `S3_ACCESS_KEY_ID=<YOUR_KEY>`
+- `S3_SECRET_ACCESS_KEY=<YOUR_SECRET>`
+- `S3_SIGNED_URL_TTL_SECONDS=600`
+>>>>>>> c4e26f7 (updated coaching portal features)
 
 ```bash
 npm run check:cloud
 ```
 
+<<<<<<< HEAD
 ## 6. Deploy
 
 ### Docker
+=======
+## 3) Deploy on Vercel
+Use Vercel project settings to add the production environment variables above.
+
+Required for Vercel:
+- `DATABASE_URL` must point to Postgres or Neon. Do not use SQLite on Vercel.
+- `SESSION_SECRET` must be a stable random string. Do not leave it blank.
+- `FILE_STORAGE_MODE=s3` is required because Vercel cannot persist local uploads.
+- `S3_*` variables must point to Cloudflare R2, AWS S3, or another S3-compatible bucket.
+- Large file uploads are limited by Vercel request limits. This app defaults to a smaller Vercel upload limit; use direct browser-to-S3 uploads later if you need large PDFs.
+
+Deploy:
+```bash
+npm install
+npx vercel
+npx vercel --prod
+```
+
+Vercel entrypoint:
+- `api/index.js` imports the Express app and prepares storage/database before each cold start.
+- `vercel.json` rewrites all traffic to that function.
+
+## 4) Deploy on Render / Railway / Fly / VM
+>>>>>>> c4e26f7 (updated coaching portal features)
 
 ```bash
 docker build -t edusync-client-template .
@@ -107,9 +160,16 @@ npm ci --omit=dev
 npm start
 ```
 
+<<<<<<< HEAD
 ## 7. Post-Deploy Verification
 
 Verify these existing flows after each client deployment:
+=======
+Keep `FILE_STORAGE_MODE=s3` so papers are in cloud.
+
+## 5) Migrate Existing Local Files to Cloud
+Only needed if you already uploaded files in local mode.
+>>>>>>> c4e26f7 (updated coaching portal features)
 
 1. owner login
 2. admin login
@@ -124,6 +184,7 @@ Verify these existing flows after each client deployment:
 
 ## 8. New Client Checklist
 
+<<<<<<< HEAD
 1. Copy project folder
 2. Rename folder
 3. Edit `config/client.json`
@@ -134,3 +195,17 @@ Verify these existing flows after each client deployment:
 8. Set separate mail credentials
 9. Deploy
 10. Connect domain
+=======
+```bash
+npm run migrate:papers:cloud -- --delete-local
+```
+
+## 6) Verify
+- Login as owner from `/login`.
+- Create a coaching tenant and set its `basic`, `mid`, or `premium` subscription.
+- Open the generated coaching portal link.
+- Login there as coaching admin.
+- Open Admin Dashboard > Overview and check `File Storage: S3`.
+- Upload PDF/JPG/PNG.
+- Login as student and confirm open/download works.
+>>>>>>> c4e26f7 (updated coaching portal features)

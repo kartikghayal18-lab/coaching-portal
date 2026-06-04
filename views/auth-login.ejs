@@ -72,8 +72,8 @@
 
           <label>Login Type</label>
           <select name="role" id="role" required>
-            <option value="admin">Coaching Admin</option>
-            <option value="student">Student</option>
+            <option value="admin" <%= loginRole === 'admin' ? 'selected' : '' %>>Coaching Admin</option>
+            <option value="student" <%= loginRole === 'student' ? 'selected' : '' %>>Student</option>
           </select>
 
           <div id="coachingField">
