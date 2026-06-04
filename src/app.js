@@ -5,7 +5,7 @@ const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
-require('dotenv').config({ quiet: true });
+require('../config/env');
 
 const { getPool, run, get, all, withTransaction } = require('./db');
 const { initStorage, getStorageMode, uploadPaperFile, getPaperAccess, deleteStoredPaper } = require('./storage');
@@ -36,6 +36,11 @@ const CAPTCHA_TTL_MS = 10 * 60 * 1000;
 const sessionCookieSecure = isProduction ? 'auto' : false;
 const OTP_SEND_LIMIT = 6;
 const OTP_SEND_WINDOW_MS = 10 * 60 * 1000;
+const TWO_FACTOR_AUTH_POST_PATHS = new Set([
+  '/auth/2fa',
+  '/auth/2fa/send-otp',
+  '/auth/2fa/verify',
+]);
 
 function resolvePort(value) {
   const raw = String(value || '').trim();
@@ -198,6 +203,72 @@ function ensureCsrf(req) {
   const expected = req.session?.csrfToken || '';
   const received = String(req.body?._csrf || req.query?._csrf || '').trim();
   return timingSafeEqualString(received, expected);
+}
+
+function normalizeRequestPath(value) {
+  const pathOnly = String(value || '').split('?')[0].trim();
+  if (!pathOnly) return '/';
+  return pathOnly.length > 1 ? pathOnly.replace(/\/+$/, '') : pathOnly;
+}
+
+function getRequestPathCandidates(req) {
+  return [
+    req.path,
+    req.originalUrl,
+    req.url,
+  ].map(normalizeRequestPath);
+}
+
+function isTwoFactorAuthPostPath(req) {
+  return getRequestPathCandidates(req).some((requestPath) => TWO_FACTOR_AUTH_POST_PATHS.has(requestPath));
+}
+
+function hasValidRequestOrigin(req) {
+  const origin = String(req.headers.origin || '').trim();
+  const referer = String(req.headers.referer || '').trim();
+  const host = String(req.headers.host || '').trim();
+
+  if (origin) {
+    try {
+      return new URL(origin).host === host;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  if (referer) {
+    try {
+      return new URL(referer).host === host;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function getSessionIdFingerprint(req) {
+  const sessionId = String(req.sessionID || '');
+  if (!sessionId) return null;
+  return crypto.createHash('sha256').update(sessionId).digest('hex').slice(0, 16);
+}
+
+function logTwoFactorSession(req, phase) {
+  const receivedCsrf = String(req.body?._csrf || req.query?._csrf || '').trim();
+  console.log('[2FA SESSION]', phase, {
+    method: req.method,
+    path: req.path,
+    originalUrl: req.originalUrl,
+    url: req.url,
+    sessionId: getSessionIdFingerprint(req),
+    hasCookie: Boolean(req.headers.cookie),
+    hasSession: Boolean(req.session),
+    hasPendingLogin: Boolean(req.session?.pendingLogin?.userId),
+    hasLoginOtp: Boolean(req.session?.loginOtp?.code),
+    csrfTokenPresent: Boolean(req.session?.csrfToken),
+    csrfSubmitted: Boolean(receivedCsrf),
+    csrfMatches: Boolean(req.session?.csrfToken && receivedCsrf && timingSafeEqualString(receivedCsrf, req.session.csrfToken)),
+  });
 }
 
 function getClientAddress(req) {
@@ -448,36 +519,16 @@ app.use((req, res, next) => {
     return next();
   }
 
-  // The 2FA flow is already protected by the authenticated pending-login session
-  // plus the one-time code itself. Exempt it from CSRF token checks to avoid
-  // proxy/custom-domain session edge cases breaking OTP verification.
-  if (
-    req.method === 'POST'
-    && (req.path === '/auth/2fa' || req.path === '/auth/2fa/send-otp' || req.path === '/auth/2fa/verify')
-  ) {
-    return next();
+  if (!hasValidRequestOrigin(req)) {
+    return res.status(403).send('Invalid request origin');
   }
 
-  const origin = String(req.headers.origin || '').trim();
-  const referer = String(req.headers.referer || '').trim();
-  const host = String(req.headers.host || '').trim();
-
-  if (origin) {
-    try {
-      if (new URL(origin).host !== host) {
-        return res.status(403).send('Invalid request origin');
-      }
-    } catch (error) {
-      return res.status(403).send('Invalid request origin');
-    }
-  } else if (referer) {
-    try {
-      if (new URL(referer).host !== host) {
-        return res.status(403).send('Invalid request origin');
-      }
-    } catch (error) {
-      return res.status(403).send('Invalid request origin');
-    }
+  // The 2FA flow is still same-origin checked above, then protected by the
+  // pending-login session plus the one-time code. Path matching is normalized
+  // for Vercel rewrites/trailing slashes so these posts do not fall through to
+  // the generic CSRF error.
+  if (req.method === 'POST' && isTwoFactorAuthPostPath(req)) {
+    return next();
   }
 
   if (!ensureCsrf(req)) {
@@ -2535,6 +2586,7 @@ app.post('/owner/login', async (req, res) => {
 });
 
 app.get('/auth/2fa', async (req, res) => {
+  logTwoFactorSession(req, 'GET /auth/2fa render');
   return renderTwoFactorPage(req, res);
 });
 
@@ -2631,6 +2683,7 @@ async function handleTwoFactorVerify(req, res, options = {}) {
 }
 
 app.post('/auth/2fa', async (req, res) => {
+  logTwoFactorSession(req, 'POST /auth/2fa');
   const submittedOtp = String(req.body?.otp || '').trim();
   if (submittedOtp) {
     return handleTwoFactorVerify(req, res, { renderOnFailure: true });
@@ -2642,9 +2695,15 @@ app.post('/auth/2fa', async (req, res) => {
   });
 });
 
-app.post('/auth/2fa/send-otp', handleTwoFactorSendOtp);
+app.post('/auth/2fa/send-otp', async (req, res) => {
+  logTwoFactorSession(req, 'POST /auth/2fa/send-otp');
+  return handleTwoFactorSendOtp(req, res);
+});
 
-app.post('/auth/2fa/verify', handleTwoFactorVerify);
+app.post('/auth/2fa/verify', async (req, res) => {
+  logTwoFactorSession(req, 'POST /auth/2fa/verify');
+  return handleTwoFactorVerify(req, res);
+});
 
 app.post('/logout', (req, res) => {
   const sessionUser = req.session?.user || null;
