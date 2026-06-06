@@ -20,6 +20,11 @@ async function ensureNotificationSchema() {
   await run(`ALTER TABLE whatsapp_settings ADD COLUMN IF NOT EXISTS result_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
   await run(`ALTER TABLE whatsapp_settings ADD COLUMN IF NOT EXISTS test_paper_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
   await run(`ALTER TABLE whatsapp_settings ADD COLUMN IF NOT EXISTS notice_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
+  await run(`ALTER TABLE fees ADD COLUMN IF NOT EXISTS receipt_number VARCHAR(40)`);
+  await run(`ALTER TABLE fees ADD COLUMN IF NOT EXISTS receipt_file_url TEXT`);
+  await run(`ALTER TABLE fees ADD COLUMN IF NOT EXISTS receipt_storage_key TEXT`);
+  await run(`ALTER TABLE fees ADD COLUMN IF NOT EXISTS receipt_storage_type VARCHAR(20)`);
+  await run(`ALTER TABLE fees ADD COLUMN IF NOT EXISTS receipt_generated_at TIMESTAMPTZ`);
 
   await run(`
     CREATE TABLE IF NOT EXISTS notification_logs (

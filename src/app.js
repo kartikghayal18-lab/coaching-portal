@@ -37,6 +37,7 @@ const {
   sendMonthlyParentReports,
   sendPerformanceGraph,
 } = require('./services/parentAssistant');
+const { buildProgressSummaryFromPapers } = require('./services/progress');
 
 console.log('[BOOT] Starting app');
 console.log('[BOOT] DATABASE_URL present:', Boolean(process.env.DATABASE_URL));
@@ -1264,38 +1265,6 @@ function buildBranding(coaching = null) {
       `--surface-glow:${rgbaFromHex(themePrimary, 0.1)}`,
       `--shadow:0 12px 30px ${rgbaFromHex(themePrimary, 0.08)}`,
     ].join(';'),
-  };
-}
-
-function buildProgressSummaryFromPapers(papers) {
-  const markedPapers = (papers || [])
-    .filter((paper) => paper.marks_obtained !== null && paper.max_marks !== null && Number(paper.max_marks) > 0)
-    .slice()
-    .reverse();
-
-  const totalMarksObtained = markedPapers.reduce((sum, paper) => sum + Number(paper.marks_obtained || 0), 0);
-  const totalMaxMarks = markedPapers.reduce((sum, paper) => sum + Number(paper.max_marks || 0), 0);
-  const marksPercent = totalMaxMarks
-    ? ((totalMarksObtained / totalMaxMarks) * 100).toFixed(1)
-    : '0.0';
-
-  const progressSeries = markedPapers.map((paper, index) => ({
-    label: paper.test_label || path.parse(paper.original_name || 'Test').name,
-    marks: Number(paper.marks_obtained),
-    max: Number(paper.max_marks),
-    percent: Number(((Number(paper.marks_obtained) / Number(paper.max_marks)) * 100).toFixed(1)),
-    testNo: index + 1,
-  }));
-
-  return {
-    markedPapers,
-    progressSeries,
-    marksSummary: {
-      testsCount: markedPapers.length,
-      totalMarksObtained,
-      totalMaxMarks,
-      marksPercent,
-    },
   };
 }
 
@@ -5431,6 +5400,11 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
     return res.redirect('/admin/dashboard?section=fees');
   }
 
+  if (!Number.isFinite(amount) || amount <= 0) {
+    req.session.flash = { type: 'error', text: 'Enter a valid fee amount before saving payment details.' };
+    return res.redirect('/admin/dashboard?section=fees');
+  }
+
   const feeResult = await run(
     `INSERT INTO fees (coaching_id, student_id, amount, due_date, payment_date, status, notes, added_by)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -5449,11 +5423,7 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
   try {
     if (status === 'paid') {
       const feePaidMessage = [
-        `🏫 ${coaching?.name || 'Coaching Institute'}`,
-        '✅ Payment Received',
-        `Student: ${student.name || student.roll_no}`,
-        `Amount: ₹${Number(amount || 0).toFixed(2)}`,
-        'Receipt attached below.',
+        'Payment received successfully. Receipt attached.',
       ].join('\n');
       const feeRecipients = [
         { key: 'student', phone: student.whatsapp_number || student.contact_phone },

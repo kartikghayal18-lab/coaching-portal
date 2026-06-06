@@ -1,6 +1,8 @@
-const { get, all } = require('../db');
+const PDFDocument = require('pdfkit');
+const { get, all, run } = require('../db');
 const { getPaperAccess, uploadGeneratedFile } = require('../storage');
 const { sendDocumentNotification, sendWhatsAppNotification } = require('./notificationService');
+const { buildProgressSummaryFromPapers } = require('./progress');
 
 function cleanPhoneNumber(value) {
   return String(value || '').replace(/[^\d]/g, '');
@@ -13,6 +15,16 @@ function formatDate(value) {
 
 function formatAmount(value) {
   return Number(value || 0).toFixed(2);
+}
+
+function buildReceiptNumber(feeId, paymentDate = new Date()) {
+  const date = new Date(paymentDate || Date.now());
+  const stamp = [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0'),
+  ].join('');
+  return `REC-${stamp}-${String(feeId).padStart(4, '0').slice(-4)}`;
 }
 
 function escapePdfText(value) {
@@ -58,6 +70,18 @@ function createSimplePdfBuffer(title, lines) {
   return Buffer.from(pdf);
 }
 
+function createPdfKitBuffer(buildDocument) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 48 });
+    const chunks = [];
+    doc.on('data', (chunk) => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    buildDocument(doc);
+    doc.end();
+  });
+}
+
 function escapeXml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -80,6 +104,9 @@ function createPerformanceSvgBuffer(student, progressSeries) {
     })
     : [];
   const path = points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' ');
+  const emptyState = points.length
+    ? ''
+    : '<text x="360" y="215" font-size="22" font-family="Arial" text-anchor="middle" fill="#64748b">No performance data available</text>';
 
   const circles = points.map((point) => (
     `<circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="6" fill="#1769aa" />`
@@ -101,6 +128,7 @@ function createPerformanceSvgBuffer(student, progressSeries) {
   <path d="${path}" fill="none" stroke="#1769aa" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
   ${circles}
   ${labels}
+  ${emptyState}
 </svg>`;
   return Buffer.from(svg);
 }
@@ -170,18 +198,20 @@ async function buildStudentPerformance(coachingId, studentId) {
             stored_name, storage_type, storage_key, public_url, content_type
      FROM test_papers
      WHERE coaching_id = ? AND student_id = ?
-     ORDER BY upload_date ASC`,
+     ORDER BY upload_date DESC
+     LIMIT 20`,
     [coachingId, studentId]
   );
-  const marked = papers.filter((paper) => paper.marks_obtained !== null && paper.max_marks !== null && Number(paper.max_marks) > 0);
-  const totalMarks = marked.reduce((sum, paper) => sum + Number(paper.marks_obtained || 0), 0);
-  const totalMax = marked.reduce((sum, paper) => sum + Number(paper.max_marks || 0), 0);
-  const percentage = totalMax > 0 ? Number(((totalMarks / totalMax) * 100).toFixed(1)) : 0;
-  const progressSeries = marked.map((paper, index) => ({
-    label: paper.test_label || paper.original_name || `Test ${index + 1}`,
-    percent: Number(((Number(paper.marks_obtained || 0) / Number(paper.max_marks || 1)) * 100).toFixed(1)),
-  }));
-  return { papers, marked, totalMarks, totalMax, percentage, progressSeries };
+  const { markedPapers, progressSeries, marksSummary } = buildProgressSummaryFromPapers(papers);
+  return {
+    papers,
+    marked: markedPapers,
+    totalMarks: marksSummary.totalMarksObtained,
+    totalMax: marksSummary.totalMaxMarks,
+    percentage: marksSummary.marksPercent,
+    progressSeries,
+    marksSummary,
+  };
 }
 
 async function sendLatestPaper(student, phone) {
@@ -231,14 +261,16 @@ async function sendPerformanceGraph(student, phone, coaching = null) {
     contentType: 'image/svg+xml',
     folder: 'whatsapp/performance',
   });
-  const message = [
-    '📈 Performance Updated',
-    '',
-    `Student: ${student.name || student.roll_no}`,
-    `Overall Score: ${performance.percentage}%`,
-    '',
-    'Performance graph attached.',
-  ].join('\n');
+  const message = performance.marked.length
+    ? [
+      '📈 Performance Updated',
+      '',
+      `Student: ${student.name || student.roll_no}`,
+      `Overall Score: ${performance.marksSummary.marksPercent}%`,
+      '',
+      'Performance graph attached.',
+    ].join('\n')
+    : 'No performance data available';
   await sendWhatsAppNotification({
     studentId: student.id,
     phone,
@@ -261,7 +293,9 @@ async function sendPerformanceReport(student, phone, coaching = null) {
     `Roll No: ${student.roll_no}`,
     `Total Tests: ${performance.marked.length}`,
     `Total Marks: ${performance.totalMarks}/${performance.totalMax}`,
-    `Overall Score: ${performance.percentage}%`,
+    performance.marked.length
+      ? `Overall Score: ${performance.marksSummary.marksPercent}%`
+      : 'No performance data available',
     '',
     'Recent Results:',
     ...performance.marked.slice(-10).map((paper) => (
@@ -280,24 +314,93 @@ async function sendPerformanceReport(student, phone, coaching = null) {
   });
 }
 
-async function createFeeReceiptAndSend({ student, fee, coaching, phone, recipient = 'parent' }) {
-  const receipt = createSimplePdfBuffer('Fee Receipt', [
-    `Coaching: ${coaching?.name || 'Coaching Institute'}`,
-    `Student: ${student.name || student.roll_no}`,
-    `Roll No: ${student.roll_no}`,
-    `Amount Paid: Rs. ${formatAmount(fee.amount)}`,
-    `Payment Date: ${formatDate(fee.payment_date || new Date().toISOString())}`,
-    `Status: ${fee.status || 'paid'}`,
-  ]);
+async function generateFeeReceiptPdf(feeId) {
+  const fee = await get(
+    `SELECT f.id, f.amount, f.payment_date, f.status, f.receipt_number, f.receipt_file_url,
+            u.id AS student_id, u.roll_no, u.name AS student_name, u.batch_id,
+            b.name AS batch_name,
+            cc.name AS coaching_name, cc.admin_contact_phone, cc.contact_email
+     FROM fees f
+     JOIN users u ON u.id = f.student_id
+     LEFT JOIN batches b ON b.id = u.batch_id
+     JOIN coaching_classes cc ON cc.id = f.coaching_id
+     WHERE f.id = ?
+     LIMIT 1`,
+    [feeId]
+  );
+
+  if (!fee) {
+    throw new Error(`Fee record not found for receipt generation: ${feeId}`);
+  }
+
+  const amount = Number(fee.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error(`Cannot generate receipt for invalid amount on fee ${feeId}`);
+  }
+
+  const receiptNumber = fee.receipt_number || buildReceiptNumber(fee.id, fee.payment_date || new Date());
+  if (fee.receipt_file_url) {
+    return {
+      receiptNumber,
+      fileUrl: fee.receipt_file_url,
+      fileName: `${receiptNumber}.pdf`,
+      fee,
+    };
+  }
+
+  const receipt = await createPdfKitBuffer((doc) => {
+    doc.fontSize(20).text('Fee Receipt', { align: 'center' });
+    doc.moveDown(0.5);
+    doc.fontSize(11).text(fee.coaching_name || 'Coaching Institute', { align: 'center' });
+    doc.fontSize(9).fillColor('#555').text(`Contact: ${fee.admin_contact_phone || '-'} | Email: ${fee.contact_email || '-'}`, { align: 'center' });
+    doc.moveDown(1.5);
+    doc.fillColor('#000').fontSize(12);
+    const rows = [
+      ['Receipt Number', receiptNumber],
+      ['Student Name', fee.student_name || '-'],
+      ['Roll Number', fee.roll_no || '-'],
+      ['Batch', fee.batch_name || '-'],
+      ['Amount', `Rs. ${formatAmount(amount)}`],
+      ['Payment Date', formatDate(fee.payment_date || new Date().toISOString())],
+      ['Coaching Name', fee.coaching_name || '-'],
+      ['Coaching Contact', fee.admin_contact_phone || fee.contact_email || '-'],
+    ];
+    rows.forEach(([label, value]) => {
+      doc.font('Helvetica-Bold').text(`${label}: `, { continued: true });
+      doc.font('Helvetica').text(String(value));
+      doc.moveDown(0.35);
+    });
+    doc.moveDown(1);
+    doc.fontSize(10).fillColor('#555').text('This is a system-generated receipt from EduSync.', { align: 'center' });
+  });
+
   const file = await uploadGeneratedFile({
     buffer: receipt,
-    fileName: `fee-receipt-${student.roll_no}-${fee.id || Date.now()}.pdf`,
+    fileName: `${receiptNumber}.pdf`,
     contentType: 'application/pdf',
     folder: 'whatsapp/receipts',
   });
-  return sendDocumentNotification(student.id, phone, file.publicUrl, `fee-receipt-${student.roll_no}.pdf`, 'Fee receipt attached.', {
+
+  await run(
+    `UPDATE fees
+     SET receipt_number = ?, receipt_file_url = ?, receipt_storage_key = ?, receipt_storage_type = ?, receipt_generated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`,
+    [receiptNumber, file.publicUrl, file.storageKey || file.storedName || null, file.storageType || null, fee.id]
+  );
+
+  return {
+    receiptNumber,
+    fileUrl: file.publicUrl,
+    fileName: `${receiptNumber}.pdf`,
+    fee,
+  };
+}
+
+async function createFeeReceiptAndSend({ student, fee, coaching, phone, recipient = 'parent' }) {
+  const receipt = await generateFeeReceiptPdf(fee.id);
+  return sendDocumentNotification(student.id, phone, receipt.fileUrl, receipt.fileName, 'Payment received successfully. Receipt attached.', {
     type: 'fee_receipt',
-    eventKey: `fee_receipt:${recipient}:${student.id}:${fee.id || Date.now()}`,
+    eventKey: `fee_receipt:${recipient}:${student.id}:${fee.id}`,
   });
 }
 
@@ -326,7 +429,9 @@ async function createMonthlyReportAndSend({ student, coaching, phone, monthKey }
     `Roll No: ${student.roll_no}`,
     `Attendance: ${attendancePercent}%`,
     `Total Tests: ${performance.marked.length}`,
-    `Average Marks: ${performance.percentage}%`,
+    performance.marked.length
+      ? `Average Marks: ${performance.marksSummary.marksPercent}%`
+      : 'No performance data available',
     `Pending Fees: Rs. ${formatAmount(pending?.pending_amount)}`,
   ]);
   const file = await uploadGeneratedFile({
@@ -519,6 +624,7 @@ module.exports = {
   createFeeReceiptAndSend,
   createMonthlyReportAndSend,
   findStudentByParentPhone,
+  generateFeeReceiptPdf,
   getCoachingByWhatsAppPhoneNumberId,
   handleParentAssistantMessage,
   sendLatestPaper,
