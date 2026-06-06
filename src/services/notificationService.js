@@ -173,6 +173,15 @@ async function sendWhatsAppNotification({
       message: notificationMessage,
       settings,
     });
+    if (result?.failed) {
+      await run(
+        `UPDATE notification_logs
+         SET status = ?, error_message = ?
+         WHERE id = ?`,
+        ['failed', result.error || 'WhatsApp send failed', logId]
+      );
+      return { ok: false, failed: true, error: result.error || 'WhatsApp send failed', logId };
+    }
     await run(
       `UPDATE notification_logs
        SET status = ?, sent_at = CURRENT_TIMESTAMP
@@ -281,6 +290,15 @@ async function sendDocumentNotification(
       caption: notificationMessage,
       settings,
     });
+    if (result?.failed) {
+      await run(
+        `UPDATE notification_logs
+         SET status = ?, error_message = ?
+         WHERE id = ?`,
+        ['failed', result.error || 'WhatsApp document send failed', logId]
+      );
+      return { ok: false, failed: true, error: result.error || 'WhatsApp document send failed', logId };
+    }
     await run(
       `UPDATE notification_logs
        SET status = ?, sent_at = CURRENT_TIMESTAMP

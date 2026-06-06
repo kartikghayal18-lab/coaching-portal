@@ -9,8 +9,8 @@ function buildProgressSummaryFromPapers(papers) {
   const totalMarksObtained = markedPapers.reduce((sum, paper) => sum + Number(paper.marks_obtained || 0), 0);
   const totalMaxMarks = markedPapers.reduce((sum, paper) => sum + Number(paper.max_marks || 0), 0);
   const marksPercent = totalMaxMarks
-    ? ((totalMarksObtained / totalMaxMarks) * 100).toFixed(1)
-    : '0.0';
+    ? ((totalMarksObtained / totalMaxMarks) * 100).toFixed(2)
+    : '0.00';
 
   const progressSeries = markedPapers.map((paper, index) => ({
     label: paper.test_label || path.parse(paper.original_name || 'Test').name,

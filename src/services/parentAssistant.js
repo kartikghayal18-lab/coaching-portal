@@ -2,6 +2,7 @@ const PDFDocument = require('pdfkit');
 const { get, all, run } = require('../db');
 const { getPaperAccess, uploadGeneratedFile } = require('../storage');
 const { sendDocumentNotification, sendWhatsAppNotification } = require('./notificationService');
+const { getNextDueDate, getStudentFeeSummary } = require('./feeStructure');
 const { buildProgressSummaryFromPapers } = require('./progress');
 
 function cleanPhoneNumber(value) {
@@ -10,7 +11,9 @@ function cleanPhoneNumber(value) {
 
 function formatDate(value) {
   if (!value) return '-';
-  return String(value).slice(0, 10);
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 10);
+  return `${String(date.getDate()).padStart(2, '0')}-${date.toLocaleString('en-US', { month: 'short' })}-${date.getFullYear()}`;
 }
 
 function formatAmount(value) {
@@ -26,13 +29,7 @@ function resolveAdminPhone(result) {
 }
 
 function buildReceiptNumber(feeId, paymentDate = new Date()) {
-  const date = new Date(paymentDate || Date.now());
-  const stamp = [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, '0'),
-    String(date.getDate()).padStart(2, '0'),
-  ].join('');
-  return `REC-${stamp}-${String(feeId).padStart(4, '0').slice(-4)}`;
+  return `RCP-${String(feeId).padStart(6, '0')}`;
 }
 
 function escapePdfText(value) {
@@ -168,6 +165,7 @@ async function getCoachingByWhatsAppPhoneNumberId(phoneNumberId) {
 
 async function findStudentByParentPhone(coachingId, phone) {
   const cleanPhone = cleanPhoneNumber(phone);
+  const phoneSuffix = cleanPhone.slice(-10);
   if (!cleanPhone) return null;
   return get(
     `SELECT u.id, u.coaching_id, u.roll_no, u.name, u.contact_phone, u.guardian_phone,
@@ -180,14 +178,34 @@ async function findStudentByParentPhone(coachingId, phone) {
          OR REGEXP_REPLACE(COALESCE(u.guardian_phone, ''), '[^0-9]', '', 'g') = ?
          OR REGEXP_REPLACE(COALESCE(u.contact_phone, ''), '[^0-9]', '', 'g') = ?
          OR REGEXP_REPLACE(COALESCE(u.whatsapp_number, ''), '[^0-9]', '', 'g') = ?
+         OR RIGHT(REGEXP_REPLACE(COALESCE(u.parent_whatsapp_number, ''), '[^0-9]', '', 'g'), 10) = ?
+         OR RIGHT(REGEXP_REPLACE(COALESCE(u.guardian_phone, ''), '[^0-9]', '', 'g'), 10) = ?
+         OR RIGHT(REGEXP_REPLACE(COALESCE(u.contact_phone, ''), '[^0-9]', '', 'g'), 10) = ?
+         OR RIGHT(REGEXP_REPLACE(COALESCE(u.whatsapp_number, ''), '[^0-9]', '', 'g'), 10) = ?
        )
      ORDER BY CASE
        WHEN REGEXP_REPLACE(COALESCE(u.parent_whatsapp_number, ''), '[^0-9]', '', 'g') = ? THEN 1
        WHEN REGEXP_REPLACE(COALESCE(u.guardian_phone, ''), '[^0-9]', '', 'g') = ? THEN 2
+       WHEN RIGHT(REGEXP_REPLACE(COALESCE(u.parent_whatsapp_number, ''), '[^0-9]', '', 'g'), 10) = ? THEN 3
+       WHEN RIGHT(REGEXP_REPLACE(COALESCE(u.guardian_phone, ''), '[^0-9]', '', 'g'), 10) = ? THEN 4
        ELSE 3
      END
      LIMIT 1`,
-    [coachingId, cleanPhone, cleanPhone, cleanPhone, cleanPhone, cleanPhone, cleanPhone]
+    [
+      coachingId,
+      cleanPhone,
+      cleanPhone,
+      cleanPhone,
+      cleanPhone,
+      phoneSuffix,
+      phoneSuffix,
+      phoneSuffix,
+      phoneSuffix,
+      cleanPhone,
+      cleanPhone,
+      phoneSuffix,
+      phoneSuffix,
+    ]
   );
 }
 
@@ -197,16 +215,15 @@ function buildParentMenuMessage(coaching) {
     '',
     'Welcome Parent Portal',
     '',
-    'Select an option:',
+    'Reply with:',
     '',
-    '1️⃣ Latest Result',
-    '2️⃣ Performance Report',
-    '3️⃣ Attendance Summary',
-    '4️⃣ Pending Fees',
-    '5️⃣ Payment History',
-    '6️⃣ Student Profile',
+    '1️⃣ FEES',
+    '2️⃣ ATTENDANCE',
+    '3️⃣ RESULTS',
+    '4️⃣ PERFORMANCE',
+    '5️⃣ STUDENT INFO',
     '',
-    'Reply with a number.',
+    'Type option name.',
   ].join('\n');
 }
 
@@ -280,12 +297,18 @@ async function sendLatestResult(student, phone) {
   const document = await getPaperDocument(paper);
   if (!document?.fileUrl) return false;
   const resultMessage = [
-    '📊 Latest Result',
+    '📚 Latest Result',
     '',
-    `Student Name: ${student.name || '-'}`,
-    `Subject: ${paper.test_label || paper.original_name || '-'}`,
-    `Marks: ${paper.marks_obtained ?? '-'}/${paper.max_marks ?? '-'}`,
-    `Date: ${formatDate(paper.upload_date)}`,
+    'Student:',
+    student.name || '-',
+    '',
+    'Test:',
+    paper.test_label || paper.original_name || '-',
+    '',
+    'Marks:',
+    `${paper.marks_obtained ?? '-'}/${paper.max_marks ?? '-'}`,
+    '',
+    'Result PDF attached.',
   ].join('\n');
   await sendWhatsAppNotification({
     studentId: student.id,
@@ -315,7 +338,9 @@ async function sendPerformanceGraph(student, phone, coaching = null, options = {
       '📈 Performance Updated',
       '',
       `Student: ${student.name || student.roll_no}`,
-      `Overall Score: ${performance.marksSummary.marksPercent}%`,
+      '',
+      'Overall Score:',
+      `${performance.marksSummary.marksPercent}%`,
       '',
       'Performance graph attached.',
     ].join('\n')
@@ -372,6 +397,7 @@ async function generateFeeReceiptPdf(feeId) {
             u.id AS student_id, u.roll_no, u.name AS student_name, u.batch_id,
             b.name AS batch_name,
             cc.name AS coaching_name, cc.contact_email,
+            sfs.total_fee, sfs.paid_fee, sfs.pending_fee,
             admin.contact_phone AS admin_contact_phone,
             admin.contact_phone AS contact_phone,
             admin.whatsapp_number AS whatsapp_number,
@@ -380,6 +406,7 @@ async function generateFeeReceiptPdf(feeId) {
      JOIN users u ON u.id = f.student_id
      LEFT JOIN batches b ON b.id = u.batch_id
      JOIN coaching_classes cc ON cc.id = f.coaching_id
+     LEFT JOIN student_fee_structure sfs ON sfs.coaching_id = f.coaching_id AND sfs.student_id = f.student_id
      LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.role = 'admin'
      LEFT JOIN users receiver ON receiver.id = f.added_by
      WHERE f.id = ?
@@ -408,22 +435,23 @@ async function generateFeeReceiptPdf(feeId) {
 
   const receipt = await createPdfKitBuffer((doc) => {
     const adminPhone = resolveAdminPhone(fee);
-    doc.fontSize(20).text('Fee Receipt', { align: 'center' });
+    doc.fontSize(18).text(fee.coaching_name || 'SHIV CHHATRAPATI CLASSES', { align: 'center' });
+    doc.moveDown(0.4);
+    doc.fontSize(20).text('Payment Receipt', { align: 'center' });
     doc.moveDown(0.5);
-    doc.fontSize(11).text(fee.coaching_name || 'Coaching Institute', { align: 'center' });
     doc.fontSize(9).fillColor('#555').text(`Contact: ${adminPhone || '-'} | Email: ${fee.contact_email || '-'}`, { align: 'center' });
     doc.moveDown(1.5);
     doc.fillColor('#000').fontSize(12);
     const rows = [
-      ['Institute Name', fee.coaching_name || '-'],
-      ['Receipt Number', receiptNumber],
+      ['Receipt No', receiptNumber],
+      ['Date', formatDate(fee.payment_date || new Date().toISOString())],
       ['Transaction ID', `FEE-${fee.id}`],
-      ['Student Name', fee.student_name || '-'],
+      ['Student', fee.student_name || '-'],
       ['Roll Number', fee.roll_no || '-'],
       ['Batch', fee.batch_name || '-'],
-      ['Amount', `Rs. ${formatAmount(amount)}`],
-      ['Payment Date', formatDate(fee.payment_date || new Date().toISOString())],
+      ['Amount Paid', `Rs. ${formatAmount(amount)}`],
       ['Payment Method', fee.notes || 'Manual/Portal'],
+      ['Pending Balance', `Rs. ${formatAmount(fee.pending_fee)}`],
       ['Received By', fee.received_by_name || 'Admin'],
       ['Coaching Contact', adminPhone || fee.contact_email || '-'],
     ];
@@ -520,7 +548,7 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
     lastMessage: command,
   });
 
-  if (['HI', 'HELLO', 'MENU', 'START'].includes(command)) {
+  if (['HI', 'HELLO', 'MENU', 'START', 'HELP'].includes(command)) {
     await sendWhatsAppNotification({
       studentId: student.id,
       phone,
@@ -531,41 +559,37 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
     return true;
   }
 
-  if (command === '1') {
-    const sent = await sendLatestResult(student, phone);
-    if (!sent) {
-      await sendWhatsAppNotification({ studentId: student.id, phone, type: 'parent_menu_latest_result', message: 'No result PDF is available yet.', eventKey: `parent_menu_latest_result_empty:${student.id}:${Date.now()}` });
-    }
-    return true;
-  }
-
-  if (command === '2') {
-    const performance = await buildStudentPerformance(student.coaching_id, student.id);
-    const percentages = performance.progressSeries.map((item) => Number(item.percent)).filter(Number.isFinite);
-    const average = performance.marked.length ? performance.marksSummary.marksPercent : '0.0';
-    const highest = percentages.length ? Math.max(...percentages).toFixed(1) : '0.0';
-    const lowest = percentages.length ? Math.min(...percentages).toFixed(1) : '0.0';
+  if (command === '1' || command === 'FEES') {
+    const feeSummary = await getStudentFeeSummary(student.coaching_id, student.id);
+    const nextDueDate = await getNextDueDate(student.coaching_id, student.id);
     await sendWhatsAppNotification({
       studentId: student.id,
       phone,
-      type: 'parent_menu_performance_report',
-      message: performance.marked.length
-        ? [
-          '📊 Performance Report',
-          '',
-          `Student Name: ${student.name || '-'}`,
-          `Average Score: ${average}%`,
-          `Highest Score: ${highest}%`,
-          `Lowest Score: ${lowest}%`,
-        ].join('\n')
-        : 'No performance data available',
-      eventKey: `parent_menu_performance_report:${student.id}:${Date.now()}`,
+      type: 'parent_menu_fee_summary',
+      message: [
+        '💰 Fee Summary',
+        '',
+        'Student:',
+        student.name || '-',
+        '',
+        'Total Fees:',
+        `₹${formatAmount(feeSummary.totalFee)}`,
+        '',
+        'Paid:',
+        `₹${formatAmount(feeSummary.paidFee)}`,
+        '',
+        'Pending:',
+        `₹${formatAmount(feeSummary.pendingFee)}`,
+        '',
+        'Next Due:',
+        formatDate(nextDueDate),
+      ].join('\n'),
+      eventKey: `parent_menu_fee_summary:${student.id}:${Date.now()}`,
     });
-    await sendPerformanceGraph(student, phone, coaching, { sendMessage: false });
     return true;
   }
 
-  if (command === '3' || command === 'ATTENDANCE') {
+  if (command === '2' || command === 'ATTENDANCE') {
     const summary = await get(
       `SELECT COUNT(*) AS total,
               SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) AS present_count,
@@ -583,74 +607,76 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
       phone,
       type: 'parent_menu_attendance',
       message: [
-        'Attendance Summary',
-        `Student: ${student.name || '-'}`,
-        `Present: ${present}`,
-        `Absent: ${Number(summary?.absent_count || 0)}`,
-        `Late: ${Number(summary?.late_count || 0)}`,
-        `Attendance Percentage: ${percent}%`,
+        '📅 Attendance Summary',
+        '',
+        'Present:',
+        String(present),
+        '',
+        'Absent:',
+        String(Number(summary?.absent_count || 0)),
+        '',
+        'Attendance:',
+        `${percent}%`,
       ].join('\n'),
       eventKey: `parent_menu_attendance:${student.id}:${Date.now()}`,
     });
     return true;
   }
 
-  if (command === '4' || command === 'FEES') {
-    const pending = await get(
-      `SELECT COALESCE(SUM(amount), 0) AS amount,
-              MIN(due_date) AS next_due_date
-       FROM fees
-       WHERE coaching_id = ? AND student_id = ? AND status IN ('pending', 'overdue')`,
-      [student.coaching_id, student.id]
-    );
-    await sendWhatsAppNotification({
-      studentId: student.id,
-      phone,
-      type: 'parent_menu_pending_fees',
-      message: [
-        'Pending Fees',
-        `Student: ${student.name || '-'}`,
-        `Remaining Balance: Rs. ${formatAmount(pending?.amount)}`,
-        `Due Date: ${formatDate(pending?.next_due_date)}`,
-      ].join('\n'),
-      eventKey: `parent_menu_pending_fees:${student.id}:${Date.now()}`,
-    });
+  if (command === '3' || command === 'RESULTS' || command === 'RESULT') {
+    const sent = await sendLatestResult(student, phone);
+    if (!sent) {
+      await sendWhatsAppNotification({ studentId: student.id, phone, type: 'parent_menu_latest_result', message: 'No result PDF is available yet.', eventKey: `parent_menu_latest_result_empty:${student.id}:${Date.now()}` });
+    }
     return true;
   }
 
-  if (command === '5') {
-    const fees = await all(
-      `SELECT amount, due_date, payment_date, status
-       FROM fees
-       WHERE coaching_id = ? AND student_id = ?
-       ORDER BY created_at DESC
-       LIMIT 10`,
-      [student.coaching_id, student.id]
-    );
+  if (command === '4' || command === 'PERFORMANCE') {
+    const performance = await buildStudentPerformance(student.coaching_id, student.id);
+    const percentages = performance.progressSeries.map((item) => Number(item.percent)).filter(Number.isFinite);
+    const average = performance.marked.length ? performance.marksSummary.marksPercent : '0.00';
+    const highest = percentages.length ? Math.max(...percentages).toFixed(2) : '0.00';
+    const latest = percentages.length ? percentages[percentages.length - 1].toFixed(2) : '0.00';
     await sendWhatsAppNotification({
       studentId: student.id,
       phone,
-      type: 'parent_menu_fee_history',
+      type: 'parent_menu_performance_report',
       message: [
-        'Last 10 Fee Records',
-        ...fees.map((fee) => `${formatDate(fee.payment_date || fee.due_date)} | Rs. ${formatAmount(fee.amount)} | ${fee.status || '-'}`),
+        '📈 Performance Report',
+        '',
+        'Average:',
+        `${average}%`,
+        '',
+        'Highest:',
+        `${highest}%`,
+        '',
+        'Latest:',
+        `${latest}%`,
+        '',
+        'Graph attached.',
       ].join('\n'),
-      eventKey: `parent_menu_fee_history:${student.id}:${Date.now()}`,
+      eventKey: `parent_menu_performance_report:${student.id}:${Date.now()}`,
     });
+    await sendPerformanceGraph(student, phone, coaching, { sendMessage: false });
     return true;
   }
 
-  if (command === '6') {
+  if (command === '5' || command === 'STUDENT INFO' || command === 'STUDENT' || command === 'INFO') {
     await sendWhatsAppNotification({
       studentId: student.id,
       phone,
       type: 'parent_menu_student_profile',
       message: [
-        'Student Profile',
-        `Name: ${student.name || '-'}`,
-        `Roll No: ${student.roll_no || '-'}`,
-        `Batch: ${student.batch_name || '-'}`,
-        `Parent Contact: ${student.parent_whatsapp_number || student.guardian_phone || phone || '-'}`,
+        '👨‍🎓 Student Information',
+        '',
+        'Name:',
+        student.name || '-',
+        '',
+        'Roll No:',
+        student.roll_no || '-',
+        '',
+        'Batch:',
+        student.batch_name || '-',
       ].join('\n'),
       eventKey: `parent_menu_student_profile:${student.id}:${Date.now()}`,
     });

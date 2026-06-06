@@ -173,32 +173,37 @@ async function updateWhatsAppLogStatus(metaMessageId, status) {
 }
 
 async function sendMetaMessage({ settings, payload }) {
-  if (!settings.accessToken || !settings.phoneNumberId) {
-    throw new Error('WhatsApp access token and phone number ID are required');
-  }
+  try {
+    if (!settings.accessToken || !settings.phoneNumberId) {
+      throw new Error('WhatsApp access token and phone number ID are required');
+    }
 
-  const response = await fetch(`${GRAPH_API_BASE_URL}/${settings.phoneNumberId}/messages`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${settings.accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      ...payload,
-    }),
-  });
+    const response = await fetch(`${GRAPH_API_BASE_URL}/${settings.phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${settings.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        ...payload,
+      }),
+    });
 
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const message = body?.error?.message || `WhatsApp API request failed with status ${response.status}`;
-    const error = new Error(message);
-    error.status = response.status;
-    error.response = body;
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = body?.error?.message || `WhatsApp API request failed with status ${response.status}`;
+      const error = new Error(message);
+      error.status = response.status;
+      error.response = body;
+      throw error;
+    }
+
+    return body;
+  } catch (error) {
+    console.error('WhatsApp API send failed', error);
     throw error;
   }
-
-  return body;
 }
 
 async function sendTextMessage({ coachingId, studentId = null, to, message, settings = null }) {
@@ -233,11 +238,12 @@ async function sendTextMessage({ coachingId, studentId = null, to, message, sett
     );
     return { ok: true, metaMessageId, response };
   } catch (error) {
+    console.error('sendTextMessage failed', error);
     await run(
       `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
       ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), logId]
     );
-    throw error;
+    return { ok: false, failed: true, error: error.message, logId };
   }
 }
 
@@ -282,11 +288,60 @@ async function sendDocumentMessage({
     );
     return { ok: true, metaMessageId, response };
   } catch (error) {
+    console.error('sendDocumentMessage failed', error);
     await run(
       `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
       ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), logId]
     );
-    throw error;
+    return { ok: false, failed: true, error: error.message, logId };
+  }
+}
+
+async function sendImageMessage({
+  coachingId,
+  studentId = null,
+  to,
+  imageUrl,
+  caption = '',
+  settings = null,
+}) {
+  const phoneNumber = cleanPhoneNumber(to);
+  const messageContent = caption || imageUrl;
+  const logId = await logWhatsAppMessage({
+    coachingId,
+    studentId,
+    phoneNumber,
+    messageType: 'image',
+    messageContent,
+    status: 'pending',
+  });
+
+  try {
+    const activeSettings = settings || await getWhatsAppSettings(coachingId);
+    const response = await sendMetaMessage({
+      settings: activeSettings,
+      payload: {
+        to: phoneNumber,
+        type: 'image',
+        image: {
+          link: imageUrl,
+          caption,
+        },
+      },
+    });
+    const metaMessageId = response?.messages?.[0]?.id || null;
+    await run(
+      `UPDATE whatsapp_logs SET status = ?, meta_message_id = ? WHERE id = ?`,
+      ['sent', metaMessageId, logId]
+    );
+    return { ok: true, metaMessageId, response };
+  } catch (error) {
+    console.error('sendImageMessage failed', error);
+    await run(
+      `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
+      ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), logId]
+    );
+    return { ok: false, failed: true, error: error.message, logId };
   }
 }
 
@@ -331,11 +386,12 @@ async function sendTemplateMessage({
     );
     return { ok: true, metaMessageId, response };
   } catch (error) {
+    console.error('sendTemplateMessage failed', error);
     await run(
       `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
       ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), logId]
     );
-    throw error;
+    return { ok: false, failed: true, error: error.message, logId };
   }
 }
 
@@ -352,6 +408,11 @@ async function sendBulkMessages({ coachingId, recipients, message, settings = nu
         message,
         settings: activeSettings,
       });
+      if (result?.failed) {
+        summary.failed += 1;
+        summary.results.push({ ok: false, recipient, error: result.error });
+        continue;
+      }
       summary.sent += 1;
       summary.results.push({ ok: true, recipient, metaMessageId: result.metaMessageId });
     } catch (error) {
@@ -383,6 +444,7 @@ module.exports = {
   updateWhatsAppLogStatus,
   sendTextMessage,
   sendDocumentMessage,
+  sendImageMessage,
   sendTemplateMessage,
   sendBulkMessages,
 };
