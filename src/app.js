@@ -11,6 +11,20 @@ const { getPool, run, get, all, withTransaction } = require('./db');
 const { initStorage, getStorageMode, uploadPaperFile, getPaperAccess, deleteStoredPaper } = require('./storage');
 const { PostgresSessionStore, ensureSessionTable } = require('./session-store');
 const { OTP_TTL_MINUTES, generateOtpCode, smtpConfigured, resendConfigured, getOtpChannelOptions, sendOtpMessage, sendTestEmail } = require('./otp-service');
+const {
+  ensureWhatsAppSchema,
+  getWhatsAppSettings,
+  saveWhatsAppSettings,
+  getRecentWhatsAppLogs,
+  updateWhatsAppLogStatus,
+  sendTextMessage,
+  sendDocumentMessage,
+  sendBulkMessages,
+} = require('./services/whatsapp');
+const {
+  sendDueFeeReminder,
+  sendOverdueReminder,
+} = require('./services/feeReminder');
 
 console.log('[BOOT] Starting app');
 console.log('[BOOT] DATABASE_URL present:', Boolean(process.env.DATABASE_URL));
@@ -41,6 +55,8 @@ const TWO_FACTOR_AUTH_POST_PATHS = new Set([
   '/auth/2fa/send-otp',
   '/auth/2fa/verify',
 ]);
+const PUBLIC_WEBHOOK_POST_PATHS = new Set(['/webhook/whatsapp']);
+const DEFAULT_FEE_REMINDER_DAYS_BEFORE = 3;
 
 function resolvePort(value) {
   const raw = String(value || '').trim();
@@ -70,7 +86,7 @@ function getCurrentMonthValue() {
 
 const PORT = process.env.PORT || 3000;
 const OWNER_SECTIONS = new Set(['overview', 'coachings', 'trial-requests']);
-const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes', 'settings']);
+const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes', 'whatsapp', 'settings']);
 const ALLOWED_UPLOAD_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/jpg']);
 const DEFAULT_UPLOAD_LIMIT_BYTES = isVercel ? 4 * 1024 * 1024 : 25 * 1024 * 1024;
 const UPLOAD_FILE_SIZE_LIMIT_BYTES = Number(process.env.UPLOAD_FILE_SIZE_LIMIT_BYTES || DEFAULT_UPLOAD_LIMIT_BYTES);
@@ -104,6 +120,7 @@ app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, '..', 'views'));
 
 app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '1mb' }));
 app.use(
   session({
     name: 'coaching.sid',
@@ -334,6 +351,233 @@ function buildRoleAwareLoginUrl(sessionUser) {
   return query ? `/login?${query}` : '/login';
 }
 
+function getRequestBaseUrl(req) {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const protocol = forwardedProto || req.protocol || 'https';
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  return host ? `${protocol}://${host}` : '';
+}
+
+function buildWhatsAppSettingsView(settings) {
+  return {
+    accessTokenSaved: Boolean(settings.accessToken),
+    phoneNumberId: settings.phoneNumberId || '',
+    businessAccountId: settings.businessAccountId || '',
+    verifyTokenSaved: Boolean(settings.verifyToken),
+    hasRequiredSendConfig: Boolean(settings.accessToken && settings.phoneNumberId),
+  };
+}
+
+function buildAbsenceMessage({ student, attendanceDate, coaching }) {
+  return [
+    'Dear Parent,',
+    '',
+    `Your child ${student.name || student.roll_no} was absent today.`,
+    '',
+    `Date: ${attendanceDate}`,
+    '',
+    'Regards,',
+    coaching?.name || 'Coaching Institute',
+  ].join('\n');
+}
+
+async function notifyAttendanceAbsence({ req, coachingId, student, attendanceDate, coaching }) {
+  if (!student?.guardian_phone) return { skipped: true, reason: 'Guardian phone missing' };
+
+  try {
+    return await sendTextMessage({
+      coachingId,
+      studentId: student.id,
+      to: student.guardian_phone,
+      message: buildAbsenceMessage({ student, attendanceDate, coaching }),
+    });
+  } catch (error) {
+    console.error('WhatsApp absence notification failed', {
+      studentId: student.id,
+      rollNo: student.roll_no,
+      error: error.message,
+    });
+    return { ok: false, error: error.message };
+  }
+}
+
+async function notifyPaperResult({ req, coachingId, student, paperId, testLabel, fileName, coaching }) {
+  if (!student?.guardian_phone || !paperId) return { skipped: true, reason: 'Guardian phone or paper missing' };
+
+  try {
+    const paper = await get(`SELECT * FROM test_papers WHERE id = ? AND coaching_id = ? LIMIT 1`, [paperId, coachingId]);
+    if (!paper) return { skipped: true, reason: 'Paper record missing' };
+
+    const access = await getPaperAccess(paper, 'attachment');
+    const downloadUrl = access?.type === 'redirect'
+      ? access.url
+      : `${getRequestBaseUrl(req)}/papers/${paperId}/download`;
+    const caption = [
+      `Dear Parent, ${student.name || student.roll_no}'s result/paper is available.`,
+      '',
+      `Student: ${student.name || student.roll_no}`,
+      `Roll No: ${student.roll_no}`,
+      `Test: ${testLabel || paper.test_label || paper.original_name}`,
+      '',
+      `Regards,`,
+      coaching?.name || 'Coaching Institute',
+    ].join('\n');
+
+    return await sendDocumentMessage({
+      coachingId,
+      studentId: student.id,
+      to: student.guardian_phone,
+      documentUrl: downloadUrl,
+      filename: fileName || paper.original_name || 'result.pdf',
+      caption,
+    });
+  } catch (error) {
+    console.error('WhatsApp paper notification failed', {
+      studentId: student.id,
+      rollNo: student.roll_no,
+      paperId,
+      error: error.message,
+    });
+    return { ok: false, error: error.message };
+  }
+}
+
+async function getFeeReminderContext(coachingId, feeId) {
+  const row = await get(
+    `SELECT
+       f.id AS fee_id, f.amount, f.due_date, f.payment_date, f.status, f.notes,
+       u.id AS student_id, u.roll_no, u.name, u.guardian_phone,
+       cc.name AS coaching_name
+     FROM fees f
+     JOIN users u ON u.id = f.student_id
+     JOIN coaching_classes cc ON cc.id = f.coaching_id
+     WHERE f.id = ? AND f.coaching_id = ?
+     LIMIT 1`,
+    [feeId, coachingId]
+  );
+
+  if (!row) return null;
+  return {
+    fee: {
+      id: row.fee_id,
+      amount: row.amount,
+      due_date: row.due_date,
+      payment_date: row.payment_date,
+      status: row.status,
+      notes: row.notes,
+    },
+    student: {
+      id: row.student_id,
+      roll_no: row.roll_no,
+      name: row.name,
+      guardian_phone: row.guardian_phone,
+    },
+    coaching: { name: row.coaching_name },
+  };
+}
+
+async function sendFeeReminderByFeeId({ coachingId, feeId }) {
+  const context = await getFeeReminderContext(coachingId, feeId);
+  if (!context) return { ok: false, reason: 'Fee record not found' };
+
+  if (String(context.fee.status || '').toLowerCase() === 'overdue') {
+    return sendOverdueReminder({ coachingId, ...context });
+  }
+
+  return sendDueFeeReminder({ coachingId, ...context });
+}
+
+async function sendScheduledFeeReminders({ coachingId = null, daysBefore = DEFAULT_FEE_REMINDER_DAYS_BEFORE } = {}) {
+  const params = [Number(daysBefore)];
+  let sql = `
+    SELECT
+      f.id AS fee_id,
+      f.amount,
+      f.due_date,
+      f.status,
+      u.id AS student_id,
+      u.roll_no,
+      u.name,
+      u.guardian_phone,
+      cc.id AS coaching_id,
+      cc.name AS coaching_name
+    FROM fees f
+    JOIN users u ON u.id = f.student_id
+    JOIN coaching_classes cc ON cc.id = f.coaching_id
+    WHERE f.status <> 'paid'
+      AND u.guardian_phone IS NOT NULL
+      AND TRIM(u.guardian_phone) <> ''
+      AND f.due_date IS NOT NULL
+      AND (
+        CAST(f.due_date AS DATE) < CURRENT_DATE
+        OR CAST(f.due_date AS DATE) BETWEEN CURRENT_DATE AND (CURRENT_DATE + ($1::INTEGER * INTERVAL '1 day'))
+      )
+  `;
+
+  if (coachingId) {
+    params.push(coachingId);
+    sql += ` AND f.coaching_id = $${params.length}`;
+  }
+
+  sql += ` ORDER BY f.due_date ASC LIMIT 200`;
+
+  const rows = await all(sql, params);
+  const summary = { sent: 0, failed: 0, skipped: 0 };
+
+  for (const row of rows) {
+    const existingToday = await get(
+      `SELECT id
+       FROM whatsapp_logs
+       WHERE coaching_id = ?
+         AND student_id = ?
+         AND message_type = 'text'
+         AND message_content LIKE ?
+         AND CAST(created_at AS DATE) = CURRENT_DATE
+       LIMIT 1`,
+      [row.coaching_id, row.student_id, `%Due Date: ${String(row.due_date).slice(0, 10)}%`]
+    );
+    if (existingToday) {
+      summary.skipped += 1;
+      continue;
+    }
+
+    const context = {
+      coachingId: row.coaching_id,
+      student: {
+        id: row.student_id,
+        roll_no: row.roll_no,
+        name: row.name,
+        guardian_phone: row.guardian_phone,
+      },
+      fee: {
+        id: row.fee_id,
+        amount: row.amount,
+        due_date: row.due_date,
+        status: row.status,
+      },
+      coaching: { name: row.coaching_name },
+    };
+
+    try {
+      if (String(row.status || '').toLowerCase() === 'overdue' || new Date(row.due_date) < new Date(new Date().toDateString())) {
+        await sendOverdueReminder(context);
+      } else {
+        await sendDueFeeReminder(context);
+      }
+      summary.sent += 1;
+    } catch (error) {
+      console.error('Scheduled WhatsApp fee reminder failed', {
+        feeId: row.fee_id,
+        studentId: row.student_id,
+        error: error.message,
+      });
+      summary.failed += 1;
+    }
+  }
+
+  return summary;
+}
+
 function getAdminStudentPreviewSession(req) {
   const preview = req.session?.adminStudentPreview;
   const sessionUser = req.session?.user;
@@ -516,6 +760,10 @@ function requireStudent(req, res, next) {
 
 app.use((req, res, next) => {
   if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    return next();
+  }
+
+  if (req.method === 'POST' && getRequestPathCandidates(req).some((requestPath) => PUBLIC_WEBHOOK_POST_PATHS.has(requestPath))) {
     return next();
   }
 
@@ -1781,6 +2029,8 @@ async function deleteCoachingData(coachingId) {
   await withTransaction(async (tx) => {
     await tx.run(`DELETE FROM attendance WHERE coaching_id = ?`, [coachingId]);
     await tx.run(`DELETE FROM fees WHERE coaching_id = ?`, [coachingId]);
+    await tx.run(`DELETE FROM whatsapp_logs WHERE coaching_id = ?`, [coachingId]);
+    await tx.run(`DELETE FROM whatsapp_settings WHERE coaching_id = ?`, [coachingId]);
     await tx.run(`DELETE FROM batch_notes WHERE coaching_id = ?`, [coachingId]);
     await tx.run(`DELETE FROM answer_upload_requests WHERE coaching_id = ?`, [coachingId]);
     await tx.run(`DELETE FROM test_papers WHERE coaching_id = ?`, [coachingId]);
@@ -2705,6 +2955,61 @@ app.post('/auth/2fa/verify', async (req, res) => {
   return handleTwoFactorVerify(req, res);
 });
 
+app.get('/webhook/whatsapp', async (req, res) => {
+  const mode = String(req.query['hub.mode'] || '');
+  const token = String(req.query['hub.verify_token'] || '');
+  const challenge = String(req.query['hub.challenge'] || '');
+  const envVerifyToken = String(process.env.WHATSAPP_VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN || '').trim();
+
+  let isValidToken = Boolean(envVerifyToken && token === envVerifyToken);
+  if (!isValidToken && token) {
+    const setting = await get(
+      `SELECT id FROM whatsapp_settings WHERE verify_token = ? LIMIT 1`,
+      [token]
+    );
+    isValidToken = Boolean(setting);
+  }
+
+  if (mode === 'subscribe' && isValidToken) {
+    return res.status(200).send(challenge);
+  }
+
+  return res.status(403).send('Forbidden');
+});
+
+app.post('/webhook/whatsapp', async (req, res) => {
+  const entries = Array.isArray(req.body?.entry) ? req.body.entry : [];
+  for (const entry of entries) {
+    const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+    for (const change of changes) {
+      const statuses = Array.isArray(change?.value?.statuses) ? change.value.statuses : [];
+      for (const statusEvent of statuses) {
+        await updateWhatsAppLogStatus(statusEvent.id, statusEvent.status);
+      }
+    }
+  }
+
+  return res.sendStatus(200);
+});
+
+app.get('/cron/whatsapp/fee-reminders', async (req, res) => {
+  const cronSecret = String(process.env.CRON_SECRET || '').trim();
+  if (!cronSecret) {
+    return res.status(503).json({ ok: false, error: 'CRON_SECRET is required for scheduled WhatsApp reminders' });
+  }
+
+  const authorization = String(req.headers.authorization || '').trim();
+  if (authorization !== `Bearer ${cronSecret}`) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+
+  const daysBefore = Number.parseInt(String(process.env.WHATSAPP_FEE_REMINDER_DAYS_BEFORE || DEFAULT_FEE_REMINDER_DAYS_BEFORE), 10);
+  const summary = await sendScheduledFeeReminders({
+    daysBefore: Number.isInteger(daysBefore) && daysBefore >= 0 ? daysBefore : DEFAULT_FEE_REMINDER_DAYS_BEFORE,
+  });
+  return res.json({ ok: true, summary });
+});
+
 app.post('/logout', (req, res) => {
   const sessionUser = req.session?.user || null;
   const preview = getAdminStudentPreviewSession(req);
@@ -2967,6 +3272,163 @@ app.post('/admin/settings/profile', requireCoachingAdmin, async (req, res) => {
   req.session.user.coachingName = coachingName;
   req.session.flash = { type: 'success', text: 'Settings updated successfully.' };
   return res.redirect('/admin/dashboard?section=settings');
+});
+
+app.post('/admin/whatsapp/settings', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const existing = await getWhatsAppSettings(coachingId);
+  const accessToken = String(req.body.accessToken || '').trim() || existing.accessToken;
+  const phoneNumberId = String(req.body.phoneNumberId || '').trim();
+  const businessAccountId = String(req.body.businessAccountId || '').trim();
+  const verifyToken = String(req.body.verifyToken || '').trim() || existing.verifyToken;
+
+  if (!accessToken || !phoneNumberId) {
+    req.session.flash = { type: 'error', text: 'WhatsApp Access Token and Phone Number ID are required.' };
+    return res.redirect('/admin/dashboard?section=whatsapp');
+  }
+
+  await saveWhatsAppSettings(coachingId, {
+    accessToken,
+    phoneNumberId,
+    businessAccountId,
+    verifyToken,
+  }, req.session.user.id);
+
+  await auditActor(req, 'whatsapp_settings_updated', {
+    targetType: 'coaching',
+    targetId: coachingId,
+    details: { phoneNumberId, businessAccountId: businessAccountId || null },
+  });
+  req.session.flash = { type: 'success', text: 'WhatsApp settings saved.' };
+  return res.redirect('/admin/dashboard?section=whatsapp');
+});
+
+app.post('/admin/whatsapp/test', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const testPhone = String(req.body.testPhone || '').trim();
+  if (!testPhone) {
+    req.session.flash = { type: 'error', text: 'Enter a phone number to test WhatsApp connection.' };
+    return res.redirect('/admin/dashboard?section=whatsapp');
+  }
+
+  try {
+    await sendTextMessage({
+      coachingId,
+      to: testPhone,
+      message: `WhatsApp connection test from ${req.session.user.coachingName || 'your coaching portal'} was successful.`,
+    });
+    req.session.flash = { type: 'success', text: 'WhatsApp test message sent successfully.' };
+  } catch (error) {
+    req.session.flash = { type: 'error', text: `WhatsApp test failed: ${error.message}` };
+  }
+
+  return res.redirect('/admin/dashboard?section=whatsapp');
+});
+
+app.post('/admin/whatsapp/broadcast', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const targetMode = String(req.body.targetMode || 'all').trim();
+  const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
+  const selectedStudentIds = String(req.body.studentIds || '')
+    .split(',')
+    .map((value) => Number.parseInt(value.trim(), 10))
+    .filter((value) => Number.isInteger(value) && value > 0);
+  const message = String(req.body.message || '').trim();
+
+  if (!message) {
+    req.session.flash = { type: 'error', text: 'Announcement message is required.' };
+    return res.redirect('/admin/dashboard?section=whatsapp');
+  }
+
+  const params = [coachingId];
+  let recipientSql = `
+    SELECT id, roll_no, name, guardian_phone
+    FROM users
+    WHERE coaching_id = ? AND role = 'student'
+      AND guardian_phone IS NOT NULL
+      AND TRIM(guardian_phone) <> ''
+  `;
+
+  if (targetMode === 'batch') {
+    if (!Number.isInteger(batchId) || batchId <= 0) {
+      req.session.flash = { type: 'error', text: 'Select a batch for broadcast.' };
+      return res.redirect('/admin/dashboard?section=whatsapp');
+    }
+    params.push(batchId);
+    recipientSql += ` AND batch_id = ?`;
+  } else if (targetMode === 'selected') {
+    if (!selectedStudentIds.length) {
+      req.session.flash = { type: 'error', text: 'Enter selected student IDs for broadcast.' };
+      return res.redirect('/admin/dashboard?section=whatsapp');
+    }
+    recipientSql += ` AND id = ANY($${params.length + 1}::int[])`;
+    params.push(selectedStudentIds);
+  }
+
+  recipientSql += ` ORDER BY roll_no ASC LIMIT 500`;
+  const recipients = await all(recipientSql, params);
+  if (!recipients.length) {
+    req.session.flash = { type: 'error', text: 'No students with guardian phone numbers matched this broadcast target.' };
+    return res.redirect('/admin/dashboard?section=whatsapp');
+  }
+
+  const summary = await sendBulkMessages({
+    coachingId,
+    recipients: recipients.map((student) => ({
+      studentId: student.id,
+      phoneNumber: student.guardian_phone,
+      rollNo: student.roll_no,
+      name: student.name,
+    })),
+    message,
+  });
+
+  await auditActor(req, 'whatsapp_broadcast_sent', {
+    targetType: 'coaching',
+    targetId: coachingId,
+    details: { targetMode, sent: summary.sent, failed: summary.failed },
+  });
+  req.session.flash = {
+    type: summary.failed ? 'warning' : 'success',
+    text: `Broadcast finished. Sent: ${summary.sent}, Failed: ${summary.failed}.`,
+  };
+  return res.redirect('/admin/dashboard?section=whatsapp');
+});
+
+app.post('/admin/fees/:id/send-reminder', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const feeId = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(feeId) || feeId <= 0) {
+    req.session.flash = { type: 'error', text: 'Invalid fee record selected.' };
+    return res.redirect('/admin/dashboard?section=fees');
+  }
+
+  try {
+    const result = await sendFeeReminderByFeeId({ coachingId, feeId });
+    if (result?.skipped) {
+      req.session.flash = { type: 'warning', text: result.reason || 'Fee reminder skipped.' };
+    } else {
+      req.session.flash = { type: 'success', text: 'Fee reminder sent on WhatsApp.' };
+    }
+  } catch (error) {
+    req.session.flash = { type: 'error', text: `Fee reminder failed: ${error.message}` };
+  }
+
+  return res.redirect('/admin/dashboard?section=fees');
+});
+
+app.post('/admin/whatsapp/fee-reminders/due', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const daysBefore = Number.parseInt(String(req.body.daysBefore || DEFAULT_FEE_REMINDER_DAYS_BEFORE), 10);
+  const summary = await sendScheduledFeeReminders({
+    coachingId,
+    daysBefore: Number.isInteger(daysBefore) && daysBefore >= 0 ? daysBefore : DEFAULT_FEE_REMINDER_DAYS_BEFORE,
+  });
+  req.session.flash = {
+    type: summary.failed ? 'warning' : 'success',
+    text: `Fee reminders processed. Sent: ${summary.sent}, Skipped: ${summary.skipped}, Failed: ${summary.failed}.`,
+  };
+  return res.redirect('/admin/dashboard?section=whatsapp');
 });
 
 app.get('/owner/dashboard', requireOwner, async (req, res) => {
@@ -3431,9 +3893,11 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     [req.session.user.id, coachingId]
   );
   const batches = await getBatchesForCoaching(coachingId);
+  const whatsappSettings = buildWhatsAppSettingsView(await getWhatsAppSettings(coachingId));
+  const whatsappLogs = await getRecentWhatsAppLogs(coachingId, 25);
 
   const students = await all(
-    `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course, u.contact_phone, u.email, u.created_at,
+    `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course, u.contact_phone, u.guardian_phone, u.email, u.created_at,
             u.is_retained_record, u.retention_source_batch_id,
             b.name AS batch_name, b.status AS batch_status, b.completed_at AS batch_completed_at, b.is_retention_batch
      FROM users u
@@ -3504,7 +3968,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   );
 
   const fees = await all(
-    `SELECT f.id, f.amount, f.due_date, f.payment_date, f.status, f.notes, u.roll_no, u.name, u.batch_id, u.standard, u.course, b.name AS batch_name
+    `SELECT f.id, f.amount, f.due_date, f.payment_date, f.status, f.notes, u.id AS student_id, u.roll_no, u.name, u.guardian_phone, u.batch_id, u.standard, u.course, b.name AS batch_name
      FROM fees f
      JOIN users u ON u.id = f.student_id
      LEFT JOIN batches b ON b.id = u.batch_id
@@ -3624,6 +4088,8 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     coaching,
     branding: buildBranding(coaching),
     adminProfile,
+    whatsappSettings,
+    whatsappLogs,
     subscriptionState,
     subscriptionNotice: subscriptionState.notice,
     students,
@@ -3663,6 +4129,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const rollNo = (req.body.rollNo || '').trim();
   const name = (req.body.name || '').trim() || rollNo;
   const contactPhone = (req.body.contactPhone || '').trim();
+  const guardianPhone = (req.body.guardianPhone || '').trim();
   const email = (req.body.email || '').trim().toLowerCase();
   const submittedPassword = (req.body.password || '').trim();
   const password = submittedPassword || rollNo;
@@ -3709,8 +4176,8 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const passwordHash = await bcrypt.hash(password, 10);
   await run(
     `INSERT INTO users (
-      coaching_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, email, password_hash
-    ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      coaching_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, guardian_phone, email, password_hash
+    ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
       rollNo,
@@ -3719,6 +4186,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
       batch.standard || null,
       batch.course || null,
       contactPhone || null,
+      guardianPhone || null,
       email || null,
       passwordHash,
     ]
@@ -4164,6 +4632,7 @@ app.post('/admin/students/:id/delete', requireCoachingAdmin, async (req, res) =>
 
 app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('paper'), async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const file = req.file;
   const rollNo = (req.body.rollNo || '').trim();
   const testLabel = (req.body.testLabel || '').trim();
@@ -4177,7 +4646,7 @@ app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('pape
   }
 
   const student = await get(
-    `SELECT id, roll_no, batch_id, standard, course
+    `SELECT id, roll_no, name, guardian_phone, batch_id, standard, course
      FROM users
      WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
     [coachingId, rollNo]
@@ -4237,12 +4706,24 @@ app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('pape
     targetId: student.id,
     details: { rollNo: student.roll_no, fileName: file.originalname, status: result.status },
   });
+  if (result.status !== 'duplicate') {
+    await notifyPaperResult({
+      req,
+      coachingId,
+      student,
+      paperId: result.paperId,
+      testLabel: testLabel || file.originalname,
+      fileName: file.originalname,
+      coaching,
+    });
+  }
   req.session.flash = { type: 'success', text: textByStatus[result.status] || `Paper uploaded for ${student.roll_no}` };
   return res.redirect('/admin/dashboard?section=papers');
 });
 
 app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 100), async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const files = req.files || [];
 
   if (!files.length) {
@@ -4261,7 +4742,7 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
     }
 
     const student = await get(
-      `SELECT id FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
+      `SELECT id, roll_no, name, guardian_phone FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
       [coachingId, paperMeta.rollNo]
     );
 
@@ -4289,6 +4770,15 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
       } else {
         report.assigned += 1;
         report.details.push({ file: file.originalname, reason: `Assigned to roll number "${paperMeta.rollNo}"` });
+        await notifyPaperResult({
+          req,
+          coachingId,
+          student,
+          paperId: result.paperId,
+          testLabel: paperMeta.testLabel || file.originalname,
+          fileName: file.originalname,
+          coaching,
+        });
       }
     } catch (err) {
       console.error('Upload failed for', file.originalname, err);
@@ -4468,13 +4958,14 @@ app.post('/admin/answer-requests/:id/delete', requireCoachingAdmin, async (req, 
 
 app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const rollNo = (req.body.rollNo || '').trim();
   const attendanceDate = req.body.attendanceDate;
   const status = req.body.status;
   const notes = (req.body.notes || '').trim();
 
   const student = await get(
-    `SELECT id FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
+    `SELECT id, roll_no, name, guardian_phone FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
     [coachingId, rollNo]
   );
   if (!student) {
@@ -4500,6 +4991,10 @@ app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
     );
   }
 
+  if (status === 'absent') {
+    await notifyAttendanceAbsence({ req, coachingId, student, attendanceDate, coaching });
+  }
+
   req.session.flash = { type: 'success', text: 'Attendance saved' };
   await auditActor(req, 'attendance_saved_single', {
     targetType: 'student',
@@ -4511,6 +5006,7 @@ app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
   const attendanceDate = req.body.attendanceDate;
   const notes = (req.body.notes || '').trim();
@@ -4532,7 +5028,7 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
   }
 
   const students = await all(
-    `SELECT id, roll_no
+    `SELECT id, roll_no, name, guardian_phone
      FROM users
      WHERE coaching_id = ? AND role = 'student' AND batch_id = ?
      ORDER BY roll_no ASC`,
@@ -4569,6 +5065,10 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
          VALUES (?, ?, ?, ?, ?, ?)`,
         [coachingId, student.id, attendanceDate, nextStatus, notes, req.session.user.id]
       );
+    }
+
+    if (nextStatus === 'absent') {
+      await notifyAttendanceAbsence({ req, coachingId, student, attendanceDate, coaching });
     }
   }
 
@@ -4976,6 +5476,7 @@ async function prepareApp() {
         return getPool().query('SELECT 1');
       })
       .then(() => ensureSessionTable())
+      .then(() => ensureWhatsAppSchema())
       .then(async () => {
         console.log('[BOOT] Database ready');
         if (process.env.RUN_STARTUP_MAINTENANCE === 'true') {

@@ -52,6 +52,13 @@
         actionHref: '#notes-publish-panel',
         actionLabel: 'Publish Note'
       },
+      whatsapp: {
+        label: 'WhatsApp Center',
+        title: 'Parent communication and automated alerts',
+        copy: 'Configure WhatsApp Cloud API, send broadcasts, and track parent message delivery from one place.',
+        actionHref: '#whatsapp-broadcast-panel',
+        actionLabel: 'Send Announcement'
+      },
       settings: {
         label: 'Settings',
         title: 'Branding, profile, and access control',
@@ -119,7 +126,8 @@
       { label: 'Add Student', href: '/admin/dashboard?section=students#student-create-panel' },
       { label: 'Mark Attendance', href: '/admin/dashboard?section=attendance#attendance-form-panel' },
       { label: 'Collect Fees', href: '/admin/dashboard?section=fees#fees-form-panel' },
-      { label: 'Upload Paper', href: '/admin/dashboard?section=papers#paper-upload-panel' }
+      { label: 'Upload Paper', href: '/admin/dashboard?section=papers#paper-upload-panel' },
+      { label: 'WhatsApp', href: '/admin/dashboard?section=whatsapp#whatsapp-broadcast-panel' }
     ];
 
     const metricCards = [
@@ -151,6 +159,7 @@
         <a class="ops2-nav__item <%= activeSection === 'fees' ? 'is-active' : '' %>" href="/admin/dashboard?section=fees"><span>◈</span><span>Fees</span></a>
         <a class="ops2-nav__item <%= activeSection === 'papers' ? 'is-active' : '' %>" href="/admin/dashboard?section=papers"><span>◆</span><span>Test Papers</span></a>
         <a class="ops2-nav__item <%= activeSection === 'notes' ? 'is-active' : '' %>" href="/admin/dashboard?section=notes"><span>◫</span><span>Notes</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'whatsapp' ? 'is-active' : '' %>" href="/admin/dashboard?section=whatsapp"><span>◍</span><span>WhatsApp</span></a>
         <a class="ops2-nav__item <%= activeSection === 'settings' ? 'is-active' : '' %>" href="/admin/dashboard?section=settings"><span>⎈</span><span>Settings</span></a>
       </nav>
 
@@ -501,7 +510,7 @@
                         <div class="ops2-table-shell ops2-table-shell--compact">
                           <table class="ops2-table ops2-table--students">
                             <thead>
-                              <tr><th>Roll</th><th>Name</th><th>Class</th><th>Actions</th></tr>
+                              <tr><th>Roll</th><th>Name</th><th>Class</th><th>Guardian</th><th>Actions</th></tr>
                             </thead>
                             <tbody>
                               <% group.students.forEach((s) => { %>
@@ -509,6 +518,7 @@
                                   <td><%= s.roll_no %></td>
                                   <td><%= s.name %></td>
                                   <td><%= group.label %></td>
+                                  <td><%= s.guardian_phone || '-' %></td>
                                   <td class="ops2-actions-inline">
                                     <a href="/admin/students/<%= s.id %>/overview" class="ops2-inline-link">View Dashboard</a>
                                     <form class="inline-delete-form" method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
@@ -594,6 +604,7 @@
                     <div class="ops2-field"><label>Roll Number</label><input type="text" name="rollNo" required /></div>
                     <div class="ops2-field"><label>Name</label><input type="text" name="name" /></div>
                     <div class="ops2-field"><label>Contact Number</label><input type="text" name="contactPhone" placeholder="9876543210" /></div>
+                    <div class="ops2-field"><label>Guardian WhatsApp</label><input type="text" name="guardianPhone" placeholder="919876543210" /></div>
                     <div class="ops2-field"><label>Email ID</label><input type="email" name="email" placeholder="student@example.com" /></div>
                     <div class="ops2-field full"><label>Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
                     <div class="ops2-field full"><label>Password (optional)</label><input type="text" name="password" placeholder="Default = roll number" /></div>
@@ -746,11 +757,21 @@
               <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Ledger</p><h3>Fee records</h3></div></div>
               <div class="ops2-table-shell">
                 <table class="ops2-table ops2-table--wide">
-                  <thead><tr><th>Roll</th><th>Name</th><th>Batch</th><th>Amount</th><th>Due</th><th>Payment</th><th>Status</th><th>Notes</th></tr></thead>
+                  <thead><tr><th>Roll</th><th>Name</th><th>Batch</th><th>Amount</th><th>Due</th><th>Payment</th><th>Status</th><th>Notes</th><th>Reminder</th></tr></thead>
                   <tbody>
                     <% fees.forEach((f) => { %>
                       <tr>
                         <td><%= f.roll_no %></td><td><%= f.name %></td><td><%= f.batch_name || '-' %></td><td><%= f.amount %></td><td><%= f.due_date || '-' %></td><td><%= f.payment_date || '-' %></td><td><span class="status <%= f.status %>"><%= f.status %></span></td><td><%= f.notes || '-' %></td>
+                        <td>
+                          <% if (f.status !== 'paid') { %>
+                            <form method="post" action="/admin/fees/<%= f.id %>/send-reminder">
+                              <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                              <button type="submit" class="ops2-inline-link-btn" <%= f.guardian_phone ? '' : 'disabled' %>>Send Reminder</button>
+                            </form>
+                          <% } else { %>
+                            <span class="muted">-</span>
+                          <% } %>
+                        </td>
                       </tr>
                     <% }) %>
                   </tbody>
@@ -839,6 +860,112 @@
                   </table>
                 </div>
               </section>
+            </section>
+          <% } %>
+
+          <% if (activeSection === 'whatsapp') { %>
+            <section class="ops2-metrics-grid ops2-metrics-grid--compact">
+              <article class="ops2-metric-card ops2-metric-card--<%= whatsappSettings.hasRequiredSendConfig ? 'success' : 'warning' %>">
+                <div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">WA</span><span class="ops2-metric-card__trend">Cloud API</span></div>
+                <strong><%= whatsappSettings.hasRequiredSendConfig ? 'Ready' : 'Setup' %></strong>
+                <span class="ops2-metric-card__label">WhatsApp Status</span>
+                <small><%= whatsappSettings.phoneNumberId ? `Phone ID ${whatsappSettings.phoneNumberId}` : 'Phone Number ID missing' %></small>
+              </article>
+              <article class="ops2-metric-card ops2-metric-card--neutral">
+                <div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">☏</span><span class="ops2-metric-card__trend">Guardians</span></div>
+                <strong><%= students.filter((student) => student.guardian_phone).length %></strong>
+                <span class="ops2-metric-card__label">Reachable Parents</span>
+                <small>Out of <%= students.length %> students</small>
+              </article>
+            </section>
+
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="whatsapp-settings-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Meta Cloud API</p><h3>WhatsApp settings</h3></div></div>
+                <form method="post" action="/admin/whatsapp/settings" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full">
+                    <label>Access Token</label>
+                    <input type="password" name="accessToken" placeholder="<%= whatsappSettings.accessTokenSaved ? 'Saved - leave blank to keep current token' : 'Paste permanent access token' %>" <%= whatsappSettings.accessTokenSaved ? '' : 'required' %> />
+                  </div>
+                  <div class="ops2-field"><label>Phone Number ID</label><input type="text" name="phoneNumberId" value="<%= whatsappSettings.phoneNumberId %>" required /></div>
+                  <div class="ops2-field"><label>Business Account ID</label><input type="text" name="businessAccountId" value="<%= whatsappSettings.businessAccountId %>" /></div>
+                  <div class="ops2-field full">
+                    <label>Verify Token</label>
+                    <input type="password" name="verifyToken" placeholder="<%= whatsappSettings.verifyTokenSaved ? 'Saved - leave blank to keep current token' : 'Webhook verify token' %>" />
+                  </div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Save WhatsApp Settings</button></div>
+                </form>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Connection</p><h3>Test & automate</h3></div></div>
+                <form method="post" action="/admin/whatsapp/test" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full"><label>Test Phone Number</label><input type="text" name="testPhone" placeholder="919876543210" required /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Test Connection</button></div>
+                </form>
+                <div class="ops2-divider"></div>
+                <form method="post" action="/admin/whatsapp/fee-reminders/due" class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full"><label>Send reminders due in next days</label><input type="number" name="daysBefore" min="0" value="3" /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Run Fee Reminders</button></div>
+                </form>
+              </section>
+            </section>
+
+            <section class="ops2-panel" id="whatsapp-broadcast-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Broadcast</p><h3>Send announcement</h3></div></div>
+              <form method="post" action="/admin/whatsapp/broadcast" class="ops2-form-grid">
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                <div class="ops2-field"><label>Target</label><select name="targetMode" required><option value="all">All Students</option><option value="batch">Selected Batch</option><option value="selected">Selected Students</option></select></div>
+                <div class="ops2-field"><label>Batch</label><select name="batchId"><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                <div class="ops2-field full"><label>Announcement</label><textarea name="message" rows="4" maxlength="1000" placeholder="Write announcement for parents..." required></textarea></div>
+                <div class="ops2-field full">
+                  <label>Selected Students</label>
+                  <div class="ops2-table-shell ops2-table-shell--compact" style="max-height:220px;overflow:auto;">
+                    <table class="ops2-table ops2-table--students">
+                      <thead><tr><th>Select</th><th>Roll</th><th>Name</th><th>Guardian</th></tr></thead>
+                      <tbody>
+                        <% students.filter((student) => student.guardian_phone).forEach((student) => { %>
+                          <tr>
+                            <td><input type="checkbox" name="studentIds" value="<%= student.id %>" /></td>
+                            <td><%= student.roll_no %></td>
+                            <td><%= student.name %></td>
+                            <td><%= student.guardian_phone %></td>
+                          </tr>
+                        <% }) %>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p class="tiny-note">Checkboxes are used only when Target is “Selected Students”.</p>
+                </div>
+                <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Send Announcement</button></div>
+              </form>
+            </section>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Audit</p><h3>Recent WhatsApp logs</h3></div></div>
+              <div class="ops2-table-shell">
+                <table class="ops2-table ops2-table--wide">
+                  <thead><tr><th>Time</th><th>Student</th><th>Phone</th><th>Type</th><th>Status</th><th>Meta ID</th></tr></thead>
+                  <tbody>
+                    <% whatsappLogs.forEach((log) => { %>
+                      <tr>
+                        <td><%= log.created_at %></td>
+                        <td><%= log.name || log.roll_no || '-' %></td>
+                        <td><%= log.phone_number %></td>
+                        <td><%= log.message_type %></td>
+                        <td><span class="status <%= log.status %>"><%= log.status %></span></td>
+                        <td><%= log.meta_message_id || '-' %></td>
+                      </tr>
+                    <% }) %>
+                    <% if (!whatsappLogs.length) { %>
+                      <tr><td colspan="6" class="muted">No WhatsApp messages sent yet.</td></tr>
+                    <% } %>
+                  </tbody>
+                </table>
+              </div>
             </section>
           <% } %>
 

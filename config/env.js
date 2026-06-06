@@ -34,6 +34,7 @@ function ensureEnv() {
   applyAlias('S3_BUCKET_NAME', ['AWS_BUCKET']);
   applyAlias('S3_ENDPOINT', ['AWS_ENDPOINT']);
   applyAlias('S3_PUBLIC_BASE_URL', ['AWS_PUBLIC_BASE_URL']);
+  applyAlias('WHATSAPP_VERIFY_TOKEN', ['META_WEBHOOK_VERIFY_TOKEN']);
 
   envPrepared = true;
 }

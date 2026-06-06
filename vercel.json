@@ -18,5 +18,11 @@
       "source": "/(.*)",
       "destination": "/api/index.js"
     }
+  ],
+  "crons": [
+    {
+      "path": "/cron/whatsapp/fee-reminders",
+      "schedule": "0 4 * * *"
+    }
   ]
 }
