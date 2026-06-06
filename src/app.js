@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { Readable } = require('stream');
 const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
@@ -8,7 +9,7 @@ const multer = require('multer');
 require('../config/env');
 
 const { getPool, run, get, all, withTransaction } = require('./db');
-const { initStorage, getStorageMode, getLocalPaperDir, uploadPaperFile, getPaperAccess, deleteStoredPaper } = require('./storage');
+const { initStorage, getStorageMode, getLocalPaperDir, uploadPaperFile, getPaperAccess, deleteStoredPaper, getStoredFileReadStream } = require('./storage');
 const { PostgresSessionStore, ensureSessionTable } = require('./session-store');
 const { OTP_TTL_MINUTES, generateOtpCode, smtpConfigured, resendConfigured, getOtpChannelOptions, sendOtpMessage, sendTestEmail } = require('./otp-service');
 const {
@@ -42,6 +43,8 @@ const {
   handleParentAssistantMessage,
   sendMonthlyParentReports,
   sendPerformanceGraph,
+  validatePublicUrl,
+  verifyReceiptAccessToken,
 } = require('./services/parentAssistant');
 const { buildProgressSummaryFromPapers } = require('./services/progress');
 
@@ -180,6 +183,69 @@ app.use((req, res, next) => {
 app.use('/public', express.static(path.join(__dirname, '..', 'public')));
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 app.use('/paper-files', express.static(getLocalPaperDir()));
+
+app.get('/receipts/:feeId/:token/:fileName', async (req, res) => {
+  try {
+    const feeId = Number.parseInt(String(req.params.feeId || ''), 10);
+    if (!Number.isInteger(feeId) || feeId <= 0) {
+      return res.sendStatus(404);
+    }
+
+    const fee = await get(
+      `SELECT id, receipt_number, receipt_storage_key, receipt_storage_type
+       FROM fees
+       WHERE id = ?
+       LIMIT 1`,
+      [feeId]
+    );
+
+    if (!fee?.receipt_storage_key || !fee?.receipt_number) {
+      return res.sendStatus(404);
+    }
+
+    const tokenValid = verifyReceiptAccessToken({
+      feeId: fee.id,
+      receiptNumber: fee.receipt_number,
+      storageKey: fee.receipt_storage_key,
+      token: req.params.token,
+    });
+    if (!tokenValid) {
+      return res.sendStatus(403);
+    }
+
+    const storedFile = await getStoredFileReadStream({
+      storageType: fee.receipt_storage_type || 'local',
+      storageKey: fee.receipt_storage_key,
+    });
+    const fileName = `${fee.receipt_number}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName.replace(/"/g, '')}"`);
+    res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+    if (storedFile.contentLength) {
+      res.setHeader('Content-Length', String(storedFile.contentLength));
+    }
+
+    if (req.method === 'HEAD') {
+      return res.end();
+    }
+
+    const stream = typeof storedFile.stream?.pipe === 'function'
+      ? storedFile.stream
+      : Readable.fromWeb(storedFile.stream);
+    stream.on('error', (error) => {
+      console.error('Receipt public stream failed', { feeId: fee.id, error: error.message });
+      if (!res.headersSent) res.sendStatus(500);
+      else res.destroy(error);
+    });
+    return stream.pipe(res);
+  } catch (error) {
+    console.error('Receipt public route failed', {
+      feeId: req.params.feeId,
+      error: error.message,
+    });
+    return res.sendStatus(404);
+  }
+});
 
 function renderWithMessage(res, view, data = {}) {
   const flash = data.flash || null;
@@ -394,6 +460,108 @@ function buildWhatsAppSettingsView(settings) {
   };
 }
 
+function buildParentPortalMenuMessage() {
+  return [
+    '🏫 SHIV CHHATRAPATI CLASSES',
+    '',
+    'Welcome to Parent Portal',
+    '',
+    'Choose an option:',
+    '',
+    '1️⃣ FEES',
+    '2️⃣ ATTENDANCE',
+    '3️⃣ RESULTS',
+    '4️⃣ PERFORMANCE',
+    '5️⃣ STUDENT INFO',
+    '',
+    'Reply with the option name.',
+  ].join('\n');
+}
+
+function buildFallbackParentPortalMenuMessage() {
+  return [
+    '🏫 SHIV CHHATRAPATI CLASSES',
+    '',
+    '1️⃣ FEES',
+    '2️⃣ ATTENDANCE',
+    '3️⃣ RESULTS',
+    '4️⃣ PERFORMANCE',
+    '5️⃣ STUDENT INFO',
+  ].join('\n');
+}
+
+function compactWhatsAppMessage(lines) {
+  const output = [];
+  for (const line of lines) {
+    const value = String(line ?? '').trim();
+    if (!value && output[output.length - 1] === '') continue;
+    output.push(value);
+  }
+  while (output[output.length - 1] === '') output.pop();
+  return output.join('\n');
+}
+
+function formatWhatsAppAmount(value) {
+  const amount = Number(value || 0);
+  if (!Number.isFinite(amount)) return '0';
+  return amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+}
+
+function formatWhatsAppPercent(value) {
+  const percent = Number(value || 0);
+  if (!Number.isFinite(percent)) return '0';
+  return percent.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+}
+
+async function sendImmediateParentPortalMenu({ phoneNumberId, to }) {
+  const settings = {
+    accessToken: String(process.env.WHATSAPP_ACCESS_TOKEN || '').trim(),
+    phoneNumberId,
+  };
+
+  try {
+    const result = await sendTextMessage({
+      coachingId: null,
+      to,
+      message: buildParentPortalMenuMessage(),
+      settings,
+    });
+    if (result?.failed) {
+      throw new Error(result.error || 'Menu send failed');
+    }
+    console.log('Menu sent');
+  } catch (error) {
+    console.error('WhatsApp menu send failed', error);
+    try {
+      const coaching = await getCoachingByWhatsAppPhoneNumberId(phoneNumberId);
+      if (coaching?.coaching_id) {
+        const dbResult = await sendTextMessage({
+          coachingId: coaching.coaching_id,
+          to,
+          message: buildParentPortalMenuMessage(),
+        });
+        if (!dbResult?.failed) {
+          console.log('Menu sent');
+          return;
+        }
+      }
+
+      const fallbackResult = await sendTextMessage({
+        coachingId: null,
+        to,
+        message: buildFallbackParentPortalMenuMessage(),
+        settings,
+      });
+      if (fallbackResult?.failed) {
+        throw new Error(fallbackResult.error || 'Fallback menu send failed');
+      }
+      console.log('Menu sent');
+    } catch (fallbackError) {
+      console.error('WhatsApp fallback menu send failed', fallbackError);
+    }
+  }
+}
+
 function buildAbsenceMessage({ student, attendanceDate, coaching }) {
   return [
     'Dear Parent,',
@@ -415,18 +583,15 @@ async function notifyAttendanceAbsence({ req, coachingId, student, attendanceDat
       '❌ Attendance Alert',
       '',
       `Student: ${student.name || student.roll_no}`,
-      '',
       `Date: ${attendanceDate}`,
       '',
-      'Status: Absent',
-      '',
-      'Reply MENU for options.',
-    ].join('\n');
+      'Your child was absent today.',
+    ];
     return await sendWhatsAppNotification({
       studentId: student.id,
       phone: student.parent_whatsapp_number || student.guardian_phone,
       type: 'attendance_absent',
-      message,
+      message: compactWhatsAppMessage(message),
       eventKey: `attendance_absent:${student.id}:${attendanceDate}`,
     });
   } catch (error) {
@@ -472,7 +637,7 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
     const parentPhone = student.parent_whatsapp_number || student.guardian_phone;
     const subject = document.paper?.test_label || document.paper?.original_name || 'Result';
     const resultPercentage = isResult && Number(document.paper?.max_marks) > 0
-      ? ((Number(document.paper?.marks_obtained || 0) / Number(document.paper.max_marks)) * 100).toFixed(2)
+      ? formatWhatsAppPercent((Number(document.paper?.marks_obtained || 0) / Number(document.paper.max_marks)) * 100)
       : null;
     const caption = isResult
       ? [
@@ -481,21 +646,19 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
         '📚 New Result Available',
         '',
         `Student: ${student.name || student.roll_no}`,
-        '',
         `Test: ${subject}`,
-        '',
         `Marks: ${document.paper?.marks_obtained ?? '-'}/${document.paper?.max_marks ?? '-'}`,
-        '',
         `Percentage: ${resultPercentage || '-'}%`,
         '',
-        'Result PDF attached below.',
-      ].join('\n')
+        'View full result in Parent Portal.',
+      ]
       : [
         `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
         '📚 New Test Paper Assigned',
         `Student: ${student.name || student.roll_no}`,
         'Paper PDF attached.',
-      ].join('\n');
+      ];
+    const compactCaption = compactWhatsAppMessage(caption);
 
     const recipients = [
       { key: 'student', phone: studentPhone },
@@ -509,7 +672,7 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
         studentId: student.id,
         phone: recipient.phone,
         type: `${type}_text`,
-        message: caption,
+        message: compactCaption,
         eventKey: `${type}_text:${recipient.key}:${student.id}:${paperId}`,
       });
 
@@ -3075,61 +3238,57 @@ app.post('/webhook/whatsapp', async (req, res) => {
         const incomingMessages = Array.isArray(change?.value?.messages) ? change.value.messages : [];
         const phoneNumberId = String(change?.value?.metadata?.phone_number_id || '').trim();
         if (incomingMessages.length && phoneNumberId) {
-          const coaching = await getCoachingByWhatsAppPhoneNumberId(phoneNumberId);
-          if (coaching) {
-            for (const incomingMessage of incomingMessages) {
-              const messageText = (incomingMessage?.text?.body || '').trim().toLowerCase();
-              console.log('Incoming:', messageText);
-              if (!messageText) continue;
-              if (['hi', 'hello', 'menu', 'start', 'help'].includes(messageText)) {
-                console.log('Matched Menu Command');
-              }
+          let coaching = null;
+          for (const incomingMessage of incomingMessages) {
+            const incomingText = incomingMessage?.text?.body || '';
+            const msg = incomingText.trim().toLowerCase();
+            console.log('Incoming message:', msg);
+            if (!msg) continue;
 
+            if (
+              msg === 'hi'
+              || msg === 'hello'
+              || msg === 'menu'
+              || msg === 'start'
+              || msg === 'help'
+            ) {
+              console.log('Menu command detected');
               try {
-                const student = await findStudentByParentPhone(coaching.coaching_id, incomingMessage.from);
-                if (!student) {
-                  console.error('WhatsApp parent assistant student not found', {
-                    phoneNumberId,
-                    from: incomingMessage.from,
-                  });
-                  if (['hi', 'hello', 'menu', 'start', 'help'].includes(messageText)) {
-                    await sendTextMessage({
-                      coachingId: coaching.coaching_id,
-                      to: incomingMessage.from,
-                      message: [
-                        `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
-                        '',
-                        'Welcome to Parent Portal',
-                        '',
-                        'Choose an option:',
-                        '',
-                        '1️⃣ FEES',
-                        '2️⃣ ATTENDANCE',
-                        '3️⃣ RESULTS',
-                        '4️⃣ PERFORMANCE',
-                        '5️⃣ STUDENT INFO',
-                        '',
-                        'Reply with the option name.',
-                        '',
-                        'Please ask the office to link your WhatsApp number if an option does not return student data.',
-                      ].join('\n'),
-                    });
-                  }
-                  continue;
-                }
-                await handleParentAssistantMessage({
-                  coaching,
-                  student,
-                  from: incomingMessage.from,
-                  text: messageText,
+                await sendImmediateParentPortalMenu({
+                  phoneNumberId,
+                  to: incomingMessage.from,
                 });
               } catch (error) {
-                console.error('WhatsApp parent assistant failed', {
+                console.error('WhatsApp menu command failed', error);
+              }
+              continue;
+            }
+
+            try {
+              if (!coaching) {
+                coaching = await getCoachingByWhatsAppPhoneNumberId(phoneNumberId);
+              }
+              if (!coaching) continue;
+              const student = await findStudentByParentPhone(coaching.coaching_id, incomingMessage.from);
+              if (!student) {
+                console.error('WhatsApp parent assistant student not found', {
                   phoneNumberId,
                   from: incomingMessage.from,
-                  error: error.message,
                 });
+                continue;
               }
+              await handleParentAssistantMessage({
+                coaching,
+                student,
+                from: incomingMessage.from,
+                text: msg,
+              });
+            } catch (error) {
+              console.error('WhatsApp parent assistant failed', {
+                phoneNumberId,
+                from: incomingMessage.from,
+                error: error.message,
+              });
             }
           }
         }
@@ -5498,17 +5657,12 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
       const feeSummary = await applyStudentPayment({ coachingId, studentId: student.id, amount });
       const feePaidMessage = [
         `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
-        '',
         '✅ Payment Received',
-        '',
         `Student: ${student.name || student.roll_no}`,
-        '',
-        `Amount Paid: ₹${amount.toFixed(2)}`,
-        '',
-        `Remaining Fees: ₹${feeSummary.pendingFee.toFixed(2)}`,
-        '',
-        'Receipt attached below.',
-      ].join('\n');
+        `Amount Paid: ₹${formatWhatsAppAmount(amount)}`,
+        'Receipt attached.',
+      ];
+      const compactFeePaidMessage = compactWhatsAppMessage(feePaidMessage);
       const feeRecipients = [
         { key: 'student', phone: student.whatsapp_number || student.contact_phone },
         { key: 'parent', phone: student.parent_whatsapp_number || student.guardian_phone },
@@ -5518,17 +5672,43 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
       ));
 
       for (const recipient of feeRecipients) {
-        await sendWhatsAppNotification({
+        const paymentMessageResult = await sendWhatsAppNotification({
           studentId: student.id,
           phone: recipient.phone,
           type: 'fee_payment_confirmation',
-          message: feePaidMessage,
+          message: compactFeePaidMessage,
           eventKey: `fee_payment_confirmation:${recipient.key}:${student.id}:${fee.id}`,
         });
+        console.log('WhatsApp API response', paymentMessageResult);
 
         try {
-          const receipt = await generateFeeReceiptPdf(fee.id);
-          await sendDocumentNotification(
+          let receipt = await generateFeeReceiptPdf(fee.id, { publicBaseUrl: getRequestBaseUrl(req) });
+          console.log('Generated receipt URL', receipt.fileUrl);
+          console.log('Receipt storage type', receipt.storageType);
+          let validation = await validatePublicUrl(receipt.fileUrl);
+          console.log('RECEIPT VALIDATION', validation);
+          if (!validation.ok) {
+            console.error('Receipt URL validation failed, regenerating receipt', {
+              feeId: fee.id,
+              receiptUrl: receipt.fileUrl,
+              storageType: receipt.storageType,
+              validation,
+            });
+            receipt = await generateFeeReceiptPdf(fee.id, {
+              forceRegenerate: true,
+              publicBaseUrl: getRequestBaseUrl(req),
+            });
+            console.log('Generated receipt URL', receipt.fileUrl);
+            console.log('Receipt storage type', receipt.storageType);
+            validation = await validatePublicUrl(receipt.fileUrl);
+            console.log('RECEIPT VALIDATION', validation);
+          }
+
+          if (!validation.ok) {
+            throw new Error(`Receipt URL is not publicly accessible with HTTP 200. Status: ${validation.status || 'unknown'}${validation.error ? ` Error: ${validation.error}` : ''}`);
+          }
+
+          const receiptResult = await sendDocumentNotification(
             student.id,
             recipient.phone,
             receipt.fileUrl,
@@ -5537,10 +5717,22 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
             {
               type: 'fee_receipt',
               eventKey: `fee_receipt:${recipient.key}:${student.id}:${fee.id}`,
+              retryFailed: true,
             }
           );
+          console.log('WhatsApp API response', receiptResult);
+          if (receiptResult?.failed) {
+            throw new Error(receiptResult.error || 'WhatsApp receipt attachment failed');
+          }
         } catch (error) {
-          console.error('WhatsApp fee receipt PDF failed', { feeId: fee.id, studentId: student.id, error: error.message });
+          console.error('WhatsApp fee receipt PDF failed', {
+            feeId: fee.id,
+            studentId: student.id,
+            recipient: recipient.key,
+            phone: recipient.phone,
+            error: error.message,
+            stack: error.stack,
+          });
         }
       }
     } else if (status === 'overdue') {

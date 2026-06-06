@@ -222,6 +222,74 @@ async function getSignedPaperUrl(paper, dispositionType) {
   });
 }
 
+async function getStoredFilePublicUrl({
+  storageType,
+  storageKey,
+  fileName = 'file',
+  contentType,
+  dispositionType = 'attachment',
+}) {
+  if (!storageKey) return null;
+
+  if (storageType === 's3') {
+    if (s3PublicBaseUrl) {
+      return `${s3PublicBaseUrl.replace(/\/$/, '')}/${storageKey}`;
+    }
+
+    return getSignedUrl(
+      getS3Client(),
+      new GetObjectCommand({
+        Bucket: s3Config.bucket,
+        Key: storageKey,
+        ResponseContentDisposition: `${dispositionType}; filename="${quoteFileName(fileName)}"`,
+        ResponseContentType: contentType || undefined,
+      }),
+      { expiresIn: s3Config.signedUrlTtlSeconds }
+    );
+  }
+
+  return getAppPublicBaseUrl()
+    ? `${getAppPublicBaseUrl()}/paper-files/${encodeURIComponent(storageKey)}`
+    : null;
+}
+
+async function getStoredFileReadStream({
+  storageType,
+  storageKey,
+}) {
+  if (!storageKey) {
+    throw new Error('Stored file key is required');
+  }
+
+  if (storageType === 's3') {
+    const response = await getS3Client().send(
+      new GetObjectCommand({
+        Bucket: s3Config.bucket,
+        Key: storageKey,
+      })
+    );
+    return {
+      stream: response.Body,
+      contentType: response.ContentType || 'application/octet-stream',
+      contentLength: response.ContentLength || null,
+    };
+  }
+
+  const safeFileName = path.basename(storageKey);
+  const filePath = path.join(LOCAL_PAPER_DIR, safeFileName);
+  const relativePath = path.relative(LOCAL_PAPER_DIR, filePath);
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath) || !fs.existsSync(filePath)) {
+    throw new Error('Stored file not found');
+  }
+
+  const stat = await fs.promises.stat(filePath);
+  return {
+    stream: fs.createReadStream(filePath),
+    contentType: 'application/octet-stream',
+    contentLength: stat.size,
+  };
+}
+
 async function getPaperAccess(paper, dispositionType) {
   const storageType = resolveStorageType(paper);
 
@@ -270,6 +338,8 @@ module.exports = {
   getLocalPaperDir,
   uploadPaperFile,
   uploadGeneratedFile,
+  getStoredFilePublicUrl,
+  getStoredFileReadStream,
   getPaperAccess,
   deleteStoredPaper,
 };

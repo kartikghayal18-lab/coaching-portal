@@ -269,6 +269,12 @@ async function sendDocumentMessage({
 
   try {
     const activeSettings = settings || await getWhatsAppSettings(coachingId);
+    console.log('WHATSAPP DOCUMENT SEND', {
+      phone: phoneNumber,
+      filename,
+      documentUrl,
+      caption,
+    });
     const response = await sendMetaMessage({
       settings: activeSettings,
       payload: {
@@ -281,6 +287,7 @@ async function sendDocumentMessage({
         },
       },
     });
+    console.log('WHATSAPP DOCUMENT RESPONSE', response);
     const metaMessageId = response?.messages?.[0]?.id || null;
     await run(
       `UPDATE whatsapp_logs SET status = ?, meta_message_id = ? WHERE id = ?`,
@@ -288,6 +295,14 @@ async function sendDocumentMessage({
     );
     return { ok: true, metaMessageId, response };
   } catch (error) {
+    console.error('WHATSAPP DOCUMENT ERROR', {
+      phone: phoneNumber,
+      filename,
+      documentUrl,
+      status: error.status || null,
+      response: error.response || null,
+      message: error.message,
+    });
     console.error('sendDocumentMessage failed', error);
     await run(
       `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,

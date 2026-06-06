@@ -1,6 +1,7 @@
+const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
 const { get, all, run } = require('../db');
-const { getPaperAccess, uploadGeneratedFile } = require('../storage');
+const { getPaperAccess, getStoredFilePublicUrl, uploadGeneratedFile } = require('../storage');
 const { sendDocumentNotification, sendWhatsAppNotification } = require('./notificationService');
 const { getNextDueDate, getStudentFeeSummary } = require('./feeStructure');
 const { buildProgressSummaryFromPapers } = require('./progress');
@@ -17,7 +18,26 @@ function formatDate(value) {
 }
 
 function formatAmount(value) {
-  return Number(value || 0).toFixed(2);
+  const amount = Number(value || 0);
+  if (!Number.isFinite(amount)) return '0';
+  return amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+}
+
+function formatPercent(value) {
+  const percent = Number(value || 0);
+  if (!Number.isFinite(percent)) return '0';
+  return percent.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+}
+
+function compactWhatsAppMessage(lines) {
+  const output = [];
+  for (const line of lines) {
+    const value = String(line ?? '').trim();
+    if (!value && output[output.length - 1] === '') continue;
+    output.push(value);
+  }
+  while (output[output.length - 1] === '') output.pop();
+  return output.join('\n');
 }
 
 function resolveAdminPhone(result) {
@@ -36,6 +56,70 @@ function getAppPublicBaseUrl() {
     || process.env.VERCEL_URL
     || ''
   ).trim().replace(/\/$/, '').replace(/^([^h])/, 'https://$1');
+}
+
+function normalizePublicBaseUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+
+  try {
+    const url = new URL(withProtocol);
+    const hostname = url.hostname.toLowerCase();
+    const isPrivateHost = hostname === 'localhost'
+      || hostname === '127.0.0.1'
+      || hostname === '0.0.0.0'
+      || hostname === '::1'
+      || hostname.endsWith('.internal');
+    if (isPrivateHost) return '';
+    url.pathname = url.pathname.replace(/\/$/, '');
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/$/, '');
+  } catch (error) {
+    return '';
+  }
+}
+
+function getReceiptPublicBaseUrl(explicitBaseUrl = '') {
+  return [
+    explicitBaseUrl,
+    process.env.APP_BASE_URL,
+    process.env.PUBLIC_BASE_URL,
+    process.env.RENDER_EXTERNAL_URL,
+    process.env.VERCEL_URL,
+  ].map(normalizePublicBaseUrl).find(Boolean) || '';
+}
+
+function getReceiptUrlSecret() {
+  return String(process.env.RECEIPT_URL_SECRET || process.env.SESSION_SECRET || 'local-development-receipt-secret');
+}
+
+function createReceiptAccessToken({ feeId, receiptNumber, storageKey }) {
+  return crypto
+    .createHmac('sha256', getReceiptUrlSecret())
+    .update(`${feeId}:${receiptNumber || ''}:${storageKey || ''}`)
+    .digest('hex');
+}
+
+function verifyReceiptAccessToken({ feeId, receiptNumber, storageKey, token }) {
+  const expected = createReceiptAccessToken({ feeId, receiptNumber, storageKey });
+  const actual = String(token || '');
+  if (!actual || actual.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+}
+
+function buildReceiptAccessUrl({
+  publicBaseUrl = '',
+  feeId,
+  receiptNumber,
+  storageKey,
+  fileName,
+}) {
+  const baseUrl = getReceiptPublicBaseUrl(publicBaseUrl);
+  if (!baseUrl || !feeId || !storageKey) return null;
+  const token = createReceiptAccessToken({ feeId, receiptNumber, storageKey });
+  return `${baseUrl}/receipts/${encodeURIComponent(feeId)}/${token}/${encodeURIComponent(fileName || `${receiptNumber || 'receipt'}.pdf`)}`;
 }
 
 function buildReceiptNumber(feeId, paymentDate = new Date()) {
@@ -146,6 +230,25 @@ function createPerformanceSvgBuffer(student, progressSeries) {
   ${emptyState}
 </svg>`;
   return Buffer.from(svg);
+}
+
+async function validatePublicUrl(url) {
+  if (!url) return { ok: false, status: 0, error: 'URL missing' };
+
+  try {
+    let response = await fetch(url, { method: 'HEAD' });
+    if (!response.ok || response.status === 403 || response.status === 405) {
+      response = await fetch(url, { method: 'GET' });
+    }
+
+    return {
+      ok: response.status === 200,
+      status: response.status,
+      contentType: response.headers.get('content-type') || null,
+    };
+  } catch (error) {
+    return { ok: false, status: 0, error: error.message };
+  }
 }
 
 async function getPaperDocument(paper) {
@@ -313,29 +416,25 @@ async function sendLatestResult(student, phone) {
   );
   if (!paper) return false;
   const percentage = Number(paper.max_marks) > 0
-    ? ((Number(paper.marks_obtained || 0) / Number(paper.max_marks)) * 100).toFixed(2)
+    ? formatPercent((Number(paper.marks_obtained || 0) / Number(paper.max_marks)) * 100)
     : '-';
   const resultMessage = [
-    '📚 Latest Result',
+    '🏫 SHIV CHHATRAPATI CLASSES',
+    '',
+    '📚 New Result Available',
     '',
     `Student: ${student.name || '-'}`,
+    `Test: ${paper.test_label || paper.original_name || '-'}`,
+    `Marks: ${paper.marks_obtained ?? '-'}/${paper.max_marks ?? '-'}`,
+    `Percentage: ${percentage}%`,
     '',
-    'Test:',
-    paper.test_label || paper.original_name || '-',
-    '',
-    'Marks:',
-    `${paper.marks_obtained ?? '-'}/${paper.max_marks ?? '-'}`,
-    '',
-    'Percentage:',
-    `${percentage}%`,
-    '',
-    'Result PDF attached.',
-  ].join('\n');
+    'View full result in Parent Portal.',
+  ];
   await sendWhatsAppNotification({
     studentId: student.id,
     phone,
     type: 'parent_menu_latest_result_summary',
-    message: resultMessage,
+    message: compactWhatsAppMessage(resultMessage),
     eventKey: `parent_menu_latest_result_summary:${student.id}:${paper.id}:${Date.now()}`,
   });
 
@@ -357,32 +456,29 @@ async function sendLatestResult(student, phone) {
 
 async function sendPerformanceGraph(student, phone, coaching = null, options = {}) {
   const performance = await buildStudentPerformance(student.coaching_id, student.id);
-  const message = performance.marked.length
+  const hasPerformanceRows = Number(performance.marksSummary.papersCount || 0) > 0;
+  const message = hasPerformanceRows
     ? [
       `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
       '',
-      '📈 Performance Updated',
+      '📈 Performance Update',
       '',
       `Student: ${student.name || student.roll_no}`,
-      '',
-      'Overall Performance:',
-      `${performance.marksSummary.marksPercent}%`,
-      '',
-      'Performance graph attached below.',
-    ].join('\n')
+      `Overall Performance: ${performance.marksSummary.marksPercent}%`,
+    ]
     : 'No performance data available';
   if (options.sendMessage !== false) {
     await sendWhatsAppNotification({
       studentId: student.id,
       phone,
       type: 'performance_report',
-      message,
+      message: Array.isArray(message) ? compactWhatsAppMessage(message) : message,
       eventKey: `performance_report_text:${student.id}:${Date.now()}`,
     });
   }
 
   try {
-    if (!performance.marked.length) return { graph: null, performance, coaching };
+    if (!hasPerformanceRows) return { graph: null, performance, coaching };
     const graphBuffer = createPerformanceSvgBuffer(student, performance.progressSeries);
     const graph = await uploadGeneratedFile({
       buffer: graphBuffer,
@@ -409,8 +505,8 @@ async function sendPerformanceReport(student, phone, coaching = null) {
     `Roll No: ${student.roll_no}`,
     `Total Tests: ${performance.marked.length}`,
     `Total Marks: ${performance.totalMarks}/${performance.totalMax}`,
-    performance.marked.length
-      ? `Overall Score: ${performance.marksSummary.marksPercent}%`
+    Number(performance.marksSummary.papersCount || 0) > 0
+      ? `Overall Performance: ${performance.marksSummary.marksPercent}%`
       : 'No performance data available',
     '',
     'Recent Results:',
@@ -430,7 +526,9 @@ async function sendPerformanceReport(student, phone, coaching = null) {
   });
 }
 
-async function generateFeeReceiptPdf(feeId) {
+async function generateFeeReceiptPdf(feeId, options = {}) {
+  const forceRegenerate = options.forceRegenerate === true;
+  const publicBaseUrl = options.publicBaseUrl || '';
   const fee = await get(
     `SELECT f.id, f.amount, f.payment_date, f.status, f.receipt_number, f.receipt_file_url,
             f.notes, f.added_by,
@@ -438,6 +536,7 @@ async function generateFeeReceiptPdf(feeId) {
             b.name AS batch_name,
             cc.name AS coaching_name, cc.contact_email,
             sfs.total_fee, sfs.paid_fee, sfs.pending_fee,
+            f.receipt_storage_key, f.receipt_storage_type,
             admin.contact_phone AS admin_contact_phone,
             admin.contact_phone AS contact_phone,
             admin.whatsapp_number AS whatsapp_number,
@@ -464,11 +563,36 @@ async function generateFeeReceiptPdf(feeId) {
   }
 
   const receiptNumber = fee.receipt_number || buildReceiptNumber(fee.id, fee.payment_date || new Date());
-  if (fee.receipt_file_url) {
+  if (fee.receipt_file_url && !forceRegenerate) {
+    const receiptAccessUrl = buildReceiptAccessUrl({
+      publicBaseUrl,
+      feeId: fee.id,
+      receiptNumber,
+      storageKey: fee.receipt_storage_key,
+      fileName: `${receiptNumber}.pdf`,
+    });
+    const freshUrl = await getStoredFilePublicUrl({
+      storageType: fee.receipt_storage_type || 'local',
+      storageKey: fee.receipt_storage_key,
+      fileName: `${receiptNumber}.pdf`,
+      contentType: 'application/pdf',
+      dispositionType: 'attachment',
+    });
+    const fileUrl = receiptAccessUrl || freshUrl || fee.receipt_file_url;
+    console.log('Receipt generated', {
+      feeId: fee.id,
+      receiptNumber,
+      reused: true,
+      storageType: fee.receipt_storage_type,
+      storageKey: fee.receipt_storage_key,
+    });
+    console.log('Receipt URL', fileUrl);
     return {
       receiptNumber,
-      fileUrl: fee.receipt_file_url,
+      fileUrl,
       fileName: `${receiptNumber}.pdf`,
+      storageKey: fee.receipt_storage_key || null,
+      storageType: fee.receipt_storage_type || null,
       fee,
     };
   }
@@ -510,27 +634,55 @@ async function generateFeeReceiptPdf(feeId) {
     contentType: 'application/pdf',
     folder: 'whatsapp/receipts',
   });
+  const receiptAccessUrl = buildReceiptAccessUrl({
+    publicBaseUrl,
+    feeId: fee.id,
+    receiptNumber,
+    storageKey: file.storageKey || file.storedName,
+    fileName: `${receiptNumber}.pdf`,
+  });
+  console.log('Receipt generated', {
+    feeId: fee.id,
+    receiptNumber,
+    storageType: file.storageType,
+    storageKey: file.storageKey || file.storedName,
+  });
+  console.log('Receipt URL', receiptAccessUrl || file.publicUrl);
+
+  if (!receiptAccessUrl && !file.publicUrl) {
+    throw new Error('Receipt PDF generated but no public URL is available. Configure APP_BASE_URL/PUBLIC_BASE_URL/RENDER_EXTERNAL_URL for the public app URL or S3_PUBLIC_BASE_URL for direct S3 access.');
+  }
 
   await run(
     `UPDATE fees
      SET receipt_number = ?, receipt_file_url = ?, receipt_storage_key = ?, receipt_storage_type = ?, receipt_generated_at = CURRENT_TIMESTAMP
      WHERE id = ?`,
-    [receiptNumber, file.publicUrl, file.storageKey || file.storedName || null, file.storageType || null, fee.id]
+    [receiptNumber, receiptAccessUrl || file.publicUrl, file.storageKey || file.storedName || null, file.storageType || null, fee.id]
   );
 
   return {
     receiptNumber,
-    fileUrl: file.publicUrl,
+    fileUrl: receiptAccessUrl || file.publicUrl,
     fileName: `${receiptNumber}.pdf`,
+    storageKey: file.storageKey || file.storedName || null,
+    storageType: file.storageType || null,
     fee,
   };
 }
 
-async function createFeeReceiptAndSend({ student, fee, coaching, phone, recipient = 'parent' }) {
-  const receipt = await generateFeeReceiptPdf(fee.id);
+async function createFeeReceiptAndSend({ student, fee, coaching, phone, recipient = 'parent', publicBaseUrl = '' }) {
+  const receipt = await generateFeeReceiptPdf(fee.id, { publicBaseUrl });
+  console.log('Generated receipt URL', receipt.fileUrl);
+  console.log('Receipt storage type', receipt.storageType);
+  const validation = await validatePublicUrl(receipt.fileUrl);
+  console.log('RECEIPT VALIDATION', validation);
+  if (!validation.ok) {
+    throw new Error(`Receipt URL is not publicly accessible with HTTP 200. Status: ${validation.status || 'unknown'}${validation.error ? ` Error: ${validation.error}` : ''}`);
+  }
   return sendDocumentNotification(student.id, phone, receipt.fileUrl, receipt.fileName, 'Payment received successfully. Receipt attached.', {
     type: 'fee_receipt',
     eventKey: `fee_receipt:${recipient}:${student.id}:${fee.id}`,
+    retryFailed: true,
   });
 }
 
@@ -559,7 +711,7 @@ async function createMonthlyReportAndSend({ student, coaching, phone, monthKey }
     `Roll No: ${student.roll_no}`,
     `Attendance: ${attendancePercent}%`,
     `Total Tests: ${performance.marked.length}`,
-    performance.marked.length
+    Number(performance.marksSummary.papersCount || 0) > 0
       ? `Average Marks: ${performance.marksSummary.marksPercent}%`
       : 'No performance data available',
     `Pending Fees: Rs. ${formatAmount(pending?.pending_amount)}`,
@@ -606,22 +758,19 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
       studentId: student.id,
       phone,
       type: 'parent_menu_fee_summary',
-      message: [
+      message: compactWhatsAppMessage([
         `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
         '',
         '💰 Fee Summary',
         '',
         `Student: ${student.name || '-'}`,
-        '',
         `Total Fees: ₹${formatAmount(feeSummary.totalFee)}`,
-        '',
         `Paid Fees: ₹${formatAmount(feeSummary.paidFee)}`,
-        '',
         `Pending Fees: ₹${formatAmount(feeSummary.pendingFee)}`,
         '',
         'Next Due Date:',
         formatDate(nextDueDate),
-      ].join('\n'),
+      ]),
       eventKey: `parent_menu_fee_summary:${student.id}:${Date.now()}`,
     });
     return true;
@@ -644,15 +793,13 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
       studentId: student.id,
       phone,
       type: 'parent_menu_attendance',
-      message: [
+      message: compactWhatsAppMessage([
         '📅 Attendance Summary',
         '',
         `Present: ${present}`,
-        '',
         `Absent: ${Number(summary?.absent_count || 0)}`,
-        '',
         `Attendance Percentage: ${percent}%`,
-      ].join('\n'),
+      ]),
       eventKey: `parent_menu_attendance:${student.id}:${Date.now()}`,
     });
     return true;
@@ -669,27 +816,25 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
   if (command === '4' || command === 'PERFORMANCE') {
     const performance = await buildStudentPerformance(student.coaching_id, student.id);
     const percentages = performance.progressSeries.map((item) => Number(item.percent)).filter(Number.isFinite);
-    const average = performance.marked.length ? performance.marksSummary.marksPercent : '0.00';
-    const highest = percentages.length ? Math.max(...percentages).toFixed(2) : '0.00';
-    const latest = percentages.length ? percentages[percentages.length - 1].toFixed(2) : '0.00';
+    const average = Number(performance.marksSummary.papersCount || 0) > 0 ? performance.marksSummary.marksPercent : '0';
+    const highest = percentages.length ? formatPercent(Math.max(...percentages)) : '0';
+    const latest = percentages.length ? formatPercent(percentages[percentages.length - 1]) : '0';
     await sendWhatsAppNotification({
       studentId: student.id,
       phone,
       type: 'parent_menu_performance_report',
-      message: [
+      message: compactWhatsAppMessage([
         '📈 Performance Report',
         '',
         'Overall:',
         `${average}%`,
-        '',
         'Highest:',
         `${highest}%`,
-        '',
         'Latest:',
         `${latest}%`,
         '',
         'Graph attached.',
-      ].join('\n'),
+      ]),
       eventKey: `parent_menu_performance_report:${student.id}:${Date.now()}`,
     });
     await sendPerformanceGraph(student, phone, coaching, { sendMessage: false });
@@ -701,15 +846,13 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
       studentId: student.id,
       phone,
       type: 'parent_menu_student_profile',
-      message: [
+      message: compactWhatsAppMessage([
         '👨‍🎓 Student Information',
         '',
         `Name: ${student.name || '-'}`,
-        '',
         `Roll No: ${student.roll_no || '-'}`,
-        '',
         `Batch: ${student.batch_name || '-'}`,
-      ].join('\n'),
+      ]),
       eventKey: `parent_menu_student_profile:${student.id}:${Date.now()}`,
     });
     return true;
@@ -775,4 +918,6 @@ module.exports = {
   sendLatestResult,
   sendMonthlyParentReports,
   sendPerformanceGraph,
+  verifyReceiptAccessToken,
+  validatePublicUrl,
 };

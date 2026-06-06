@@ -248,27 +248,44 @@ async function sendDocumentNotification(
      LIMIT 1`,
     [notificationEventKey]
   );
+  let logId = null;
   if (existing) {
-    return { ok: true, skipped: true, duplicate: true, logId: existing.id, status: existing.status };
-  }
+    if (!options.retryFailed || existing.status === 'sent') {
+      return { ok: true, skipped: true, duplicate: true, logId: existing.id, status: existing.status };
+    }
 
-  const logResult = await run(
-    `INSERT INTO notification_logs (
-      coaching_id, student_id, type, event_type, message, attachment_url, status, phone_number, event_key
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      student.coaching_id,
-      student.id,
-      notificationType,
-      notificationType,
-      notificationMessage || fileName || fileUrl,
-      fileUrl || null,
-      'pending',
-      resolvedPhone || null,
-      notificationEventKey,
-    ]
-  );
-  const logId = logResult.lastID;
+    await run(
+      `UPDATE notification_logs
+       SET message = ?, attachment_url = ?, status = ?, phone_number = ?, error_message = NULL
+       WHERE id = ?`,
+      [
+        notificationMessage || fileName || fileUrl,
+        fileUrl || null,
+        'pending',
+        resolvedPhone || null,
+        existing.id,
+      ]
+    );
+    logId = existing.id;
+  } else {
+    const logResult = await run(
+      `INSERT INTO notification_logs (
+        coaching_id, student_id, type, event_type, message, attachment_url, status, phone_number, event_key
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        student.coaching_id,
+        student.id,
+        notificationType,
+        notificationType,
+        notificationMessage || fileName || fileUrl,
+        fileUrl || null,
+        'pending',
+        resolvedPhone || null,
+        notificationEventKey,
+      ]
+    );
+    logId = logResult.lastID;
+  }
 
   if (!resolvedPhone) {
     await run(`UPDATE notification_logs SET status = ?, error_message = ? WHERE id = ?`, ['skipped', 'WhatsApp number missing', logId]);

@@ -1,8 +1,14 @@
 const path = require('path');
 
 function buildProgressSummaryFromPapers(papers) {
-  const markedPapers = (papers || [])
-    .filter((paper) => paper.marks_obtained !== null && paper.max_marks !== null && Number(paper.max_marks) > 0)
+  const normalizedPapers = (papers || [])
+    .map((paper) => ({
+      ...paper,
+      marks_obtained: paper.marks_obtained ?? paper.obtained_marks,
+      max_marks: paper.max_marks ?? paper.total_marks,
+    }));
+  const markedPapers = normalizedPapers
+    .filter((paper) => Number.isFinite(Number(paper.marks_obtained)) && Number.isFinite(Number(paper.max_marks)) && Number(paper.max_marks) > 0)
     .slice()
     .reverse();
 
@@ -12,19 +18,25 @@ function buildProgressSummaryFromPapers(papers) {
     ? ((totalMarksObtained / totalMaxMarks) * 100).toFixed(2)
     : '0.00';
 
-  const progressSeries = markedPapers.map((paper, index) => ({
-    label: paper.test_label || path.parse(paper.original_name || 'Test').name,
-    marks: Number(paper.marks_obtained),
-    max: Number(paper.max_marks),
-    percent: Number(((Number(paper.marks_obtained) / Number(paper.max_marks)) * 100).toFixed(1)),
-    testNo: index + 1,
-  }));
+  const graphPapers = markedPapers.length ? markedPapers : normalizedPapers.slice().reverse();
+  const progressSeries = graphPapers.map((paper, index) => {
+    const marks = Number(paper.marks_obtained || 0);
+    const max = Number(paper.max_marks || 0);
+    return {
+      label: paper.test_label || path.parse(paper.original_name || 'Test').name,
+      marks,
+      max,
+      percent: max > 0 ? Number(((marks / max) * 100).toFixed(1)) : 0,
+      testNo: index + 1,
+    };
+  });
 
   return {
     markedPapers,
     progressSeries,
     marksSummary: {
       testsCount: markedPapers.length,
+      papersCount: normalizedPapers.length,
       totalMarksObtained,
       totalMaxMarks,
       marksPercent,
