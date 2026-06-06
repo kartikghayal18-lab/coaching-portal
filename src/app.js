@@ -8,7 +8,7 @@ const multer = require('multer');
 require('../config/env');
 
 const { getPool, run, get, all, withTransaction } = require('./db');
-const { initStorage, getStorageMode, uploadPaperFile, getPaperAccess, deleteStoredPaper } = require('./storage');
+const { initStorage, getStorageMode, getLocalPaperDir, uploadPaperFile, getPaperAccess, deleteStoredPaper } = require('./storage');
 const { PostgresSessionStore, ensureSessionTable } = require('./session-store');
 const { OTP_TTL_MINUTES, generateOtpCode, smtpConfigured, resendConfigured, getOtpChannelOptions, sendOtpMessage, sendTestEmail } = require('./otp-service');
 const {
@@ -178,6 +178,8 @@ app.use((req, res, next) => {
   next();
 });
 app.use('/public', express.static(path.join(__dirname, '..', 'public')));
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+app.use('/paper-files', express.static(getLocalPaperDir()));
 
 function renderWithMessage(res, view, data = {}) {
   const flash = data.flash || null;
@@ -408,16 +410,15 @@ function buildAbsenceMessage({ student, attendanceDate, coaching }) {
 async function notifyAttendanceAbsence({ req, coachingId, student, attendanceDate, coaching }) {
   try {
     const message = [
+      `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
+      '',
       '❌ Attendance Alert',
       '',
-      'Student:',
-      student.name || student.roll_no,
+      `Student: ${student.name || student.roll_no}`,
       '',
-      'Date:',
-      attendanceDate,
+      `Date: ${attendanceDate}`,
       '',
-      'Status:',
-      'Absent',
+      'Status: Absent',
       '',
       'Reply MENU for options.',
     ].join('\n');
@@ -450,12 +451,12 @@ async function getPaperDocumentUrl(req, paperId, studentId) {
   if (!paper) return null;
 
   const access = await getPaperAccess(paper, 'attachment');
-  const fallbackUrl = getRequestBaseUrl(req)
-    ? `${getRequestBaseUrl(req)}/papers/${paperId}/download`
-    : paper.public_url;
+  const localUrl = getRequestBaseUrl(req) && paper.stored_name
+    ? `${getRequestBaseUrl(req)}/paper-files/${encodeURIComponent(paper.stored_name)}`
+    : null;
 
   return {
-    fileUrl: access?.type === 'redirect' ? access.url : fallbackUrl,
+    fileUrl: paper.public_url || (access?.type === 'redirect' ? access.url : localUrl),
     fileName: paper.original_name || 'paper.pdf',
     paper,
   };
@@ -465,9 +466,7 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
   try {
     const isResult = type === 'test_result_published';
     const document = await getPaperDocumentUrl(req, paperId, student.id);
-    if (!document?.fileUrl) {
-      return { ok: false, skipped: true, reason: 'Document URL missing' };
-    }
+    if (!document?.paper) return { ok: false, skipped: true, reason: 'Paper not found' };
 
     const studentPhone = student.whatsapp_number || student.contact_phone;
     const parentPhone = student.parent_whatsapp_number || student.guardian_phone;
@@ -477,21 +476,19 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
       : null;
     const caption = isResult
       ? [
+        `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
+        '',
         '📚 New Result Available',
         '',
-        'Student:',
-        student.name || student.roll_no,
+        `Student: ${student.name || student.roll_no}`,
         '',
-        'Test:',
-        subject,
+        `Test: ${subject}`,
         '',
-        'Marks:',
-        `${document.paper?.marks_obtained ?? '-'}/${document.paper?.max_marks ?? '-'}`,
+        `Marks: ${document.paper?.marks_obtained ?? '-'}/${document.paper?.max_marks ?? '-'}`,
         '',
-        'Percentage:',
-        `${resultPercentage || '-'}%`,
+        `Percentage: ${resultPercentage || '-'}%`,
         '',
-        'Result PDF attached.',
+        'Result PDF attached below.',
       ].join('\n')
       : [
         `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
@@ -500,38 +497,45 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
         'Paper PDF attached.',
       ].join('\n');
 
-    const studentResult = await sendDocumentNotification(
-      student.id,
-      studentPhone,
-      document.fileUrl,
-      document.fileName,
-      caption,
-      { type, eventKey: `${type}:student:${student.id}:${paperId}` }
-    );
+    const recipients = [
+      { key: 'student', phone: studentPhone },
+      { key: 'parent', phone: parentPhone },
+    ].filter((recipient, index, recipientsList) => (
+      recipient.phone && recipientsList.findIndex((item) => item.phone === recipient.phone) === index
+    ));
 
-    if (!parentPhone || parentPhone === studentPhone) {
-      const graphPhone = studentPhone || parentPhone;
-      if (isResult && graphPhone) {
-        await sendPerformanceGraph(student, graphPhone, coaching);
+    for (const recipient of recipients) {
+      await sendWhatsAppNotification({
+        studentId: student.id,
+        phone: recipient.phone,
+        type: `${type}_text`,
+        message: caption,
+        eventKey: `${type}_text:${recipient.key}:${student.id}:${paperId}`,
+      });
+
+      if (document.fileUrl) {
+        try {
+          await sendDocumentNotification(
+            student.id,
+            recipient.phone,
+            document.fileUrl,
+            document.fileName,
+            isResult ? 'Result PDF attached below.' : 'Paper PDF attached below.',
+            { type, eventKey: `${type}:document:${recipient.key}:${student.id}:${paperId}` }
+          );
+        } catch (error) {
+          console.error('WhatsApp result PDF failed', { studentId: student.id, paperId, error: error.message });
+        }
+      } else {
+        console.error('WhatsApp result PDF missing public URL', { studentId: student.id, paperId });
       }
-      return studentResult;
+
+      if (isResult) {
+        await sendPerformanceGraph(student, recipient.phone, coaching);
+      }
     }
 
-    const parentResult = await sendDocumentNotification(
-      student.id,
-      parentPhone,
-      document.fileUrl,
-      document.fileName,
-      caption,
-      { type, eventKey: `${type}:parent:${student.id}:${paperId}` }
-    );
-    if (isResult) {
-      if (studentPhone) {
-        await sendPerformanceGraph(student, studentPhone, coaching);
-      }
-      await sendPerformanceGraph(student, parentPhone, coaching);
-    }
-    return parentResult;
+    return { ok: true, sent: recipients.length };
   } catch (error) {
     console.error('WhatsApp paper/result notification failed', {
       studentId: student.id,
@@ -3088,6 +3092,29 @@ app.post('/webhook/whatsapp', async (req, res) => {
                     phoneNumberId,
                     from: incomingMessage.from,
                   });
+                  if (['hi', 'hello', 'menu', 'start', 'help'].includes(messageText)) {
+                    await sendTextMessage({
+                      coachingId: coaching.coaching_id,
+                      to: incomingMessage.from,
+                      message: [
+                        `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
+                        '',
+                        'Welcome to Parent Portal',
+                        '',
+                        'Choose an option:',
+                        '',
+                        '1️⃣ FEES',
+                        '2️⃣ ATTENDANCE',
+                        '3️⃣ RESULTS',
+                        '4️⃣ PERFORMANCE',
+                        '5️⃣ STUDENT INFO',
+                        '',
+                        'Reply with the option name.',
+                        '',
+                        'Please ask the office to link your WhatsApp number if an option does not return student data.',
+                      ].join('\n'),
+                    });
+                  }
                   continue;
                 }
                 await handleParentAssistantMessage({
@@ -5474,17 +5501,11 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
         '',
         '✅ Payment Received',
         '',
-        'Student:',
-        student.name || student.roll_no,
+        `Student: ${student.name || student.roll_no}`,
         '',
-        'Amount Paid:',
-        `₹${amount.toFixed(2)}`,
+        `Amount Paid: ₹${amount.toFixed(2)}`,
         '',
-        'Total Paid:',
-        `₹${feeSummary.paidFee.toFixed(2)}`,
-        '',
-        'Remaining Fees:',
-        `₹${feeSummary.pendingFee.toFixed(2)}`,
+        `Remaining Fees: ₹${feeSummary.pendingFee.toFixed(2)}`,
         '',
         'Receipt attached below.',
       ].join('\n');
@@ -5496,19 +5517,31 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
         && recipients.findIndex((item) => item.phone === recipient.phone) === index
       ));
 
-      const receipt = await generateFeeReceiptPdf(fee.id);
       for (const recipient of feeRecipients) {
-        await sendDocumentNotification(
-          student.id,
-          recipient.phone,
-          receipt.fileUrl,
-          receipt.fileName,
-          feePaidMessage,
-          {
-            type: 'fee_payment_confirmation',
-            eventKey: `fee_payment_confirmation:${recipient.key}:${student.id}:${fee.id}`,
-          }
-        );
+        await sendWhatsAppNotification({
+          studentId: student.id,
+          phone: recipient.phone,
+          type: 'fee_payment_confirmation',
+          message: feePaidMessage,
+          eventKey: `fee_payment_confirmation:${recipient.key}:${student.id}:${fee.id}`,
+        });
+
+        try {
+          const receipt = await generateFeeReceiptPdf(fee.id);
+          await sendDocumentNotification(
+            student.id,
+            recipient.phone,
+            receipt.fileUrl,
+            receipt.fileName,
+            'Receipt attached below.',
+            {
+              type: 'fee_receipt',
+              eventKey: `fee_receipt:${recipient.key}:${student.id}:${fee.id}`,
+            }
+          );
+        } catch (error) {
+          console.error('WhatsApp fee receipt PDF failed', { feeId: fee.id, studentId: student.id, error: error.message });
+        }
       }
     } else if (status === 'overdue') {
       const feeSummary = await setStudentTotalFee({ coachingId, studentId: student.id, totalFee: amount });

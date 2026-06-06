@@ -28,6 +28,16 @@ function resolveAdminPhone(result) {
     || null;
 }
 
+function getAppPublicBaseUrl() {
+  return String(
+    process.env.APP_BASE_URL
+    || process.env.PUBLIC_BASE_URL
+    || process.env.RENDER_EXTERNAL_URL
+    || process.env.VERCEL_URL
+    || ''
+  ).trim().replace(/\/$/, '').replace(/^([^h])/, 'https://$1');
+}
+
 function buildReceiptNumber(feeId, paymentDate = new Date()) {
   return `RCP-${String(feeId).padStart(6, '0')}`;
 }
@@ -141,8 +151,11 @@ function createPerformanceSvgBuffer(student, progressSeries) {
 async function getPaperDocument(paper) {
   if (!paper) return null;
   const access = await getPaperAccess(paper, 'attachment');
+  const localUrl = access?.type === 'local' && getAppPublicBaseUrl() && paper.stored_name
+    ? `${getAppPublicBaseUrl()}/paper-files/${encodeURIComponent(paper.stored_name)}`
+    : null;
   return {
-    fileUrl: access?.type === 'redirect' ? access.url : paper.public_url,
+    fileUrl: paper.public_url || (access?.type === 'redirect' ? access.url : localUrl),
     fileName: paper.original_name || 'paper.pdf',
   };
 }
@@ -213,9 +226,9 @@ function buildParentMenuMessage(coaching) {
   return [
     `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
     '',
-    'Welcome Parent Portal',
+    'Welcome to Parent Portal',
     '',
-    'Reply with:',
+    'Choose an option:',
     '',
     '1️⃣ FEES',
     '2️⃣ ATTENDANCE',
@@ -223,7 +236,12 @@ function buildParentMenuMessage(coaching) {
     '4️⃣ PERFORMANCE',
     '5️⃣ STUDENT INFO',
     '',
-    'Type option name.',
+    'Reply with the option name.',
+    '',
+    'Example:',
+    'FEES',
+    'RESULTS',
+    'ATTENDANCE',
   ].join('\n');
 }
 
@@ -248,8 +266,7 @@ async function buildStudentPerformance(coachingId, studentId) {
             stored_name, storage_type, storage_key, public_url, content_type
      FROM test_papers
      WHERE coaching_id = ? AND student_id = ?
-     ORDER BY upload_date DESC
-     LIMIT 20`,
+     ORDER BY upload_date DESC`,
     [coachingId, studentId]
   );
   const { markedPapers, progressSeries, marksSummary } = buildProgressSummaryFromPapers(papers);
@@ -294,19 +311,23 @@ async function sendLatestResult(student, phone) {
      LIMIT 1`,
     [student.coaching_id, student.id]
   );
-  const document = await getPaperDocument(paper);
-  if (!document?.fileUrl) return false;
+  if (!paper) return false;
+  const percentage = Number(paper.max_marks) > 0
+    ? ((Number(paper.marks_obtained || 0) / Number(paper.max_marks)) * 100).toFixed(2)
+    : '-';
   const resultMessage = [
     '📚 Latest Result',
     '',
-    'Student:',
-    student.name || '-',
+    `Student: ${student.name || '-'}`,
     '',
     'Test:',
     paper.test_label || paper.original_name || '-',
     '',
     'Marks:',
     `${paper.marks_obtained ?? '-'}/${paper.max_marks ?? '-'}`,
+    '',
+    'Percentage:',
+    `${percentage}%`,
     '',
     'Result PDF attached.',
   ].join('\n');
@@ -317,32 +338,37 @@ async function sendLatestResult(student, phone) {
     message: resultMessage,
     eventKey: `parent_menu_latest_result_summary:${student.id}:${paper.id}:${Date.now()}`,
   });
-  await sendDocumentNotification(student.id, phone, document.fileUrl, document.fileName, 'Latest result PDF attached.', {
-    type: 'parent_menu_latest_result',
-    eventKey: `parent_menu_latest_result:${student.id}:${paper.id}:${Date.now()}`,
-  });
+
+  try {
+    const document = await getPaperDocument(paper);
+    if (!document?.fileUrl) {
+      console.error('Latest result PDF missing public URL', { studentId: student.id, paperId: paper.id });
+      return true;
+    }
+    await sendDocumentNotification(student.id, phone, document.fileUrl, document.fileName, 'Result PDF attached.', {
+      type: 'parent_menu_latest_result',
+      eventKey: `parent_menu_latest_result:${student.id}:${paper.id}:${Date.now()}`,
+    });
+  } catch (error) {
+    console.error('Latest result PDF send failed', { studentId: student.id, paperId: paper.id, error: error.message });
+  }
   return true;
 }
 
 async function sendPerformanceGraph(student, phone, coaching = null, options = {}) {
   const performance = await buildStudentPerformance(student.coaching_id, student.id);
-  const graphBuffer = createPerformanceSvgBuffer(student, performance.progressSeries);
-  const graph = await uploadGeneratedFile({
-    buffer: graphBuffer,
-    fileName: `performance-${student.roll_no}.svg`,
-    contentType: 'image/svg+xml',
-    folder: 'whatsapp/performance',
-  });
   const message = performance.marked.length
     ? [
+      `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
+      '',
       '📈 Performance Updated',
       '',
       `Student: ${student.name || student.roll_no}`,
       '',
-      'Overall Score:',
+      'Overall Performance:',
       `${performance.marksSummary.marksPercent}%`,
       '',
-      'Performance graph attached.',
+      'Performance graph attached below.',
     ].join('\n')
     : 'No performance data available';
   if (options.sendMessage !== false) {
@@ -354,11 +380,25 @@ async function sendPerformanceGraph(student, phone, coaching = null, options = {
       eventKey: `performance_report_text:${student.id}:${Date.now()}`,
     });
   }
-  await sendDocumentNotification(student.id, phone, graph.publicUrl, `performance-${student.roll_no}.svg`, 'Performance graph attached.', {
-    type: 'performance_graph',
-    eventKey: `performance_graph:${student.id}:${Date.now()}`,
-  });
-  return { graph, performance, coaching };
+
+  try {
+    if (!performance.marked.length) return { graph: null, performance, coaching };
+    const graphBuffer = createPerformanceSvgBuffer(student, performance.progressSeries);
+    const graph = await uploadGeneratedFile({
+      buffer: graphBuffer,
+      fileName: `performance-${student.roll_no}.svg`,
+      contentType: 'image/svg+xml',
+      folder: 'whatsapp/performance',
+    });
+    await sendDocumentNotification(student.id, phone, graph.publicUrl, `performance-${student.roll_no}.svg`, 'Performance graph attached below.', {
+      type: 'performance_graph',
+      eventKey: `performance_graph:${student.id}:${Date.now()}`,
+    });
+    return { graph, performance, coaching };
+  } catch (error) {
+    console.error('Performance graph send failed', { studentId: student.id, error: error.message });
+    return { graph: null, performance, coaching, error: error.message };
+  }
 }
 
 async function sendPerformanceReport(student, phone, coaching = null) {
@@ -449,9 +489,9 @@ async function generateFeeReceiptPdf(feeId) {
       ['Student', fee.student_name || '-'],
       ['Roll Number', fee.roll_no || '-'],
       ['Batch', fee.batch_name || '-'],
-      ['Amount Paid', `Rs. ${formatAmount(amount)}`],
+      ['Amount Paid', `₹${formatAmount(amount)}`],
       ['Payment Method', fee.notes || 'Manual/Portal'],
-      ['Pending Balance', `Rs. ${formatAmount(fee.pending_fee)}`],
+      ['Remaining Balance', `₹${formatAmount(fee.pending_fee)}`],
       ['Received By', fee.received_by_name || 'Admin'],
       ['Coaching Contact', adminPhone || fee.contact_email || '-'],
     ];
@@ -567,21 +607,19 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
       phone,
       type: 'parent_menu_fee_summary',
       message: [
+        `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
+        '',
         '💰 Fee Summary',
         '',
-        'Student:',
-        student.name || '-',
+        `Student: ${student.name || '-'}`,
         '',
-        'Total Fees:',
-        `₹${formatAmount(feeSummary.totalFee)}`,
+        `Total Fees: ₹${formatAmount(feeSummary.totalFee)}`,
         '',
-        'Paid:',
-        `₹${formatAmount(feeSummary.paidFee)}`,
+        `Paid Fees: ₹${formatAmount(feeSummary.paidFee)}`,
         '',
-        'Pending:',
-        `₹${formatAmount(feeSummary.pendingFee)}`,
+        `Pending Fees: ₹${formatAmount(feeSummary.pendingFee)}`,
         '',
-        'Next Due:',
+        'Next Due Date:',
         formatDate(nextDueDate),
       ].join('\n'),
       eventKey: `parent_menu_fee_summary:${student.id}:${Date.now()}`,
@@ -609,14 +647,11 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
       message: [
         '📅 Attendance Summary',
         '',
-        'Present:',
-        String(present),
+        `Present: ${present}`,
         '',
-        'Absent:',
-        String(Number(summary?.absent_count || 0)),
+        `Absent: ${Number(summary?.absent_count || 0)}`,
         '',
-        'Attendance:',
-        `${percent}%`,
+        `Attendance Percentage: ${percent}%`,
       ].join('\n'),
       eventKey: `parent_menu_attendance:${student.id}:${Date.now()}`,
     });
@@ -644,7 +679,7 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
       message: [
         '📈 Performance Report',
         '',
-        'Average:',
+        'Overall:',
         `${average}%`,
         '',
         'Highest:',
@@ -669,14 +704,11 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
       message: [
         '👨‍🎓 Student Information',
         '',
-        'Name:',
-        student.name || '-',
+        `Name: ${student.name || '-'}`,
         '',
-        'Roll No:',
-        student.roll_no || '-',
+        `Roll No: ${student.roll_no || '-'}`,
         '',
-        'Batch:',
-        student.batch_name || '-',
+        `Batch: ${student.batch_name || '-'}`,
       ].join('\n'),
       eventKey: `parent_menu_student_profile:${student.id}:${Date.now()}`,
     });

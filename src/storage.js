@@ -25,6 +25,16 @@ const s3Config = {
 const s3PublicBaseUrl = (process.env.S3_PUBLIC_BASE_URL || '').trim();
 let s3Client = null;
 
+function getAppPublicBaseUrl() {
+  return String(
+    process.env.APP_BASE_URL
+    || process.env.PUBLIC_BASE_URL
+    || process.env.RENDER_EXTERNAL_URL
+    || process.env.VERCEL_URL
+    || ''
+  ).trim().replace(/\/$/, '').replace(/^([^h])/, 'https://$1');
+}
+
 function sanitizeFileName(name) {
   return String(name || 'file')
     .replace(/[^a-zA-Z0-9._-]/g, '_')
@@ -89,6 +99,10 @@ function getStorageMode() {
   return storageMode;
 }
 
+function getLocalPaperDir() {
+  return LOCAL_PAPER_DIR;
+}
+
 async function uploadPaperFile(file) {
   const safeOriginal = sanitizeFileName(file.originalname);
 
@@ -125,7 +139,7 @@ async function uploadPaperFile(file) {
     storedName: fileName,
     storageType: 'local',
     storageKey: fileName,
-    publicUrl: null,
+    publicUrl: getAppPublicBaseUrl() ? `${getAppPublicBaseUrl()}/paper-files/${encodeURIComponent(fileName)}` : null,
     contentType: file.mimetype || null,
     sizeBytes: file.size || null,
   };
@@ -178,7 +192,7 @@ async function uploadGeneratedFile({ buffer, fileName, contentType = 'applicatio
     storedName: fileNameWithPrefix,
     storageType: 'local',
     storageKey: fileNameWithPrefix,
-    publicUrl: null,
+    publicUrl: getAppPublicBaseUrl() ? `${getAppPublicBaseUrl()}/paper-files/${encodeURIComponent(fileNameWithPrefix)}` : null,
     contentType,
     sizeBytes: buffer.length,
   };
@@ -253,6 +267,7 @@ async function deleteStoredPaper(paper) {
 module.exports = {
   initStorage,
   getStorageMode,
+  getLocalPaperDir,
   uploadPaperFile,
   uploadGeneratedFile,
   getPaperAccess,

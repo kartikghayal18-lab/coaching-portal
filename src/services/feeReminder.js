@@ -13,16 +13,13 @@ async function buildFeeReminderMessage({ student, fee, coaching, reminderType })
     '',
     '💰 Fee Reminder',
     '',
-    'Student:',
-    student.name || student.roll_no,
+    `Student: ${student.name || student.roll_no}`,
     '',
-    'Pending Amount:',
-    `₹${Number(feeSummary.pendingFee || fee.amount || 0).toFixed(2)}`,
+    `Pending Amount: ₹${Number(feeSummary.pendingFee || fee.amount || 0).toFixed(2)}`,
     '',
-    'Due Date:',
-    formatDate(fee.due_date),
+    `Due Date: ${formatDate(fee.due_date)}`,
     '',
-    'Reply FEES for details.',
+    'Reply FEES for complete details.',
   ].join('\n');
 }
 
