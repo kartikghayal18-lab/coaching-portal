@@ -2978,6 +2978,9 @@ app.get('/webhook/whatsapp', async (req, res) => {
 });
 
 app.post('/webhook/whatsapp', async (req, res) => {
+  console.log('WHATSAPP WEBHOOK HIT');
+  console.log(JSON.stringify(req.body, null, 2));
+
   const entries = Array.isArray(req.body?.entry) ? req.body.entry : [];
   for (const entry of entries) {
     const changes = Array.isArray(entry?.changes) ? entry.changes : [];
