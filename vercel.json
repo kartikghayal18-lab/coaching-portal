@@ -23,6 +23,10 @@
     {
       "path": "/cron/whatsapp/fee-reminders",
       "schedule": "0 4 * * *"
+    },
+    {
+      "path": "/cron/whatsapp/monthly-parent-reports",
+      "schedule": "0 5 1 * *"
     }
   ]
 }

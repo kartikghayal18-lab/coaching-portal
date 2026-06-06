@@ -131,6 +131,59 @@ async function uploadPaperFile(file) {
   };
 }
 
+async function uploadGeneratedFile({ buffer, fileName, contentType = 'application/octet-stream', folder = 'generated' }) {
+  const safeOriginal = sanitizeFileName(fileName);
+
+  if (storageMode === 's3') {
+    const key = `${folder}/${new Date().toISOString().slice(0, 10)}/${Date.now()}_${crypto.randomUUID()}_${safeOriginal}`;
+
+    await getS3Client().send(
+      new PutObjectCommand({
+        Bucket: s3Config.bucket,
+        Key: key,
+        Body: buffer,
+        ContentType: contentType,
+      })
+    );
+
+    const publicUrl = s3PublicBaseUrl
+      ? `${s3PublicBaseUrl.replace(/\/$/, '')}/${key}`
+      : await getSignedUrl(
+        getS3Client(),
+        new GetObjectCommand({
+          Bucket: s3Config.bucket,
+          Key: key,
+          ResponseContentDisposition: `attachment; filename="${quoteFileName(safeOriginal)}"`,
+          ResponseContentType: contentType,
+        }),
+        { expiresIn: s3Config.signedUrlTtlSeconds }
+      );
+
+    return {
+      storedName: key,
+      storageType: 's3',
+      storageKey: key,
+      publicUrl,
+      contentType,
+      sizeBytes: buffer.length,
+    };
+  }
+
+  ensureLocalDir();
+  const fileNameWithPrefix = `${Date.now()}_${safeOriginal}`;
+  const localPath = path.join(LOCAL_PAPER_DIR, fileNameWithPrefix);
+  await fs.promises.writeFile(localPath, buffer);
+
+  return {
+    storedName: fileNameWithPrefix,
+    storageType: 'local',
+    storageKey: fileNameWithPrefix,
+    publicUrl: null,
+    contentType,
+    sizeBytes: buffer.length,
+  };
+}
+
 function resolveStorageType(paper) {
   return paper.storage_type || 'local';
 }
@@ -201,6 +254,7 @@ module.exports = {
   initStorage,
   getStorageMode,
   uploadPaperFile,
+  uploadGeneratedFile,
   getPaperAccess,
   deleteStoredPaper,
 };

@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const { run, get, all } = require('../db');
-const { getWhatsAppSettings, sendTextMessage } = require('./whatsapp');
+const { getWhatsAppSettings, sendTextMessage, sendDocumentMessage } = require('./whatsapp');
 
 function cleanPhoneNumber(value) {
   return String(value || '').replace(/[^\d]/g, '');
@@ -165,8 +165,109 @@ async function sendWhatsAppNotification({
   }
 }
 
+async function sendDocumentNotification(
+  studentId,
+  phone,
+  fileUrl,
+  fileName,
+  caption,
+  options = {}
+) {
+  const student = await get(
+    `SELECT id, coaching_id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
+     FROM users
+     WHERE id = ? AND role = 'student'
+     LIMIT 1`,
+    [studentId]
+  );
+
+  if (!student) {
+    return { ok: false, skipped: true, reason: 'Student not found' };
+  }
+
+  const resolvedPhone = cleanPhoneNumber(phone);
+  const notificationType = String(options.type || 'document').trim();
+  const notificationMessage = String(caption || '').trim();
+  const notificationEventKey = buildEventKey({
+    studentId: student.id,
+    type: notificationType,
+    message: `${notificationMessage}:${fileUrl}:${fileName}`,
+    eventKey: options.eventKey || null,
+  });
+  const settings = await getWhatsAppSettings(student.coaching_id);
+  const toggleKey = getToggleKeyForType(notificationType);
+  if (toggleKey && settings[toggleKey] === false) {
+    return { ok: false, skipped: true, reason: 'Notification type disabled' };
+  }
+
+  const existing = await get(
+    `SELECT id, status
+     FROM notification_logs
+     WHERE event_key = ?
+     LIMIT 1`,
+    [notificationEventKey]
+  );
+  if (existing) {
+    return { ok: true, skipped: true, duplicate: true, logId: existing.id, status: existing.status };
+  }
+
+  const logResult = await run(
+    `INSERT INTO notification_logs (
+      coaching_id, student_id, type, message, status, phone_number, event_key
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      student.coaching_id,
+      student.id,
+      notificationType,
+      notificationMessage || fileName || fileUrl,
+      'pending',
+      resolvedPhone || null,
+      notificationEventKey,
+    ]
+  );
+  const logId = logResult.lastID;
+
+  if (!resolvedPhone) {
+    await run(`UPDATE notification_logs SET status = ? WHERE id = ?`, ['skipped', logId]);
+    return { ok: false, skipped: true, reason: 'WhatsApp number missing', logId };
+  }
+
+  if (!fileUrl) {
+    await run(`UPDATE notification_logs SET status = ? WHERE id = ?`, ['failed', logId]);
+    return { ok: false, skipped: true, reason: 'Document URL missing', logId };
+  }
+
+  try {
+    const result = await sendDocumentMessage({
+      coachingId: student.coaching_id,
+      studentId: student.id,
+      to: resolvedPhone,
+      documentUrl: fileUrl,
+      filename: fileName || 'paper.pdf',
+      caption: notificationMessage,
+      settings,
+    });
+    await run(
+      `UPDATE notification_logs
+       SET status = ?, sent_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      ['sent', logId]
+    );
+    return { ok: true, logId, metaMessageId: result.metaMessageId };
+  } catch (error) {
+    await run(
+      `UPDATE notification_logs
+       SET status = ?
+       WHERE id = ?`,
+      ['failed', logId]
+    );
+    throw error;
+  }
+}
+
 module.exports = {
   ensureNotificationSchema,
   getRecentNotificationLogs,
+  sendDocumentNotification,
   sendWhatsAppNotification,
 };

@@ -26,8 +26,17 @@ const {
 const {
   ensureNotificationSchema,
   getRecentNotificationLogs,
+  sendDocumentNotification,
   sendWhatsAppNotification,
 } = require('./services/notificationService');
+const {
+  createFeeReceiptAndSend,
+  findStudentByParentPhone,
+  getCoachingByWhatsAppPhoneNumberId,
+  handleParentAssistantMessage,
+  sendMonthlyParentReports,
+  sendPerformanceGraph,
+} = require('./services/parentAssistant');
 
 console.log('[BOOT] Starting app');
 console.log('[BOOT] DATABASE_URL present:', Boolean(process.env.DATABASE_URL));
@@ -391,11 +400,19 @@ function buildAbsenceMessage({ student, attendanceDate, coaching }) {
 
 async function notifyAttendanceAbsence({ req, coachingId, student, attendanceDate, coaching }) {
   try {
+    const message = [
+      `🏫 ${coaching?.name || 'Coaching Institute'}`,
+      '❌ Attendance Alert',
+      `Student: ${student.name || student.roll_no} (${student.roll_no})`,
+      `Date: ${attendanceDate}`,
+      'Your child was absent today.',
+      'Reply MENU for options.',
+    ].join('\n');
     return await sendWhatsAppNotification({
       studentId: student.id,
       phone: student.parent_whatsapp_number || student.guardian_phone,
       type: 'attendance_absent',
-      message: 'Your child was marked absent today.',
+      message,
       eventKey: `attendance_absent:${student.id}:${attendanceDate}`,
     });
   } catch (error) {
@@ -408,34 +425,82 @@ async function notifyAttendanceAbsence({ req, coachingId, student, attendanceDat
   }
 }
 
-async function notifyPaperEvent({ student, paperId, type }) {
+async function getPaperDocumentUrl(req, paperId, studentId) {
+  const paper = await get(
+    `SELECT id, original_name, stored_name, storage_type, storage_key, public_url, content_type,
+            marks_obtained, max_marks, test_label
+     FROM test_papers
+     WHERE id = ? AND student_id = ?
+     LIMIT 1`,
+    [paperId, studentId]
+  );
+  if (!paper) return null;
+
+  const access = await getPaperAccess(paper, 'attachment');
+  const fallbackUrl = getRequestBaseUrl(req)
+    ? `${getRequestBaseUrl(req)}/papers/${paperId}/download`
+    : paper.public_url;
+
+  return {
+    fileUrl: access?.type === 'redirect' ? access.url : fallbackUrl,
+    fileName: paper.original_name || 'paper.pdf',
+    paper,
+  };
+}
+
+async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
   try {
     const isResult = type === 'test_result_published';
+    const document = await getPaperDocumentUrl(req, paperId, student.id);
+    if (!document?.fileUrl) {
+      return { ok: false, skipped: true, reason: 'Document URL missing' };
+    }
+
     const studentPhone = student.whatsapp_number || student.contact_phone;
     const parentPhone = student.parent_whatsapp_number || student.guardian_phone;
-    const message = isResult
-      ? 'A new test result is available in the student dashboard.'
-      : 'New test paper has been assigned. Login to your student dashboard to view it.';
+    const caption = isResult
+      ? [
+        `🏫 ${coaching?.name || 'Coaching Institute'}`,
+        '📊 New Result Available',
+        `Student: ${student.name || student.roll_no}`,
+        `Marks: ${document.paper?.marks_obtained ?? '-'}/${document.paper?.max_marks ?? '-'}`,
+        'Result PDF attached.',
+      ].join('\n')
+      : [
+        `🏫 ${coaching?.name || 'Coaching Institute'}`,
+        '📚 New Test Paper Assigned',
+        `Student: ${student.name || student.roll_no}`,
+        'Paper PDF attached.',
+      ].join('\n');
 
-    const studentResult = await sendWhatsAppNotification({
-      studentId: student.id,
-      phone: studentPhone,
-      type,
-      message,
-      eventKey: `${type}:student:${student.id}:${paperId}`,
-    });
+    const studentResult = await sendDocumentNotification(
+      student.id,
+      studentPhone,
+      document.fileUrl,
+      document.fileName,
+      caption,
+      { type, eventKey: `${type}:student:${student.id}:${paperId}` }
+    );
 
-    if (!isResult || !parentPhone || parentPhone === studentPhone) {
+    if (!parentPhone || parentPhone === studentPhone) {
+      if (isResult && parentPhone) {
+        await sendPerformanceGraph(student, parentPhone, coaching);
+      }
       return studentResult;
     }
 
-    return await sendWhatsAppNotification({
-      studentId: student.id,
-      phone: parentPhone,
-      type,
-      message,
-      eventKey: `${type}:parent:${student.id}:${paperId}`,
-    });
+    const parentResult = await sendDocumentNotification(
+      student.id,
+      parentPhone,
+      document.fileUrl,
+      document.fileName,
+      caption,
+      { type, eventKey: `${type}:parent:${student.id}:${paperId}` }
+    );
+    if (isResult) {
+      await sendPerformanceGraph(student, parentPhone, coaching);
+    }
+    return parentResult;
   } catch (error) {
     console.error('WhatsApp paper/result notification failed', {
       studentId: student.id,
@@ -3007,6 +3072,34 @@ app.post('/webhook/whatsapp', async (req, res) => {
         await updateWhatsAppLogStatus(statusEvent.id, statusEvent.status);
       }
 
+      const incomingMessages = Array.isArray(change?.value?.messages) ? change.value.messages : [];
+      const phoneNumberId = String(change?.value?.metadata?.phone_number_id || '').trim();
+      if (incomingMessages.length && phoneNumberId) {
+        const coaching = await getCoachingByWhatsAppPhoneNumberId(phoneNumberId);
+        if (coaching) {
+          for (const incomingMessage of incomingMessages) {
+            const incomingText = String(incomingMessage?.text?.body || '').trim();
+            if (!incomingText) continue;
+
+            try {
+              const student = await findStudentByParentPhone(coaching.coaching_id, incomingMessage.from);
+              await handleParentAssistantMessage({
+                coaching,
+                student,
+                from: incomingMessage.from,
+                text: incomingText,
+              });
+            } catch (error) {
+              console.error('WhatsApp parent assistant failed', {
+                phoneNumberId,
+                from: incomingMessage.from,
+                error: error.message,
+              });
+            }
+          }
+        }
+      }
+
     }
   }
 
@@ -3029,6 +3122,24 @@ app.get('/cron/whatsapp/fee-reminders', async (req, res) => {
     daysBefore: Number.isInteger(daysBefore) && daysBefore >= 0 ? daysBefore : DEFAULT_FEE_REMINDER_DAYS_BEFORE,
   });
   return res.json({ ok: true, summary });
+});
+
+app.get('/cron/whatsapp/monthly-parent-reports', async (req, res) => {
+  const cronSecret = String(process.env.CRON_SECRET || '').trim();
+  if (!cronSecret) {
+    return res.status(503).json({ ok: false, error: 'CRON_SECRET is required for scheduled WhatsApp reports' });
+  }
+
+  const authorization = String(req.headers.authorization || '').trim();
+  if (authorization !== `Bearer ${cronSecret}`) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+
+  const now = new Date();
+  const previousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const monthKey = `${previousMonth.getFullYear()}-${String(previousMonth.getMonth() + 1).padStart(2, '0')}`;
+  const summary = await sendMonthlyParentReports({ monthKey });
+  return res.json({ ok: true, monthKey, summary });
 });
 
 app.post('/logout', (req, res) => {
@@ -4928,6 +5039,8 @@ app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('pape
   });
   if (result.status !== 'duplicate') {
     await notifyPaperEvent({
+      req,
+      coaching,
       student,
       paperId: result.paperId,
       type: marksObtained !== null && maxMarks !== null ? 'test_result_published' : 'test_paper_upload',
@@ -4987,6 +5100,8 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
         report.assigned += 1;
         report.details.push({ file: file.originalname, reason: `Assigned to roll number "${paperMeta.rollNo}"` });
         await notifyPaperEvent({
+          req,
+          coaching,
           student,
           paperId: result.paperId,
           type: paperMeta.marksObtained !== null && paperMeta.maxMarks !== null ? 'test_result_published' : 'test_paper_upload',
@@ -5333,13 +5448,37 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   try {
     if (status === 'paid') {
-      await sendWhatsAppNotification({
-        studentId: student.id,
-        phone: student.parent_whatsapp_number || student.guardian_phone,
-        type: 'fee_payment_confirmation',
-        message: `Payment received successfully. Amount: Rs. ${Number(amount || 0).toFixed(2)}.`,
-        eventKey: `fee_payment_confirmation:${student.id}:${fee.id}`,
-      });
+      const feePaidMessage = [
+        `🏫 ${coaching?.name || 'Coaching Institute'}`,
+        '✅ Payment Received',
+        `Student: ${student.name || student.roll_no}`,
+        `Amount: ₹${Number(amount || 0).toFixed(2)}`,
+        'Receipt attached below.',
+      ].join('\n');
+      const feeRecipients = [
+        { key: 'student', phone: student.whatsapp_number || student.contact_phone },
+        { key: 'parent', phone: student.parent_whatsapp_number || student.guardian_phone },
+      ].filter((recipient, index, recipients) => (
+        recipient.phone
+        && recipients.findIndex((item) => item.phone === recipient.phone) === index
+      ));
+
+      for (const recipient of feeRecipients) {
+        await sendWhatsAppNotification({
+          studentId: student.id,
+          phone: recipient.phone,
+          type: 'fee_payment_confirmation',
+          message: feePaidMessage,
+          eventKey: `fee_payment_confirmation:${recipient.key}:${student.id}:${fee.id}`,
+        });
+        await createFeeReceiptAndSend({
+          student,
+          fee,
+          coaching,
+          phone: recipient.phone,
+          recipient: recipient.key,
+        });
+      }
     } else if (status === 'overdue') {
       await sendOverdueReminder({ coachingId, student, fee, coaching });
     } else if (status === 'pending' && dueDate) {

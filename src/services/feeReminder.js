@@ -6,21 +6,13 @@ function formatDate(value) {
 }
 
 function buildFeeReminderMessage({ student, fee, coaching, reminderType }) {
-  const heading = reminderType === 'overdue'
-    ? 'This is a reminder that the following fee is overdue.'
-    : 'This is a reminder for the upcoming fee due date.';
-
   return [
-    'Dear Parent,',
-    '',
-    heading,
-    '',
-    `Student: ${student.name} (${student.roll_no})`,
-    `Amount: Rs. ${Number(fee.amount || 0).toFixed(2)}`,
+    `🏫 ${coaching?.name || 'Coaching Institute'}`,
+    '💰 Fee Reminder',
+    `Student: ${student.name || student.roll_no}`,
+    `Amount Due: ₹${Number(fee.amount || 0).toFixed(2)}`,
     `Due Date: ${formatDate(fee.due_date)}`,
-    '',
-    `Regards,`,
-    coaching?.name || 'Coaching Institute',
+    'Reply FEES for details.',
   ].join('\n');
 }
 
