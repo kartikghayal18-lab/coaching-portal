@@ -30,8 +30,8 @@ const {
   sendWhatsAppNotification,
 } = require('./services/notificationService');
 const {
-  createFeeReceiptAndSend,
   findStudentByParentPhone,
+  generateFeeReceiptPdf,
   getCoachingByWhatsAppPhoneNumberId,
   handleParentAssistantMessage,
   sendMonthlyParentReports,
@@ -429,7 +429,7 @@ async function notifyAttendanceAbsence({ req, coachingId, student, attendanceDat
 async function getPaperDocumentUrl(req, paperId, studentId) {
   const paper = await get(
     `SELECT id, original_name, stored_name, storage_type, storage_key, public_url, content_type,
-            marks_obtained, max_marks, test_label
+            marks_obtained, max_marks, test_label, coaching_id
      FROM test_papers
      WHERE id = ? AND student_id = ?
      LIMIT 1`,
@@ -449,6 +449,23 @@ async function getPaperDocumentUrl(req, paperId, studentId) {
   };
 }
 
+async function getStudentDashboardAverage(coachingId, studentId, excludePaperId = null) {
+  const params = [coachingId, studentId];
+  let sql = `
+    SELECT id, original_name, upload_date, marks_obtained, max_marks, test_label
+    FROM test_papers
+    WHERE coaching_id = ? AND student_id = ?
+      AND marks_obtained IS NOT NULL AND max_marks IS NOT NULL
+  `;
+  if (excludePaperId) {
+    params.push(excludePaperId);
+    sql += ` AND id <> ?`;
+  }
+  sql += ` ORDER BY upload_date DESC LIMIT 20`;
+  const papers = await all(sql, params);
+  return buildProgressSummaryFromPapers(papers).marksSummary.marksPercent;
+}
+
 async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
   try {
     const isResult = type === 'test_result_published';
@@ -459,16 +476,36 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
 
     const studentPhone = student.whatsapp_number || student.contact_phone;
     const parentPhone = student.parent_whatsapp_number || student.guardian_phone;
+    const subject = document.paper?.test_label || document.paper?.original_name || 'Result';
+    const previousAverage = isResult
+      ? await getStudentDashboardAverage(document.paper.coaching_id, student.id, paperId)
+      : null;
+    const currentAverage = isResult
+      ? await getStudentDashboardAverage(document.paper.coaching_id, student.id)
+      : null;
+    const improvement = isResult
+      ? (Number(currentAverage || 0) - Number(previousAverage || 0)).toFixed(1)
+      : null;
     const caption = isResult
       ? [
-        `🏫 ${coaching?.name || 'Coaching Institute'}`,
-        '📊 New Result Available',
+        `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
+        '',
+        '📊 New Result Published',
+        '',
         `Student: ${student.name || student.roll_no}`,
+        '',
+        `Subject: ${subject}`,
+        '',
         `Marks: ${document.paper?.marks_obtained ?? '-'}/${document.paper?.max_marks ?? '-'}`,
-        'Result PDF attached.',
+        '',
+        `Previous Average: ${previousAverage}%`,
+        '',
+        `Current Average: ${currentAverage}%`,
+        '',
+        `Improvement: ${improvement}%`,
       ].join('\n')
       : [
-        `🏫 ${coaching?.name || 'Coaching Institute'}`,
+        `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
         '📚 New Test Paper Assigned',
         `Student: ${student.name || student.roll_no}`,
         'Paper PDF attached.',
@@ -484,8 +521,9 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
     );
 
     if (!parentPhone || parentPhone === studentPhone) {
-      if (isResult && parentPhone) {
-        await sendPerformanceGraph(student, parentPhone, coaching);
+      const graphPhone = studentPhone || parentPhone;
+      if (isResult && graphPhone) {
+        await sendPerformanceGraph(student, graphPhone, coaching, { sendMessage: false });
       }
       return studentResult;
     }
@@ -499,7 +537,10 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
       { type, eventKey: `${type}:parent:${student.id}:${paperId}` }
     );
     if (isResult) {
-      await sendPerformanceGraph(student, parentPhone, coaching);
+      if (studentPhone) {
+        await sendPerformanceGraph(student, studentPhone, coaching, { sendMessage: false });
+      }
+      await sendPerformanceGraph(student, parentPhone, coaching, { sendMessage: false });
     }
     return parentResult;
   } catch (error) {
@@ -3029,50 +3070,59 @@ app.get('/webhook/whatsapp', async (req, res) => {
 });
 
 app.post('/webhook/whatsapp', async (req, res) => {
-  console.log('WHATSAPP WEBHOOK HIT');
-  console.log(JSON.stringify(req.body, null, 2));
+  try {
+    console.log('WHATSAPP WEBHOOK HIT');
+    console.log(JSON.stringify(req.body, null, 2));
 
-  const entries = Array.isArray(req.body?.entry) ? req.body.entry : [];
-  for (const entry of entries) {
-    const changes = Array.isArray(entry?.changes) ? entry.changes : [];
-    for (const change of changes) {
-      const statuses = Array.isArray(change?.value?.statuses) ? change.value.statuses : [];
-      for (const statusEvent of statuses) {
-        await updateWhatsAppLogStatus(statusEvent.id, statusEvent.status);
-      }
+    const entries = Array.isArray(req.body?.entry) ? req.body.entry : [];
+    for (const entry of entries) {
+      const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+      for (const change of changes) {
+        const statuses = Array.isArray(change?.value?.statuses) ? change.value.statuses : [];
+        for (const statusEvent of statuses) {
+          try {
+            await updateWhatsAppLogStatus(statusEvent.id, statusEvent.status);
+          } catch (error) {
+            console.error('[WHATSAPP BOT ERROR]', error);
+          }
+        }
 
-      const incomingMessages = Array.isArray(change?.value?.messages) ? change.value.messages : [];
-      const phoneNumberId = String(change?.value?.metadata?.phone_number_id || '').trim();
-      if (incomingMessages.length && phoneNumberId) {
-        const coaching = await getCoachingByWhatsAppPhoneNumberId(phoneNumberId);
-        if (coaching) {
-          for (const incomingMessage of incomingMessages) {
-            const incomingText = String(incomingMessage?.text?.body || '').trim();
-            if (!incomingText) continue;
+        const incomingMessages = Array.isArray(change?.value?.messages) ? change.value.messages : [];
+        const phoneNumberId = String(change?.value?.metadata?.phone_number_id || '').trim();
+        if (incomingMessages.length && phoneNumberId) {
+          const coaching = await getCoachingByWhatsAppPhoneNumberId(phoneNumberId);
+          if (coaching) {
+            for (const incomingMessage of incomingMessages) {
+              const incomingText = String(incomingMessage?.text?.body || '').trim();
+              if (!incomingText) continue;
 
-            try {
-              const student = await findStudentByParentPhone(coaching.coaching_id, incomingMessage.from);
-              await handleParentAssistantMessage({
-                coaching,
-                student,
-                from: incomingMessage.from,
-                text: incomingText,
-              });
-            } catch (error) {
-              console.error('WhatsApp parent assistant failed', {
-                phoneNumberId,
-                from: incomingMessage.from,
-                error: error.message,
-              });
+              try {
+                const student = await findStudentByParentPhone(coaching.coaching_id, incomingMessage.from);
+                await handleParentAssistantMessage({
+                  coaching,
+                  student,
+                  from: incomingMessage.from,
+                  text: incomingText,
+                });
+              } catch (error) {
+                console.error('WhatsApp parent assistant failed', {
+                  phoneNumberId,
+                  from: incomingMessage.from,
+                  error: error.message,
+                });
+              }
             }
           }
         }
+
       }
-
     }
-  }
 
-  return res.sendStatus(200);
+    return res.status(200).send('EVENT_RECEIVED');
+  } catch (error) {
+    console.error('[WHATSAPP BOT ERROR]', error);
+    return res.status(200).send('EVENT_RECEIVED');
+  }
 });
 
 app.get('/cron/whatsapp/fee-reminders', async (req, res) => {
@@ -5423,7 +5473,15 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
   try {
     if (status === 'paid') {
       const feePaidMessage = [
-        'Payment received successfully. Receipt attached.',
+        `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
+        '',
+        '✅ Payment Received',
+        '',
+        `Student: ${student.name || student.roll_no}`,
+        '',
+        `Amount: ₹${amount.toFixed(2)}`,
+        '',
+        'Receipt attached below.',
       ].join('\n');
       const feeRecipients = [
         { key: 'student', phone: student.whatsapp_number || student.contact_phone },
@@ -5433,21 +5491,19 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
         && recipients.findIndex((item) => item.phone === recipient.phone) === index
       ));
 
+      const receipt = await generateFeeReceiptPdf(fee.id);
       for (const recipient of feeRecipients) {
-        await sendWhatsAppNotification({
-          studentId: student.id,
-          phone: recipient.phone,
-          type: 'fee_payment_confirmation',
-          message: feePaidMessage,
-          eventKey: `fee_payment_confirmation:${recipient.key}:${student.id}:${fee.id}`,
-        });
-        await createFeeReceiptAndSend({
-          student,
-          fee,
-          coaching,
-          phone: recipient.phone,
-          recipient: recipient.key,
-        });
+        await sendDocumentNotification(
+          student.id,
+          recipient.phone,
+          receipt.fileUrl,
+          receipt.fileName,
+          feePaidMessage,
+          {
+            type: 'fee_payment_confirmation',
+            eventKey: `fee_payment_confirmation:${recipient.key}:${student.id}:${fee.id}`,
+          }
+        );
       }
     } else if (status === 'overdue') {
       await sendOverdueReminder({ coachingId, student, fee, coaching });
@@ -5951,18 +6007,19 @@ async function startServer() {
     if (err.code === 'EADDRINUSE') {
       const suggestedPort = Number(PORT) + 1;
       console.error(`Port ${PORT} is already in use. Start with another port, for example: PORT=${suggestedPort} npm start`);
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     console.error('Startup server error', err);
-    process.exit(1);
+    process.exitCode = 1;
   });
 }
 
 if (require.main === module) {
   startServer().catch((err) => {
     console.error('Startup failed', err);
-    process.exit(1);
+    process.exitCode = 1;
   });
 }
 

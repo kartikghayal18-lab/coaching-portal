@@ -102,5 +102,6 @@ migrate()
   .then(() => db.close())
   .catch((err) => {
     console.error('Migration failed:', err.message);
-    db.close(() => process.exit(1));
+    process.exitCode = 1;
+    db.close();
   });

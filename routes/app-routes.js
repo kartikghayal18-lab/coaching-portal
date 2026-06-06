@@ -4852,18 +4852,19 @@ async function startServer() {
     if (err.code === 'EADDRINUSE') {
       const suggestedPort = Number(PORT) + 1;
       console.error(`Port ${PORT} is already in use. Start with another port, for example: PORT=${suggestedPort} npm start`);
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     console.error('Startup server error', err);
-    process.exit(1);
+    process.exitCode = 1;
   });
 }
 
 if (require.main === module) {
   startServer().catch((err) => {
     console.error('Startup failed', err);
-    process.exit(1);
+    process.exitCode = 1;
   });
 }
 

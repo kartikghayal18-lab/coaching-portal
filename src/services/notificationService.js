@@ -32,12 +32,32 @@ async function ensureNotificationSchema() {
       coaching_id INTEGER,
       student_id INTEGER NOT NULL,
       type VARCHAR(80) NOT NULL,
+      event_type VARCHAR(80),
       message TEXT NOT NULL,
+      attachment_url TEXT,
       status VARCHAR(40) NOT NULL DEFAULT 'pending',
       phone_number VARCHAR(20),
+      error_message TEXT,
       event_key VARCHAR(220) UNIQUE,
       sent_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await run(`ALTER TABLE notification_logs ADD COLUMN IF NOT EXISTS event_type VARCHAR(80)`);
+  await run(`ALTER TABLE notification_logs ADD COLUMN IF NOT EXISTS attachment_url TEXT`);
+  await run(`ALTER TABLE notification_logs ADD COLUMN IF NOT EXISTS error_message TEXT`);
+  await run(`UPDATE notification_logs SET event_type = type WHERE event_type IS NULL`);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS whatsapp_parent_sessions (
+      id SERIAL PRIMARY KEY,
+      coaching_id INTEGER,
+      student_id INTEGER,
+      phone_number VARCHAR(20) NOT NULL,
+      state VARCHAR(80) NOT NULL DEFAULT 'menu',
+      last_message TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (coaching_id, phone_number)
     )
   `);
 
@@ -122,11 +142,12 @@ async function sendWhatsAppNotification({
 
   const logResult = await run(
     `INSERT INTO notification_logs (
-      coaching_id, student_id, type, message, status, phone_number, event_key
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      coaching_id, student_id, type, event_type, message, status, phone_number, event_key
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       student.coaching_id,
       student.id,
+      notificationType,
       notificationType,
       notificationMessage,
       'pending',
@@ -138,8 +159,8 @@ async function sendWhatsAppNotification({
 
   if (!resolvedPhone) {
     await run(
-      `UPDATE notification_logs SET status = ? WHERE id = ?`,
-      ['skipped', logId]
+      `UPDATE notification_logs SET status = ?, error_message = ? WHERE id = ?`,
+      ['skipped', 'WhatsApp number missing', logId]
     );
     return { ok: false, skipped: true, reason: 'WhatsApp number missing', logId };
   }
@@ -160,13 +181,19 @@ async function sendWhatsAppNotification({
     );
     return { ok: true, logId, metaMessageId: result.metaMessageId };
   } catch (error) {
+    console.error('WhatsApp text notification failed', {
+      studentId: student.id,
+      type: notificationType,
+      phone: resolvedPhone,
+      error: error.message,
+    });
     await run(
       `UPDATE notification_logs
-       SET status = ?
+       SET status = ?, error_message = ?
        WHERE id = ?`,
-      ['failed', logId]
+      ['failed', error.message, logId]
     );
-    throw error;
+    return { ok: false, failed: true, error: error.message, logId };
   }
 }
 
@@ -218,13 +245,15 @@ async function sendDocumentNotification(
 
   const logResult = await run(
     `INSERT INTO notification_logs (
-      coaching_id, student_id, type, message, status, phone_number, event_key
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      coaching_id, student_id, type, event_type, message, attachment_url, status, phone_number, event_key
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       student.coaching_id,
       student.id,
       notificationType,
+      notificationType,
       notificationMessage || fileName || fileUrl,
+      fileUrl || null,
       'pending',
       resolvedPhone || null,
       notificationEventKey,
@@ -233,12 +262,12 @@ async function sendDocumentNotification(
   const logId = logResult.lastID;
 
   if (!resolvedPhone) {
-    await run(`UPDATE notification_logs SET status = ? WHERE id = ?`, ['skipped', logId]);
+    await run(`UPDATE notification_logs SET status = ?, error_message = ? WHERE id = ?`, ['skipped', 'WhatsApp number missing', logId]);
     return { ok: false, skipped: true, reason: 'WhatsApp number missing', logId };
   }
 
   if (!fileUrl) {
-    await run(`UPDATE notification_logs SET status = ? WHERE id = ?`, ['failed', logId]);
+    await run(`UPDATE notification_logs SET status = ?, error_message = ? WHERE id = ?`, ['failed', 'Document URL missing', logId]);
     return { ok: false, skipped: true, reason: 'Document URL missing', logId };
   }
 
@@ -260,13 +289,20 @@ async function sendDocumentNotification(
     );
     return { ok: true, logId, metaMessageId: result.metaMessageId };
   } catch (error) {
+    console.error('WhatsApp document notification failed', {
+      studentId: student.id,
+      type: notificationType,
+      phone: resolvedPhone,
+      fileUrl,
+      error: error.message,
+    });
     await run(
       `UPDATE notification_logs
-       SET status = ?
+       SET status = ?, error_message = ?
        WHERE id = ?`,
-      ['failed', logId]
+      ['failed', error.message, logId]
     );
-    throw error;
+    return { ok: false, failed: true, error: error.message, logId };
   }
 }
 
