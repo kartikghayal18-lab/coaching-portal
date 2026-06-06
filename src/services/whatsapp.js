@@ -33,6 +33,11 @@ function normalizeSettings(row = null) {
     phoneNumberId: String(row?.phone_number_id || env.phoneNumberId || '').trim(),
     businessAccountId: String(row?.business_account_id || env.businessAccountId || '').trim(),
     verifyToken: String(row?.verify_token || env.verifyToken || '').trim(),
+    attendanceAlertsEnabled: row?.attendance_alerts_enabled !== false,
+    feeAlertsEnabled: row?.fee_alerts_enabled !== false,
+    resultAlertsEnabled: row?.result_alerts_enabled !== false,
+    testPaperAlertsEnabled: row?.test_paper_alerts_enabled !== false,
+    noticeAlertsEnabled: row?.notice_alerts_enabled !== false,
   };
 }
 
@@ -47,10 +52,21 @@ async function ensureWhatsAppSchema() {
       phone_number_id VARCHAR(80),
       business_account_id VARCHAR(80),
       verify_token VARCHAR(160),
+      attendance_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      fee_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      result_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      test_paper_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      notice_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE,
       updated_by INTEGER,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  await run(`ALTER TABLE whatsapp_settings ADD COLUMN IF NOT EXISTS attendance_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
+  await run(`ALTER TABLE whatsapp_settings ADD COLUMN IF NOT EXISTS fee_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
+  await run(`ALTER TABLE whatsapp_settings ADD COLUMN IF NOT EXISTS result_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
+  await run(`ALTER TABLE whatsapp_settings ADD COLUMN IF NOT EXISTS test_paper_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
+  await run(`ALTER TABLE whatsapp_settings ADD COLUMN IF NOT EXISTS notice_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
 
   await run(`
     CREATE TABLE IF NOT EXISTS whatsapp_logs (
@@ -87,14 +103,21 @@ async function getWhatsAppSettings(coachingId) {
 async function saveWhatsAppSettings(coachingId, settings, updatedBy = null) {
   await run(
     `INSERT INTO whatsapp_settings (
-      coaching_id, access_token, phone_number_id, business_account_id, verify_token, updated_by, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      coaching_id, access_token, phone_number_id, business_account_id, verify_token,
+      attendance_alerts_enabled, fee_alerts_enabled, result_alerts_enabled, test_paper_alerts_enabled, notice_alerts_enabled,
+      updated_by, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT (coaching_id)
     DO UPDATE SET
       access_token = EXCLUDED.access_token,
       phone_number_id = EXCLUDED.phone_number_id,
       business_account_id = EXCLUDED.business_account_id,
       verify_token = EXCLUDED.verify_token,
+      attendance_alerts_enabled = EXCLUDED.attendance_alerts_enabled,
+      fee_alerts_enabled = EXCLUDED.fee_alerts_enabled,
+      result_alerts_enabled = EXCLUDED.result_alerts_enabled,
+      test_paper_alerts_enabled = EXCLUDED.test_paper_alerts_enabled,
+      notice_alerts_enabled = EXCLUDED.notice_alerts_enabled,
       updated_by = EXCLUDED.updated_by,
       updated_at = CURRENT_TIMESTAMP`,
     [
@@ -103,6 +126,11 @@ async function saveWhatsAppSettings(coachingId, settings, updatedBy = null) {
       String(settings.phoneNumberId || '').trim(),
       String(settings.businessAccountId || '').trim(),
       String(settings.verifyToken || '').trim(),
+      settings.attendanceAlertsEnabled !== false,
+      settings.feeAlertsEnabled !== false,
+      settings.resultAlertsEnabled !== false,
+      settings.testPaperAlertsEnabled !== false,
+      settings.noticeAlertsEnabled !== false,
       updatedBy,
     ]
   );

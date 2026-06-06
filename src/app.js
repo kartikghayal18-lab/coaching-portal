@@ -18,13 +18,16 @@ const {
   getRecentWhatsAppLogs,
   updateWhatsAppLogStatus,
   sendTextMessage,
-  sendDocumentMessage,
-  sendBulkMessages,
 } = require('./services/whatsapp');
 const {
   sendDueFeeReminder,
   sendOverdueReminder,
 } = require('./services/feeReminder');
+const {
+  ensureNotificationSchema,
+  getRecentNotificationLogs,
+  sendWhatsAppNotification,
+} = require('./services/notificationService');
 
 console.log('[BOOT] Starting app');
 console.log('[BOOT] DATABASE_URL present:', Boolean(process.env.DATABASE_URL));
@@ -56,7 +59,7 @@ const TWO_FACTOR_AUTH_POST_PATHS = new Set([
   '/auth/2fa/verify',
 ]);
 const PUBLIC_WEBHOOK_POST_PATHS = new Set(['/webhook/whatsapp']);
-const DEFAULT_FEE_REMINDER_DAYS_BEFORE = 3;
+const DEFAULT_FEE_REMINDER_DAYS_BEFORE = 7;
 
 function resolvePort(value) {
   const raw = String(value || '').trim();
@@ -86,7 +89,7 @@ function getCurrentMonthValue() {
 
 const PORT = process.env.PORT || 3000;
 const OWNER_SECTIONS = new Set(['overview', 'coachings', 'trial-requests']);
-const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes', 'whatsapp', 'settings']);
+const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes', 'whatsapp', 'notifications', 'settings']);
 const ALLOWED_UPLOAD_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/jpg']);
 const DEFAULT_UPLOAD_LIMIT_BYTES = isVercel ? 4 * 1024 * 1024 : 25 * 1024 * 1024;
 const UPLOAD_FILE_SIZE_LIMIT_BYTES = Number(process.env.UPLOAD_FILE_SIZE_LIMIT_BYTES || DEFAULT_UPLOAD_LIMIT_BYTES);
@@ -365,6 +368,11 @@ function buildWhatsAppSettingsView(settings) {
     businessAccountId: settings.businessAccountId || '',
     verifyTokenSaved: Boolean(settings.verifyToken),
     hasRequiredSendConfig: Boolean(settings.accessToken && settings.phoneNumberId),
+    attendanceAlertsEnabled: settings.attendanceAlertsEnabled !== false,
+    feeAlertsEnabled: settings.feeAlertsEnabled !== false,
+    resultAlertsEnabled: settings.resultAlertsEnabled !== false,
+    testPaperAlertsEnabled: settings.testPaperAlertsEnabled !== false,
+    noticeAlertsEnabled: settings.noticeAlertsEnabled !== false,
   };
 }
 
@@ -382,14 +390,13 @@ function buildAbsenceMessage({ student, attendanceDate, coaching }) {
 }
 
 async function notifyAttendanceAbsence({ req, coachingId, student, attendanceDate, coaching }) {
-  if (!student?.guardian_phone) return { skipped: true, reason: 'Guardian phone missing' };
-
   try {
-    return await sendTextMessage({
-      coachingId,
+    return await sendWhatsAppNotification({
       studentId: student.id,
-      to: student.guardian_phone,
-      message: buildAbsenceMessage({ student, attendanceDate, coaching }),
+      phone: student.parent_whatsapp_number || student.guardian_phone,
+      type: 'attendance_absent',
+      message: 'Your child was marked absent today.',
+      eventKey: `attendance_absent:${student.id}:${attendanceDate}`,
     });
   } catch (error) {
     console.error('WhatsApp absence notification failed', {
@@ -401,38 +408,36 @@ async function notifyAttendanceAbsence({ req, coachingId, student, attendanceDat
   }
 }
 
-async function notifyPaperResult({ req, coachingId, student, paperId, testLabel, fileName, coaching }) {
-  if (!student?.guardian_phone || !paperId) return { skipped: true, reason: 'Guardian phone or paper missing' };
-
+async function notifyPaperEvent({ student, paperId, type }) {
   try {
-    const paper = await get(`SELECT * FROM test_papers WHERE id = ? AND coaching_id = ? LIMIT 1`, [paperId, coachingId]);
-    if (!paper) return { skipped: true, reason: 'Paper record missing' };
+    const isResult = type === 'test_result_published';
+    const studentPhone = student.whatsapp_number || student.contact_phone;
+    const parentPhone = student.parent_whatsapp_number || student.guardian_phone;
+    const message = isResult
+      ? 'A new test result is available in the student dashboard.'
+      : 'New test paper has been assigned. Login to your student dashboard to view it.';
 
-    const access = await getPaperAccess(paper, 'attachment');
-    const downloadUrl = access?.type === 'redirect'
-      ? access.url
-      : `${getRequestBaseUrl(req)}/papers/${paperId}/download`;
-    const caption = [
-      `Dear Parent, ${student.name || student.roll_no}'s result/paper is available.`,
-      '',
-      `Student: ${student.name || student.roll_no}`,
-      `Roll No: ${student.roll_no}`,
-      `Test: ${testLabel || paper.test_label || paper.original_name}`,
-      '',
-      `Regards,`,
-      coaching?.name || 'Coaching Institute',
-    ].join('\n');
-
-    return await sendDocumentMessage({
-      coachingId,
+    const studentResult = await sendWhatsAppNotification({
       studentId: student.id,
-      to: student.guardian_phone,
-      documentUrl: downloadUrl,
-      filename: fileName || paper.original_name || 'result.pdf',
-      caption,
+      phone: studentPhone,
+      type,
+      message,
+      eventKey: `${type}:student:${student.id}:${paperId}`,
+    });
+
+    if (!isResult || !parentPhone || parentPhone === studentPhone) {
+      return studentResult;
+    }
+
+    return await sendWhatsAppNotification({
+      studentId: student.id,
+      phone: parentPhone,
+      type,
+      message,
+      eventKey: `${type}:parent:${student.id}:${paperId}`,
     });
   } catch (error) {
-    console.error('WhatsApp paper notification failed', {
+    console.error('WhatsApp paper/result notification failed', {
       studentId: student.id,
       rollNo: student.roll_no,
       paperId,
@@ -446,7 +451,7 @@ async function getFeeReminderContext(coachingId, feeId) {
   const row = await get(
     `SELECT
        f.id AS fee_id, f.amount, f.due_date, f.payment_date, f.status, f.notes,
-       u.id AS student_id, u.roll_no, u.name, u.guardian_phone,
+       u.id AS student_id, u.roll_no, u.name, u.contact_phone, u.guardian_phone, u.whatsapp_number, u.parent_whatsapp_number,
        cc.name AS coaching_name
      FROM fees f
      JOIN users u ON u.id = f.student_id
@@ -470,7 +475,10 @@ async function getFeeReminderContext(coachingId, feeId) {
       id: row.student_id,
       roll_no: row.roll_no,
       name: row.name,
+      contact_phone: row.contact_phone,
       guardian_phone: row.guardian_phone,
+      whatsapp_number: row.whatsapp_number,
+      parent_whatsapp_number: row.parent_whatsapp_number,
     },
     coaching: { name: row.coaching_name },
   };
@@ -499,14 +507,15 @@ async function sendScheduledFeeReminders({ coachingId = null, daysBefore = DEFAU
       u.roll_no,
       u.name,
       u.guardian_phone,
+      u.parent_whatsapp_number,
       cc.id AS coaching_id,
       cc.name AS coaching_name
     FROM fees f
     JOIN users u ON u.id = f.student_id
     JOIN coaching_classes cc ON cc.id = f.coaching_id
     WHERE f.status <> 'paid'
-      AND u.guardian_phone IS NOT NULL
-      AND TRIM(u.guardian_phone) <> ''
+      AND COALESCE(u.parent_whatsapp_number, u.guardian_phone) IS NOT NULL
+      AND TRIM(COALESCE(u.parent_whatsapp_number, u.guardian_phone, '')) <> ''
       AND f.due_date IS NOT NULL
       AND (
         CAST(f.due_date AS DATE) < CURRENT_DATE
@@ -548,6 +557,7 @@ async function sendScheduledFeeReminders({ coachingId = null, daysBefore = DEFAU
         roll_no: row.roll_no,
         name: row.name,
         guardian_phone: row.guardian_phone,
+        parent_whatsapp_number: row.parent_whatsapp_number,
       },
       fee: {
         id: row.fee_id,
@@ -559,12 +569,17 @@ async function sendScheduledFeeReminders({ coachingId = null, daysBefore = DEFAU
     };
 
     try {
+      let result;
       if (String(row.status || '').toLowerCase() === 'overdue' || new Date(row.due_date) < new Date(new Date().toDateString())) {
-        await sendOverdueReminder(context);
+        result = await sendOverdueReminder(context);
       } else {
-        await sendDueFeeReminder(context);
+        result = await sendDueFeeReminder(context);
       }
-      summary.sent += 1;
+      if (result?.skipped) {
+        summary.skipped += 1;
+      } else {
+        summary.sent += 1;
+      }
     } catch (error) {
       console.error('Scheduled WhatsApp fee reminder failed', {
         feeId: row.fee_id,
@@ -1593,7 +1608,8 @@ async function cleanupDuplicateAnswerSubmissions() {
 
 async function getStudentDashboardPayload(coachingId, studentId) {
   const profile = await get(
-    `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course, u.contact_phone, u.email,
+    `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course,
+            u.contact_phone, u.guardian_phone, u.whatsapp_number, u.parent_whatsapp_number, u.email,
             b.name AS batch_name
      FROM users u
      LEFT JOIN batches b ON b.id = u.batch_id
@@ -2029,6 +2045,7 @@ async function deleteCoachingData(coachingId) {
   await withTransaction(async (tx) => {
     await tx.run(`DELETE FROM attendance WHERE coaching_id = ?`, [coachingId]);
     await tx.run(`DELETE FROM fees WHERE coaching_id = ?`, [coachingId]);
+    await tx.run(`DELETE FROM notification_logs WHERE coaching_id = ?`, [coachingId]);
     await tx.run(`DELETE FROM whatsapp_logs WHERE coaching_id = ?`, [coachingId]);
     await tx.run(`DELETE FROM whatsapp_settings WHERE coaching_id = ?`, [coachingId]);
     await tx.run(`DELETE FROM batch_notes WHERE coaching_id = ?`, [coachingId]);
@@ -2990,26 +3007,6 @@ app.post('/webhook/whatsapp', async (req, res) => {
         await updateWhatsAppLogStatus(statusEvent.id, statusEvent.status);
       }
 
-      const incomingMessages = Array.isArray(change?.value?.messages) ? change.value.messages : [];
-      const phoneNumberId = String(change?.value?.metadata?.phone_number_id || '').trim();
-      const whatsappSetting = phoneNumberId
-        ? await get(`SELECT coaching_id FROM whatsapp_settings WHERE phone_number_id = ? LIMIT 1`, [phoneNumberId])
-        : null;
-
-      for (const incomingMessage of incomingMessages) {
-        console.log('INCOMING MESSAGE DETECTED');
-        try {
-          console.log('ABOUT TO SEND REPLY');
-          await sendTextMessage({
-            coachingId: whatsappSetting?.coaching_id || null,
-            to: incomingMessage.from,
-            message: 'Thanks for your message. We have received it and will get back to you soon.',
-          });
-          console.log('REPLY SENT SUCCESSFULLY');
-        } catch (error) {
-          console.error('REPLY FAILED', error);
-        }
-      }
     }
   }
 
@@ -3298,6 +3295,34 @@ app.post('/admin/settings/profile', requireCoachingAdmin, async (req, res) => {
   return res.redirect('/admin/dashboard?section=settings');
 });
 
+app.post('/admin/settings/whatsapp-notifications', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const existing = await getWhatsAppSettings(coachingId);
+
+  await saveWhatsAppSettings(coachingId, {
+    ...existing,
+    attendanceAlertsEnabled: req.body.attendanceAlertsEnabled === 'on',
+    feeAlertsEnabled: req.body.feeAlertsEnabled === 'on',
+    resultAlertsEnabled: req.body.resultAlertsEnabled === 'on',
+    testPaperAlertsEnabled: req.body.testPaperAlertsEnabled === 'on',
+    noticeAlertsEnabled: req.body.noticeAlertsEnabled === 'on',
+  }, req.session.user.id);
+
+  await auditActor(req, 'whatsapp_notification_settings_updated', {
+    targetType: 'coaching',
+    targetId: coachingId,
+    details: {
+      attendanceAlertsEnabled: req.body.attendanceAlertsEnabled === 'on',
+      feeAlertsEnabled: req.body.feeAlertsEnabled === 'on',
+      resultAlertsEnabled: req.body.resultAlertsEnabled === 'on',
+      testPaperAlertsEnabled: req.body.testPaperAlertsEnabled === 'on',
+      noticeAlertsEnabled: req.body.noticeAlertsEnabled === 'on',
+    },
+  });
+  req.session.flash = { type: 'success', text: 'WhatsApp notification settings updated.' };
+  return res.redirect('/admin/dashboard?section=settings');
+});
+
 app.post('/admin/whatsapp/settings', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const existing = await getWhatsAppSettings(coachingId);
@@ -3316,6 +3341,11 @@ app.post('/admin/whatsapp/settings', requireCoachingAdmin, async (req, res) => {
     phoneNumberId,
     businessAccountId,
     verifyToken,
+    attendanceAlertsEnabled: existing.attendanceAlertsEnabled,
+    feeAlertsEnabled: existing.feeAlertsEnabled,
+    resultAlertsEnabled: existing.resultAlertsEnabled,
+    testPaperAlertsEnabled: existing.testPaperAlertsEnabled,
+    noticeAlertsEnabled: existing.noticeAlertsEnabled,
   }, req.session.user.id);
 
   await auditActor(req, 'whatsapp_settings_updated', {
@@ -3366,11 +3396,11 @@ app.post('/admin/whatsapp/broadcast', requireCoachingAdmin, async (req, res) => 
 
   const params = [coachingId];
   let recipientSql = `
-    SELECT id, roll_no, name, guardian_phone
+    SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
     FROM users
     WHERE coaching_id = ? AND role = 'student'
-      AND guardian_phone IS NOT NULL
-      AND TRIM(guardian_phone) <> ''
+      AND COALESCE(whatsapp_number, contact_phone, parent_whatsapp_number, guardian_phone) IS NOT NULL
+      AND TRIM(COALESCE(whatsapp_number, contact_phone, parent_whatsapp_number, guardian_phone, '')) <> ''
   `;
 
   if (targetMode === 'batch') {
@@ -3392,29 +3422,44 @@ app.post('/admin/whatsapp/broadcast', requireCoachingAdmin, async (req, res) => 
   recipientSql += ` ORDER BY roll_no ASC LIMIT 500`;
   const recipients = await all(recipientSql, params);
   if (!recipients.length) {
-    req.session.flash = { type: 'error', text: 'No students with guardian phone numbers matched this broadcast target.' };
+    req.session.flash = { type: 'error', text: 'No students with WhatsApp numbers matched this broadcast target.' };
     return res.redirect('/admin/dashboard?section=whatsapp');
   }
 
-  const summary = await sendBulkMessages({
-    coachingId,
-    recipients: recipients.map((student) => ({
-      studentId: student.id,
-      phoneNumber: student.guardian_phone,
-      rollNo: student.roll_no,
-      name: student.name,
-    })),
-    message,
-  });
+  const messageHash = crypto.createHash('sha256').update(message).digest('hex').slice(0, 24);
+  const summary = { sent: 0, failed: 0, skipped: 0 };
+
+  for (const student of recipients) {
+    try {
+      const result = await sendWhatsAppNotification({
+        studentId: student.id,
+        phone: student.whatsapp_number || student.contact_phone || student.parent_whatsapp_number || student.guardian_phone,
+        type: 'announcement',
+        message,
+        eventKey: `announcement:${student.id}:${messageHash}:${new Date().toISOString().slice(0, 10)}`,
+      });
+      if (result?.skipped) {
+        summary.skipped += 1;
+      } else {
+        summary.sent += 1;
+      }
+    } catch (error) {
+      console.error('WhatsApp announcement notification failed', {
+        studentId: student.id,
+        error: error.message,
+      });
+      summary.failed += 1;
+    }
+  }
 
   await auditActor(req, 'whatsapp_broadcast_sent', {
     targetType: 'coaching',
     targetId: coachingId,
-    details: { targetMode, sent: summary.sent, failed: summary.failed },
+    details: { targetMode, sent: summary.sent, skipped: summary.skipped, failed: summary.failed },
   });
   req.session.flash = {
     type: summary.failed ? 'warning' : 'success',
-    text: `Broadcast finished. Sent: ${summary.sent}, Failed: ${summary.failed}.`,
+    text: `Broadcast finished. Sent: ${summary.sent}, Skipped: ${summary.skipped}, Failed: ${summary.failed}.`,
   };
   return res.redirect('/admin/dashboard?section=whatsapp');
 });
@@ -3919,9 +3964,10 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const batches = await getBatchesForCoaching(coachingId);
   const whatsappSettings = buildWhatsAppSettingsView(await getWhatsAppSettings(coachingId));
   const whatsappLogs = await getRecentWhatsAppLogs(coachingId, 25);
+  const notificationLogs = await getRecentNotificationLogs(coachingId, 100);
 
   const students = await all(
-    `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course, u.contact_phone, u.guardian_phone, u.email, u.created_at,
+    `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course, u.contact_phone, u.guardian_phone, u.whatsapp_number, u.parent_whatsapp_number, u.email, u.created_at,
             u.is_retained_record, u.retention_source_batch_id,
             b.name AS batch_name, b.status AS batch_status, b.completed_at AS batch_completed_at, b.is_retention_batch
      FROM users u
@@ -3992,7 +4038,9 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   );
 
   const fees = await all(
-    `SELECT f.id, f.amount, f.due_date, f.payment_date, f.status, f.notes, u.id AS student_id, u.roll_no, u.name, u.guardian_phone, u.batch_id, u.standard, u.course, b.name AS batch_name
+    `SELECT f.id, f.amount, f.due_date, f.payment_date, f.status, f.notes,
+            u.id AS student_id, u.roll_no, u.name, u.guardian_phone, u.parent_whatsapp_number, u.batch_id, u.standard, u.course,
+            b.name AS batch_name
      FROM fees f
      JOIN users u ON u.id = f.student_id
      LEFT JOIN batches b ON b.id = u.batch_id
@@ -4114,6 +4162,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     adminProfile,
     whatsappSettings,
     whatsappLogs,
+    notificationLogs,
     subscriptionState,
     subscriptionNotice: subscriptionState.notice,
     students,
@@ -4154,6 +4203,8 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const name = (req.body.name || '').trim() || rollNo;
   const contactPhone = (req.body.contactPhone || '').trim();
   const guardianPhone = (req.body.guardianPhone || '').trim();
+  const whatsappNumber = (req.body.whatsappNumber || contactPhone).trim();
+  const parentWhatsappNumber = (req.body.parentWhatsappNumber || guardianPhone).trim();
   const email = (req.body.email || '').trim().toLowerCase();
   const submittedPassword = (req.body.password || '').trim();
   const password = submittedPassword || rollNo;
@@ -4200,8 +4251,8 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const passwordHash = await bcrypt.hash(password, 10);
   await run(
     `INSERT INTO users (
-      coaching_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, guardian_phone, email, password_hash
-    ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      coaching_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number, email, password_hash
+    ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
       rollNo,
@@ -4211,6 +4262,8 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
       batch.course || null,
       contactPhone || null,
       guardianPhone || null,
+      whatsappNumber || null,
+      parentWhatsappNumber || null,
       email || null,
       passwordHash,
     ]
@@ -4226,6 +4279,99 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
     targetType: 'student',
     details: { rollNo, batchId: batch.id, batchName: batch.name },
   });
+  return res.redirect('/admin/dashboard?section=students');
+});
+
+app.post('/admin/students/import', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
+  const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
+  const csv = String(req.body.studentsCsv || '').trim();
+
+  if (!Number.isInteger(batchId) || batchId <= 0) {
+    req.session.flash = { type: 'error', text: 'Please select a batch for imported students' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  const batch = await getBatchForCoaching(coachingId, batchId);
+  if (!batch) {
+    req.session.flash = { type: 'error', text: 'Selected batch was not found' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  const rows = csv
+    .split(/\r?\n/)
+    .map((line) => line.split(',').map((cell) => cell.trim()))
+    .filter((cells) => cells.some(Boolean));
+
+  if (!rows.length) {
+    req.session.flash = { type: 'error', text: 'Paste at least one student row to import' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  const currentStudents = await get(
+    `SELECT COUNT(*) AS total_students FROM users WHERE coaching_id = ? AND role = 'student'`,
+    [coachingId]
+  );
+  const studentUsage = getStudentUsage(Number(currentStudents?.total_students || 0), coaching);
+  if (studentUsage.limit !== null && rows.length > studentUsage.remaining) {
+    req.session.flash = { type: 'error', text: `Import exceeds remaining student limit (${studentUsage.remaining}).` };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  const summary = { created: 0, skipped: 0 };
+  for (const cells of rows) {
+    const [rollNoRaw, nameRaw, whatsappRaw, parentRaw, emailRaw] = cells;
+    const rollNo = String(rollNoRaw || '').trim();
+    if (!rollNo || rollNo.toLowerCase() === 'roll') {
+      summary.skipped += 1;
+      continue;
+    }
+
+    const existing = await get(
+      `SELECT id FROM users WHERE coaching_id = ? AND roll_no = ? LIMIT 1`,
+      [coachingId, rollNo]
+    );
+    if (existing) {
+      summary.skipped += 1;
+      continue;
+    }
+
+    const name = String(nameRaw || '').trim() || rollNo;
+    const whatsappNumber = String(whatsappRaw || '').trim();
+    const parentWhatsappNumber = String(parentRaw || '').trim();
+    const email = String(emailRaw || '').trim().toLowerCase();
+    const passwordHash = await bcrypt.hash(rollNo, 10);
+
+    await run(
+      `INSERT INTO users (
+        coaching_id, role, is_owner, username, roll_no, name, batch_id, standard, course,
+        contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number, email, password_hash
+      ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        coachingId,
+        rollNo,
+        name,
+        batch.id,
+        batch.standard || null,
+        batch.course || null,
+        whatsappNumber || null,
+        parentWhatsappNumber || null,
+        whatsappNumber || null,
+        parentWhatsappNumber || null,
+        email || null,
+        passwordHash,
+      ]
+    );
+    summary.created += 1;
+  }
+
+  await auditActor(req, 'students_imported', {
+    targetType: 'batch',
+    targetId: batch.id,
+    details: { batchName: batch.name, created: summary.created, skipped: summary.skipped },
+  });
+  req.session.flash = { type: 'success', text: `Import complete. Created: ${summary.created}, Skipped: ${summary.skipped}.` };
   return res.redirect('/admin/dashboard?section=students');
 });
 
@@ -4582,6 +4728,54 @@ app.get('/admin/students/:id/overview', requireCoachingAdmin, async (req, res) =
   req.session.flash = null;
 });
 
+app.post('/admin/students/:id/update', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const studentId = Number(req.params.id);
+  const student = await get(
+    `SELECT id
+     FROM users
+     WHERE id = ? AND coaching_id = ? AND role = 'student'
+     LIMIT 1`,
+    [studentId, coachingId]
+  );
+
+  if (!student) {
+    req.session.flash = { type: 'error', text: 'Student not found' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  const name = String(req.body.name || '').trim();
+  const contactPhone = String(req.body.contactPhone || '').trim();
+  const guardianPhone = String(req.body.guardianPhone || '').trim();
+  const whatsappNumber = String(req.body.whatsappNumber || contactPhone).trim();
+  const parentWhatsappNumber = String(req.body.parentWhatsappNumber || guardianPhone).trim();
+  const email = String(req.body.email || '').trim().toLowerCase();
+
+  await run(
+    `UPDATE users
+     SET name = ?, contact_phone = ?, guardian_phone = ?, whatsapp_number = ?, parent_whatsapp_number = ?, email = ?
+     WHERE id = ? AND coaching_id = ? AND role = 'student'`,
+    [
+      name || null,
+      contactPhone || null,
+      guardianPhone || null,
+      whatsappNumber || null,
+      parentWhatsappNumber || null,
+      email || null,
+      studentId,
+      coachingId,
+    ]
+  );
+
+  await auditActor(req, 'student_updated', {
+    targetType: 'student',
+    targetId: studentId,
+    details: { contactPhone, guardianPhone, whatsappNumber, parentWhatsappNumber },
+  });
+  req.session.flash = { type: 'success', text: 'Student details updated.' };
+  return res.redirect(`/admin/students/${studentId}/overview`);
+});
+
 app.post('/admin/students/:id/reset-password', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const studentId = Number(req.params.id);
@@ -4634,6 +4828,8 @@ app.post('/admin/students/:id/delete', requireCoachingAdmin, async (req, res) =>
 
   await run(`DELETE FROM attendance WHERE coaching_id = ? AND student_id = ?`, [coachingId, studentId]);
   await run(`DELETE FROM fees WHERE coaching_id = ? AND student_id = ?`, [coachingId, studentId]);
+  await run(`DELETE FROM notification_logs WHERE coaching_id = ? AND student_id = ?`, [coachingId, studentId]);
+  await run(`DELETE FROM whatsapp_logs WHERE coaching_id = ? AND student_id = ?`, [coachingId, studentId]);
   await run(`DELETE FROM test_papers WHERE coaching_id = ? AND student_id = ?`, [coachingId, studentId]);
   await run(`DELETE FROM users WHERE id = ? AND coaching_id = ?`, [studentId, coachingId]);
 
@@ -4670,7 +4866,7 @@ app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('pape
   }
 
   const student = await get(
-    `SELECT id, roll_no, name, guardian_phone, batch_id, standard, course
+    `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number, batch_id, standard, course
      FROM users
      WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
     [coachingId, rollNo]
@@ -4731,14 +4927,10 @@ app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('pape
     details: { rollNo: student.roll_no, fileName: file.originalname, status: result.status },
   });
   if (result.status !== 'duplicate') {
-    await notifyPaperResult({
-      req,
-      coachingId,
+    await notifyPaperEvent({
       student,
       paperId: result.paperId,
-      testLabel: testLabel || file.originalname,
-      fileName: file.originalname,
-      coaching,
+      type: marksObtained !== null && maxMarks !== null ? 'test_result_published' : 'test_paper_upload',
     });
   }
   req.session.flash = { type: 'success', text: textByStatus[result.status] || `Paper uploaded for ${student.roll_no}` };
@@ -4766,7 +4958,7 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
     }
 
     const student = await get(
-      `SELECT id, roll_no, name, guardian_phone FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
+      `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
       [coachingId, paperMeta.rollNo]
     );
 
@@ -4794,14 +4986,10 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
       } else {
         report.assigned += 1;
         report.details.push({ file: file.originalname, reason: `Assigned to roll number "${paperMeta.rollNo}"` });
-        await notifyPaperResult({
-          req,
-          coachingId,
+        await notifyPaperEvent({
           student,
           paperId: result.paperId,
-          testLabel: paperMeta.testLabel || file.originalname,
-          fileName: file.originalname,
-          coaching,
+          type: paperMeta.marksObtained !== null && paperMeta.maxMarks !== null ? 'test_result_published' : 'test_paper_upload',
         });
       }
     } catch (err) {
@@ -4989,7 +5177,7 @@ app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
   const notes = (req.body.notes || '').trim();
 
   const student = await get(
-    `SELECT id, roll_no, name, guardian_phone FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
+    `SELECT id, roll_no, name, guardian_phone, parent_whatsapp_number FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
     [coachingId, rollNo]
   );
   if (!student) {
@@ -5052,7 +5240,7 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
   }
 
   const students = await all(
-    `SELECT id, roll_no, name, guardian_phone
+    `SELECT id, roll_no, name, guardian_phone, parent_whatsapp_number
      FROM users
      WHERE coaching_id = ? AND role = 'student' AND batch_id = ?
      ORDER BY roll_no ASC`,
@@ -5118,7 +5306,9 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
   const notes = (req.body.notes || '').trim();
 
   const student = await get(
-    `SELECT id FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
+    `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
+     FROM users
+     WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
     [coachingId, rollNo]
   );
   if (!student) {
@@ -5126,11 +5316,47 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
     return res.redirect('/admin/dashboard?section=fees');
   }
 
-  await run(
+  const feeResult = await run(
     `INSERT INTO fees (coaching_id, student_id, amount, due_date, payment_date, status, notes, added_by)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [coachingId, student.id, amount, dueDate, paymentDate, status, notes, req.session.user.id]
   );
+
+  const fee = {
+    id: feeResult.lastID,
+    amount,
+    due_date: dueDate,
+    payment_date: paymentDate,
+    status,
+    notes,
+  };
+  const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
+  try {
+    if (status === 'paid') {
+      await sendWhatsAppNotification({
+        studentId: student.id,
+        phone: student.parent_whatsapp_number || student.guardian_phone,
+        type: 'fee_payment_confirmation',
+        message: `Payment received successfully. Amount: Rs. ${Number(amount || 0).toFixed(2)}.`,
+        eventKey: `fee_payment_confirmation:${student.id}:${fee.id}`,
+      });
+    } else if (status === 'overdue') {
+      await sendOverdueReminder({ coachingId, student, fee, coaching });
+    } else if (status === 'pending' && dueDate) {
+      const dueMs = new Date(dueDate).getTime() - Date.now();
+      const dueDays = Math.ceil(dueMs / (1000 * 60 * 60 * 24));
+      if (Number.isFinite(dueDays) && dueDays >= 0 && dueDays <= 7) {
+        await sendDueFeeReminder({ coachingId, student, fee, coaching });
+      }
+    }
+  } catch (error) {
+    console.error('WhatsApp fee notification failed', {
+      feeId: fee.id,
+      studentId: student.id,
+      status,
+      error: error.message,
+    });
+  }
 
   await auditActor(req, 'fee_record_added', {
     targetType: 'student',
@@ -5143,39 +5369,122 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/notes', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const noticeTarget = String(req.body.noticeTarget || 'batch').trim();
   const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
+  const selectedStudentIds = Array.isArray(req.body.studentIds)
+    ? req.body.studentIds
+    : String(req.body.studentIds || '').split(',');
+  const selectedIds = selectedStudentIds
+    .map((value) => Number.parseInt(String(value).trim(), 10))
+    .filter((value) => Number.isInteger(value) && value > 0);
   const title = (req.body.title || '').trim();
   const resourceUrl = (req.body.resourceUrl || '').trim();
   const description = (req.body.description || '').trim();
+  const sendNoticeWhatsApp = req.body.sendWhatsApp === 'on';
+  let batch = null;
 
-  if (!Number.isInteger(batchId) || batchId <= 0) {
+  if (noticeTarget === 'batch' && (!Number.isInteger(batchId) || batchId <= 0)) {
     req.session.flash = { type: 'error', text: 'Please select a batch for note' };
     return res.redirect('/admin/dashboard?section=notes');
   }
 
-  const batch = await getBatchForCoaching(coachingId, batchId);
-  if (!batch) {
-    req.session.flash = { type: 'error', text: 'Selected batch was not found' };
+  if (noticeTarget === 'batch') {
+    batch = await getBatchForCoaching(coachingId, batchId);
+    if (!batch) {
+      req.session.flash = { type: 'error', text: 'Selected batch was not found' };
+      return res.redirect('/admin/dashboard?section=notes');
+    }
+  }
+
+  if (noticeTarget === 'selected' && !selectedIds.length) {
+    req.session.flash = { type: 'error', text: 'Select at least one student for this notice' };
     return res.redirect('/admin/dashboard?section=notes');
   }
 
-  if (!title || !resourceUrl || !isValidHttpUrl(resourceUrl)) {
-    req.session.flash = { type: 'error', text: 'Valid title and URL are required' };
+  if (!['all', 'batch', 'selected'].includes(noticeTarget)) {
+    req.session.flash = { type: 'error', text: 'Select a valid notice target' };
     return res.redirect('/admin/dashboard?section=notes');
   }
 
-  await run(
+  if (!title) {
+    req.session.flash = { type: 'error', text: 'Notice title is required' };
+    return res.redirect('/admin/dashboard?section=notes');
+  }
+
+  if (resourceUrl && !isValidHttpUrl(resourceUrl)) {
+    req.session.flash = { type: 'error', text: 'URL must be a valid http/https link' };
+    return res.redirect('/admin/dashboard?section=notes');
+  }
+
+  const noteResult = await run(
     `INSERT INTO batch_notes (coaching_id, batch_id, standard, course, title, resource_url, description, created_by)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [coachingId, batch.id, batch.standard || null, batch.course || null, title, resourceUrl, description, req.session.user.id]
+    [
+      coachingId,
+      batch?.id || null,
+      batch?.standard || null,
+      batch?.course || null,
+      title,
+      resourceUrl || null,
+      description,
+      req.session.user.id,
+    ]
   );
 
+  const recipientParams = [coachingId];
+  let recipientSql = `
+    SELECT id, roll_no, name, contact_phone, whatsapp_number
+    FROM users
+    WHERE coaching_id = ? AND role = 'student'
+  `;
+  if (noticeTarget === 'batch') {
+    recipientParams.push(batch.id);
+    recipientSql += ` AND batch_id = ?`;
+  } else if (noticeTarget === 'selected') {
+    recipientParams.push(selectedIds);
+    recipientSql += ` AND id = ANY($${recipientParams.length}::int[])`;
+  }
+  recipientSql += ` ORDER BY roll_no ASC LIMIT 500`;
+  const recipients = await all(recipientSql, recipientParams);
+  const noticeMessage = [
+    `New notice: ${title}`,
+    description ? `\n${description}` : '',
+    resourceUrl ? `\nLink: ${resourceUrl}` : '',
+  ].join('').trim();
+
+  let notifiedCount = 0;
+  if (sendNoticeWhatsApp) {
+    for (const recipient of recipients) {
+      try {
+        const result = await sendWhatsAppNotification({
+          studentId: recipient.id,
+          phone: recipient.whatsapp_number || recipient.contact_phone,
+          type: 'notice_published',
+          message: noticeMessage,
+          eventKey: `notice_published:${recipient.id}:${noteResult.lastID}`,
+        });
+        if (!result?.skipped) notifiedCount += 1;
+      } catch (error) {
+        console.error('WhatsApp notice notification failed', {
+          noteId: noteResult.lastID,
+          studentId: recipient.id,
+          error: error.message,
+        });
+      }
+    }
+  }
+
   await auditActor(req, 'batch_note_created', {
-    targetType: 'batch',
-    targetId: batch.id,
-    details: { batchName: batch.name, title, resourceUrl },
+    targetType: noticeTarget === 'batch' ? 'batch' : 'notice',
+    targetId: noticeTarget === 'batch' ? batch.id : noteResult.lastID,
+    details: { target: noticeTarget, batchName: batch?.name || null, title, resourceUrl, sendNoticeWhatsApp },
   });
-  req.session.flash = { type: 'success', text: `Batch note published for ${batch.name}` };
+  req.session.flash = {
+    type: 'success',
+    text: sendNoticeWhatsApp
+      ? `Notice published. WhatsApp notifications sent for ${notifiedCount} student(s).`
+      : 'Notice published without WhatsApp notifications.',
+  };
   return res.redirect('/admin/dashboard?section=notes');
 });
 
@@ -5501,6 +5810,7 @@ async function prepareApp() {
       })
       .then(() => ensureSessionTable())
       .then(() => ensureWhatsAppSchema())
+      .then(() => ensureNotificationSchema())
       .then(async () => {
         console.log('[BOOT] Database ready');
         if (process.env.RUN_STARTUP_MAINTENANCE === 'true') {

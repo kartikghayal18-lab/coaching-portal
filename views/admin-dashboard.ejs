@@ -160,6 +160,7 @@
         <a class="ops2-nav__item <%= activeSection === 'papers' ? 'is-active' : '' %>" href="/admin/dashboard?section=papers"><span>◆</span><span>Test Papers</span></a>
         <a class="ops2-nav__item <%= activeSection === 'notes' ? 'is-active' : '' %>" href="/admin/dashboard?section=notes"><span>◫</span><span>Notes</span></a>
         <a class="ops2-nav__item <%= activeSection === 'whatsapp' ? 'is-active' : '' %>" href="/admin/dashboard?section=whatsapp"><span>◍</span><span>WhatsApp</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'notifications' ? 'is-active' : '' %>" href="/admin/dashboard?section=notifications"><span>◔</span><span>Notifications</span></a>
         <a class="ops2-nav__item <%= activeSection === 'settings' ? 'is-active' : '' %>" href="/admin/dashboard?section=settings"><span>⎈</span><span>Settings</span></a>
       </nav>
 
@@ -510,7 +511,7 @@
                         <div class="ops2-table-shell ops2-table-shell--compact">
                           <table class="ops2-table ops2-table--students">
                             <thead>
-                              <tr><th>Roll</th><th>Name</th><th>Class</th><th>Guardian</th><th>Actions</th></tr>
+                              <tr><th>Roll</th><th>Name</th><th>Class</th><th>Student WhatsApp</th><th>Parent WhatsApp</th><th>Actions</th></tr>
                             </thead>
                             <tbody>
                               <% group.students.forEach((s) => { %>
@@ -518,7 +519,8 @@
                                   <td><%= s.roll_no %></td>
                                   <td><%= s.name %></td>
                                   <td><%= group.label %></td>
-                                  <td><%= s.guardian_phone || '-' %></td>
+                                  <td><%= s.whatsapp_number || s.contact_phone || '-' %></td>
+                                  <td><%= s.parent_whatsapp_number || s.guardian_phone || '-' %></td>
                                   <td class="ops2-actions-inline">
                                     <a href="/admin/students/<%= s.id %>/overview" class="ops2-inline-link">View Dashboard</a>
                                     <form class="inline-delete-form" method="post" action="/admin/students/<%= s.id %>/delete" onsubmit="return confirm('Delete this student? All papers/attendance/fees will also be deleted.');">
@@ -604,7 +606,9 @@
                     <div class="ops2-field"><label>Roll Number</label><input type="text" name="rollNo" required /></div>
                     <div class="ops2-field"><label>Name</label><input type="text" name="name" /></div>
                     <div class="ops2-field"><label>Contact Number</label><input type="text" name="contactPhone" placeholder="9876543210" /></div>
-                    <div class="ops2-field"><label>Guardian WhatsApp</label><input type="text" name="guardianPhone" placeholder="919876543210" /></div>
+                    <div class="ops2-field"><label>Student WhatsApp</label><input type="text" name="whatsappNumber" placeholder="919876543210" /></div>
+                    <div class="ops2-field"><label>Guardian Phone</label><input type="text" name="guardianPhone" placeholder="9876543210" /></div>
+                    <div class="ops2-field"><label>Parent WhatsApp</label><input type="text" name="parentWhatsappNumber" placeholder="919876543210" /></div>
                     <div class="ops2-field"><label>Email ID</label><input type="email" name="email" placeholder="student@example.com" /></div>
                     <div class="ops2-field full"><label>Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
                     <div class="ops2-field full"><label>Password (optional)</label><input type="text" name="password" placeholder="Default = roll number" /></div>
@@ -628,6 +632,17 @@
                     <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                     <div class="ops2-field full"><label>Custom Batch Name</label><input type="text" name="batchName" placeholder="11th-A, Repeater, JEE 2027" required /></div>
                     <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Create Batch</button></div>
+                  </form>
+                  <div class="ops2-divider"></div>
+                  <form method="post" action="/admin/students/import" data-single-submit class="ops2-form-grid">
+                    <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                    <div class="ops2-field full"><label>Import Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                    <div class="ops2-field full">
+                      <label>Student CSV</label>
+                      <textarea name="studentsCsv" rows="5" placeholder="roll,name,student_whatsapp,parent_whatsapp,email"></textarea>
+                    </div>
+                    <p class="tiny-note">One student per line. Header row is optional.</p>
+                    <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn" <%= batches.length ? '' : 'disabled' %>>Import Students</button></div>
                   </form>
                 </section>
               </aside>
@@ -766,7 +781,7 @@
                           <% if (f.status !== 'paid') { %>
                             <form method="post" action="/admin/fees/<%= f.id %>/send-reminder">
                               <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                              <button type="submit" class="ops2-inline-link-btn" <%= f.guardian_phone ? '' : 'disabled' %>>Send Reminder</button>
+                              <button type="submit" class="ops2-inline-link-btn" <%= (f.parent_whatsapp_number || f.guardian_phone) ? '' : 'disabled' %>>Send Reminder</button>
                             </form>
                           <% } else { %>
                             <span class="muted">-</span>
@@ -839,11 +854,32 @@
                 <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Publish</p><h3>Add batch note / video link</h3></div></div>
                 <form method="post" action="/admin/notes" class="ops2-form-grid">
                   <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                  <div class="ops2-field"><label>Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
+                  <div class="ops2-field"><label>Notice Target</label><select name="noticeTarget" required><option value="batch">Selected Class</option><option value="all">All Students</option><option value="selected">Selected Students</option></select></div>
+                  <div class="ops2-field"><label>Batch / Class</label><select name="batchId"><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
                   <div class="ops2-field"><label>Title</label><input type="text" name="title" placeholder="Physics Revision Notes" required /></div>
-                  <div class="ops2-field full"><label>Resource URL</label><input type="url" name="resourceUrl" placeholder="https://..." required /></div>
+                  <div class="ops2-field full"><label>Resource URL</label><input type="url" name="resourceUrl" placeholder="https://..." /></div>
                   <div class="ops2-field full"><label>Description</label><textarea name="description" rows="3"></textarea></div>
-                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Publish for Batch</button></div>
+                  <label class="ops2-check full"><input type="checkbox" name="sendWhatsApp" checked /> Send WhatsApp notification for this notice</label>
+                  <div class="ops2-field full">
+                    <label>Selected Students</label>
+                    <div class="ops2-table-shell ops2-table-shell--compact" style="max-height:220px;overflow:auto;">
+                      <table class="ops2-table ops2-table--students">
+                        <thead><tr><th>Select</th><th>Roll</th><th>Name</th><th>WhatsApp</th></tr></thead>
+                        <tbody>
+                          <% students.filter((student) => student.whatsapp_number || student.contact_phone).forEach((student) => { %>
+                            <tr>
+                              <td><input type="checkbox" name="studentIds" value="<%= student.id %>" /></td>
+                              <td><%= student.roll_no %></td>
+                              <td><%= student.name %></td>
+                              <td><%= student.whatsapp_number || student.contact_phone || '-' %></td>
+                            </tr>
+                          <% }) %>
+                        </tbody>
+                      </table>
+                    </div>
+                    <p class="tiny-note">Checkboxes are used only when Notice Target is “Selected Students”.</p>
+                  </div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Publish Notice</button></div>
                 </form>
               </section>
 
@@ -873,8 +909,8 @@
               </article>
               <article class="ops2-metric-card ops2-metric-card--neutral">
                 <div class="ops2-metric-card__top"><span class="ops2-metric-card__icon">☏</span><span class="ops2-metric-card__trend">Guardians</span></div>
-                <strong><%= students.filter((student) => student.guardian_phone).length %></strong>
-                <span class="ops2-metric-card__label">Reachable Parents</span>
+                <strong><%= students.filter((student) => student.parent_whatsapp_number || student.guardian_phone || student.whatsapp_number || student.contact_phone).length %></strong>
+                <span class="ops2-metric-card__label">Reachable Contacts</span>
                 <small>Out of <%= students.length %> students</small>
               </article>
             </section>
@@ -908,7 +944,7 @@
                 <div class="ops2-divider"></div>
                 <form method="post" action="/admin/whatsapp/fee-reminders/due" class="ops2-form-grid">
                   <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                  <div class="ops2-field full"><label>Send reminders due in next days</label><input type="number" name="daysBefore" min="0" value="3" /></div>
+                  <div class="ops2-field full"><label>Send reminders due in next days</label><input type="number" name="daysBefore" min="0" value="7" /></div>
                   <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Run Fee Reminders</button></div>
                 </form>
               </section>
@@ -925,14 +961,14 @@
                   <label>Selected Students</label>
                   <div class="ops2-table-shell ops2-table-shell--compact" style="max-height:220px;overflow:auto;">
                     <table class="ops2-table ops2-table--students">
-                      <thead><tr><th>Select</th><th>Roll</th><th>Name</th><th>Guardian</th></tr></thead>
+                      <thead><tr><th>Select</th><th>Roll</th><th>Name</th><th>WhatsApp</th></tr></thead>
                       <tbody>
-                        <% students.filter((student) => student.guardian_phone).forEach((student) => { %>
+                        <% students.filter((student) => student.whatsapp_number || student.contact_phone || student.parent_whatsapp_number || student.guardian_phone).forEach((student) => { %>
                           <tr>
                             <td><input type="checkbox" name="studentIds" value="<%= student.id %>" /></td>
                             <td><%= student.roll_no %></td>
                             <td><%= student.name %></td>
-                            <td><%= student.guardian_phone %></td>
+                            <td><%= student.whatsapp_number || student.contact_phone || student.parent_whatsapp_number || student.guardian_phone %></td>
                           </tr>
                         <% }) %>
                       </tbody>
@@ -962,6 +998,38 @@
                     <% }) %>
                     <% if (!whatsappLogs.length) { %>
                       <tr><td colspan="6" class="muted">No WhatsApp messages sent yet.</td></tr>
+                    <% } %>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          <% } %>
+
+          <% if (activeSection === 'notifications') { %>
+            <section class="ops2-panel">
+              <div class="ops2-panel__header">
+                <div>
+                  <p class="ops2-eyebrow">Automation Audit</p>
+                  <h3>WhatsApp notification logs</h3>
+                </div>
+                <a href="/admin/dashboard?section=settings" class="ops2-inline-link">Notification Settings</a>
+              </div>
+              <div class="ops2-table-shell">
+                <table class="ops2-table ops2-table--wide">
+                  <thead><tr><th>Student</th><th>Phone</th><th>Type</th><th>Status</th><th>Sent at</th><th>Message</th></tr></thead>
+                  <tbody>
+                    <% notificationLogs.forEach((log) => { %>
+                      <tr>
+                        <td><%= log.name || log.roll_no || '-' %></td>
+                        <td><%= log.phone_number || '-' %></td>
+                        <td><%= log.type %></td>
+                        <td><span class="status <%= log.status %>"><%= log.status %></span></td>
+                        <td><%= log.sent_at || log.created_at || '-' %></td>
+                        <td><%= log.message %></td>
+                      </tr>
+                    <% }) %>
+                    <% if (!notificationLogs.length) { %>
+                      <tr><td colspan="6" class="muted">No automation notifications have been recorded yet.</td></tr>
                     <% } %>
                   </tbody>
                 </table>
@@ -999,6 +1067,25 @@
                   <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Change Password</button></div>
                 </form>
               </section>
+            </section>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header">
+                <div>
+                  <p class="ops2-eyebrow">WhatsApp Notifications</p>
+                  <h3>Automation toggles</h3>
+                </div>
+                <a href="/admin/dashboard?section=notifications" class="ops2-inline-link">View Logs</a>
+              </div>
+              <form method="post" action="/admin/settings/whatsapp-notifications" class="ops2-form-grid">
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                <label class="ops2-check full"><input type="checkbox" name="attendanceAlertsEnabled" <%= whatsappSettings.attendanceAlertsEnabled ? 'checked' : '' %> /> Attendance alerts</label>
+                <label class="ops2-check full"><input type="checkbox" name="feeAlertsEnabled" <%= whatsappSettings.feeAlertsEnabled ? 'checked' : '' %> /> Fee alerts</label>
+                <label class="ops2-check full"><input type="checkbox" name="resultAlertsEnabled" <%= whatsappSettings.resultAlertsEnabled ? 'checked' : '' %> /> Result alerts</label>
+                <label class="ops2-check full"><input type="checkbox" name="testPaperAlertsEnabled" <%= whatsappSettings.testPaperAlertsEnabled ? 'checked' : '' %> /> Test paper alerts</label>
+                <label class="ops2-check full"><input type="checkbox" name="noticeAlertsEnabled" <%= whatsappSettings.noticeAlertsEnabled ? 'checked' : '' %> /> Notice alerts</label>
+                <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Save Notification Toggles</button></div>
+              </form>
             </section>
           <% } %>
         </main>

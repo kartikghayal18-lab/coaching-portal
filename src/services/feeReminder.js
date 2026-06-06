@@ -1,7 +1,4 @@
-const {
-  sendTextMessage,
-  getWhatsAppSettings,
-} = require('./whatsapp');
+const { sendWhatsAppNotification } = require('./notificationService');
 
 function formatDate(value) {
   if (!value) return '-';
@@ -28,30 +25,22 @@ function buildFeeReminderMessage({ student, fee, coaching, reminderType }) {
 }
 
 async function sendDueFeeReminder({ coachingId, student, fee, coaching, settings = null }) {
-  if (!student.guardian_phone) {
-    return { ok: false, skipped: true, reason: 'Guardian phone missing' };
-  }
-
-  return sendTextMessage({
-    coachingId,
+  return sendWhatsAppNotification({
     studentId: student.id,
-    to: student.guardian_phone,
+    phone: student.parent_whatsapp_number || student.guardian_phone,
+    type: 'fee_due_reminder',
     message: buildFeeReminderMessage({ student, fee, coaching, reminderType: 'due' }),
-    settings: settings || await getWhatsAppSettings(coachingId),
+    eventKey: `fee_due_reminder:${student.id}:${fee.id || fee.fee_id}:${formatDate(fee.due_date)}`,
   });
 }
 
 async function sendOverdueReminder({ coachingId, student, fee, coaching, settings = null }) {
-  if (!student.guardian_phone) {
-    return { ok: false, skipped: true, reason: 'Guardian phone missing' };
-  }
-
-  return sendTextMessage({
-    coachingId,
+  return sendWhatsAppNotification({
     studentId: student.id,
-    to: student.guardian_phone,
+    phone: student.parent_whatsapp_number || student.guardian_phone,
+    type: 'fee_overdue_reminder',
     message: buildFeeReminderMessage({ student, fee, coaching, reminderType: 'overdue' }),
-    settings: settings || await getWhatsAppSettings(coachingId),
+    eventKey: `fee_overdue_reminder:${student.id}:${fee.id || fee.fee_id}:${formatDate(fee.due_date)}`,
   });
 }
 

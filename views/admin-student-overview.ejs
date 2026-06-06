@@ -19,6 +19,7 @@
           <h1><%= student?.name || 'Student Overview' %></h1>
           <p class="muted">Roll No: <%= student?.roll_no || '-' %> | Batch: <%= student?.batch_name || ((student?.standard || student?.course) ? `${student?.standard || ''}${student?.standard && student?.course ? ' - ' : ''}${student?.course ? student.course.toUpperCase() : ''}` : '-') %></p>
           <p class="muted">Phone: <%= student?.contact_phone || '-' %> | Email: <%= student?.email || '-' %></p>
+          <p class="muted">Student WhatsApp: <%= student?.whatsapp_number || student?.contact_phone || '-' %> | Parent WhatsApp: <%= student?.parent_whatsapp_number || student?.guardian_phone || '-' %></p>
           <div class="hero-chip-row">
             <span class="info-chip">Papers <strong><%= papers.length %></strong></span>
             <span class="info-chip">Attendance <strong><%= attendanceSummary.attendancePercent %>%</strong></span>
@@ -37,6 +38,22 @@
     <% if (flash) { %>
       <div class="alert <%= flash.type %>"><%= flash.text %></div>
     <% } %>
+
+    <section class="card">
+      <h2>Edit Student Contact Details</h2>
+      <form method="post" action="/admin/students/<%= student.id %>/update" class="grid two">
+        <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+        <label>Name <input type="text" name="name" value="<%= student?.name || '' %>" /></label>
+        <label>Email <input type="email" name="email" value="<%= student?.email || '' %>" /></label>
+        <label>Contact Number <input type="text" name="contactPhone" value="<%= student?.contact_phone || '' %>" /></label>
+        <label>Student WhatsApp <input type="text" name="whatsappNumber" value="<%= student?.whatsapp_number || student?.contact_phone || '' %>" /></label>
+        <label>Guardian Phone <input type="text" name="guardianPhone" value="<%= student?.guardian_phone || '' %>" /></label>
+        <label>Parent WhatsApp <input type="text" name="parentWhatsappNumber" value="<%= student?.parent_whatsapp_number || student?.guardian_phone || '' %>" /></label>
+        <div class="inline-actions">
+          <button type="submit" class="btn compact">Save Student Details</button>
+        </div>
+      </form>
+    </section>
 
     <section class="stats-grid">
       <div class="stat-card"><p>Total Papers</p><h3><%= papers.length %></h3></div>
