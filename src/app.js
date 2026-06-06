@@ -2989,6 +2989,27 @@ app.post('/webhook/whatsapp', async (req, res) => {
       for (const statusEvent of statuses) {
         await updateWhatsAppLogStatus(statusEvent.id, statusEvent.status);
       }
+
+      const incomingMessages = Array.isArray(change?.value?.messages) ? change.value.messages : [];
+      const phoneNumberId = String(change?.value?.metadata?.phone_number_id || '').trim();
+      const whatsappSetting = phoneNumberId
+        ? await get(`SELECT coaching_id FROM whatsapp_settings WHERE phone_number_id = ? LIMIT 1`, [phoneNumberId])
+        : null;
+
+      for (const incomingMessage of incomingMessages) {
+        console.log('INCOMING MESSAGE DETECTED');
+        try {
+          console.log('ABOUT TO SEND REPLY');
+          await sendTextMessage({
+            coachingId: whatsappSetting?.coaching_id || null,
+            to: incomingMessage.from,
+            message: 'Thanks for your message. We have received it and will get back to you soon.',
+          });
+          console.log('REPLY SENT SUCCESSFULLY');
+        } catch (error) {
+          console.error('REPLY FAILED', error);
+        }
+      }
     }
   }
 
