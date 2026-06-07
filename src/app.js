@@ -4615,7 +4615,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
-  await run(
+  const createdStudentResult = await run(
     `INSERT INTO users (
       coaching_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number, email, password_hash
     ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -4634,6 +4634,37 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
       passwordHash,
     ]
   );
+  const createdStudentId = createdStudentResult.lastID;
+
+  const parentAdmissionPhone = parentWhatsappNumber || guardianPhone;
+  if (parentAdmissionPhone) {
+    const admissionMessage = compactWhatsAppMessage([
+      `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
+      '🎉 Admission Confirmed',
+      `Student: ${name}`,
+      `Roll No: ${rollNo}`,
+      `Batch: ${batch.name || 'Assigned batch'}`,
+      'Your child is now registered successfully.',
+      'Welcome to our coaching family.',
+    ]);
+
+    try {
+      const admissionNotificationResult = await sendWhatsAppNotification({
+        studentId: createdStudentId,
+        phone: parentAdmissionPhone,
+        type: 'admission_confirmed',
+        message: admissionMessage,
+        eventKey: `admission_confirmed:${createdStudentId}`,
+      });
+      console.log('[WHATSAPP] Admission confirmation result:', admissionNotificationResult);
+    } catch (error) {
+      console.error('[WHATSAPP] Admission confirmation failed', {
+        studentId: createdStudentId,
+        phone: parentAdmissionPhone,
+        error: error.message,
+      });
+    }
+  }
 
   req.session.flash = {
     type: 'success',
