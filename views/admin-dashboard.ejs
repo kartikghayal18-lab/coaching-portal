@@ -610,6 +610,7 @@
                     <div class="ops2-field"><label>Guardian Phone</label><input type="text" name="guardianPhone" placeholder="9876543210" /></div>
                     <div class="ops2-field"><label>Parent WhatsApp</label><input type="text" name="parentWhatsappNumber" placeholder="919876543210" /></div>
                     <div class="ops2-field"><label>Email ID</label><input type="email" name="email" placeholder="student@example.com" /></div>
+                    <div class="ops2-field"><label>Total Fees</label><input type="number" name="totalFee" min="0" step="0.01" placeholder="50000" /></div>
                     <div class="ops2-field full"><label>Batch</label><select name="batchId" required><option value="">Select batch</option><% batches.forEach((batch) => { %><option value="<%= batch.id %>"><%= batch.name %></option><% }) %></select></div>
                     <div class="ops2-field full"><label>Password (optional)</label><input type="text" name="password" placeholder="Default = roll number" /></div>
                     <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn" <%= batches.length ? '' : 'disabled' %>>Create Student</button></div>

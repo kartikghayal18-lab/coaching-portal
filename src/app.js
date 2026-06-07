@@ -4575,6 +4575,8 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const submittedPassword = (req.body.password || '').trim();
   const password = submittedPassword || rollNo;
   const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
+  const totalFeeInput = String(req.body.totalFee || '').trim();
+  const totalFee = totalFeeInput ? Number(totalFeeInput) : 0;
 
   if (!rollNo) {
     req.session.flash = { type: 'error', text: 'Roll number is required' };
@@ -4583,6 +4585,11 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
 
   if (!Number.isInteger(batchId) || batchId <= 0) {
     req.session.flash = { type: 'error', text: 'Please select a batch for the student' };
+    return res.redirect('/admin/dashboard?section=students');
+  }
+
+  if (totalFeeInput && (!Number.isFinite(totalFee) || totalFee < 0)) {
+    req.session.flash = { type: 'error', text: 'Enter a valid total fee amount' };
     return res.redirect('/admin/dashboard?section=students');
   }
 
@@ -4635,18 +4642,34 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
     ]
   );
   const createdStudentId = createdStudentResult.lastID;
+  let createdFeeSummary = null;
+
+  if (totalFee > 0) {
+    createdFeeSummary = await setStudentTotalFee({
+      coachingId,
+      studentId: createdStudentId,
+      totalFee,
+    });
+  }
 
   const parentAdmissionPhone = parentWhatsappNumber || guardianPhone;
   if (parentAdmissionPhone) {
-    const admissionMessage = compactWhatsAppMessage([
+    const admissionMessageLines = [
       `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
       '🎉 Admission Confirmed',
       `Student: ${name}`,
       `Roll No: ${rollNo}`,
       `Batch: ${batch.name || 'Assigned batch'}`,
+    ];
+    if (createdFeeSummary) {
+      admissionMessageLines.push(`Total Fees: ₹${formatWhatsAppAmount(createdFeeSummary.totalFee)}`);
+      admissionMessageLines.push(`Pending Fees: ₹${formatWhatsAppAmount(createdFeeSummary.pendingFee)}`);
+    }
+    admissionMessageLines.push(
       'Your child is now registered successfully.',
       'Welcome to our coaching family.',
-    ]);
+    );
+    const admissionMessage = compactWhatsAppMessage(admissionMessageLines);
 
     try {
       const admissionNotificationResult = await sendWhatsAppNotification({
@@ -5745,6 +5768,8 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
         '✅ Payment Received',
         `Student: ${student.name || student.roll_no}`,
         `Amount Paid: ₹${formatWhatsAppAmount(amount)}`,
+        `Remaining Fees: ₹${formatWhatsAppAmount(feeSummary.pendingFee)}`,
+        'Payment recorded successfully.',
         'Receipt attached.',
       ];
       const compactFeePaidMessage = compactWhatsAppMessage(feePaidMessage);
