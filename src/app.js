@@ -329,6 +329,10 @@ function isTwoFactorAuthPostPath(req) {
   return getRequestPathCandidates(req).some((requestPath) => TWO_FACTOR_AUTH_POST_PATHS.has(requestPath));
 }
 
+function isLogoutPostPath(req) {
+  return getRequestPathCandidates(req).some((requestPath) => requestPath === '/logout');
+}
+
 function hasValidRequestOrigin(req) {
   const origin = String(req.headers.origin || '').trim();
   const referer = String(req.headers.referer || '').trim();
@@ -1051,6 +1055,10 @@ app.use((req, res, next) => {
     return res.status(403).send('Invalid request origin');
   }
 
+  if (req.method === 'POST' && isLogoutPostPath(req)) {
+    return next();
+  }
+
   // The 2FA flow is still same-origin checked above, then protected by the
   // pending-login session plus the one-time code. Path matching is normalized
   // for Vercel rewrites/trailing slashes so these posts do not fall through to
@@ -1533,6 +1541,70 @@ function getStudentSearchResults(students, rawQuery) {
     results: scored.slice(0, 25),
     totalMatches: scored.length,
   };
+}
+
+async function resolveStudentForAdminEntry(coachingId, { rollNo, studentLookup }) {
+  const selectedRollNo = String(rollNo || '').trim();
+  const lookup = String(studentLookup || '').trim();
+  const lookupLower = normalizeSearchValue(lookup);
+
+  if (selectedRollNo) {
+    const student = await get(
+      `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
+       FROM users
+       WHERE coaching_id = ? AND role = 'student' AND roll_no = ?
+       LIMIT 1`,
+      [coachingId, selectedRollNo]
+    );
+    if (student) return { student, error: null };
+  }
+
+  if (!lookupLower) {
+    return { student: null, error: 'Select a student by name or roll number' };
+  }
+
+  const rollFromLookup = lookup.match(/\broll\s+([^\s-]+)/i)?.[1]
+    || lookup.match(/^([^\s-]+)\s+-/)?.[1]
+    || lookup;
+
+  const matches = await all(
+    `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
+     FROM users
+     WHERE coaching_id = ? AND role = 'student'
+       AND (
+         LOWER(roll_no) = LOWER(?)
+         OR LOWER(name) = LOWER(?)
+         OR LOWER(name) LIKE LOWER(?)
+       )
+     ORDER BY
+       CASE
+         WHEN LOWER(roll_no) = LOWER(?) THEN 1
+         WHEN LOWER(name) = LOWER(?) THEN 2
+         WHEN LOWER(name) LIKE LOWER(?) THEN 3
+         ELSE 4
+       END,
+       roll_no ASC
+     LIMIT 2`,
+    [
+      coachingId,
+      rollFromLookup,
+      lookup,
+      `${lookup}%`,
+      rollFromLookup,
+      lookup,
+      `${lookup}%`,
+    ]
+  );
+
+  if (matches.length === 1) {
+    return { student: matches[0], error: null };
+  }
+
+  if (matches.length > 1) {
+    return { student: null, error: 'Multiple students match this name. Please choose the exact student from the list.' };
+  }
+
+  return { student: null, error: 'Student not found. Please choose a student from the list.' };
 }
 
 function getAnswerRequestState(request) {
@@ -3613,8 +3685,8 @@ app.post('/admin/settings/profile', requireCoachingAdmin, async (req, res) => {
     return res.redirect('/admin/dashboard?section=settings');
   }
 
-  if (adminEmail && !isValidEmail(adminEmail)) {
-    req.session.flash = { type: 'error', text: 'Admin email must be a valid email address' };
+  if (!adminEmail || !isValidEmail(adminEmail)) {
+    req.session.flash = { type: 'error', text: 'Admin OTP email must be a valid email address' };
     return res.redirect('/admin/dashboard?section=settings');
   }
 
@@ -3628,7 +3700,7 @@ app.post('/admin/settings/profile', requireCoachingAdmin, async (req, res) => {
       `UPDATE users
        SET name = ?, contact_phone = ?, email = ?
        WHERE id = ? AND coaching_id = ? AND role = 'admin'`,
-      [adminDisplayName, adminContactPhone || null, adminEmail || null, req.session.user.id, coachingId]
+      [adminDisplayName, adminContactPhone || null, adminEmail, req.session.user.id, coachingId]
     );
 
     await tx.run(
@@ -3641,19 +3713,19 @@ app.post('/admin/settings/profile', requireCoachingAdmin, async (req, res) => {
 
   req.session.user.name = adminDisplayName;
   req.session.user.contactPhone = adminContactPhone || null;
-  req.session.user.email = adminEmail || null;
+  req.session.user.email = adminEmail;
   await auditActor(req, 'admin_profile_updated', {
     targetType: 'coaching',
     targetId: coachingId,
     details: {
       coachingName,
       brandName,
-      adminEmail: adminEmail || null,
+      adminEmail,
       contactEmail: contactEmail || null,
     },
   });
   req.session.user.coachingName = coachingName;
-  req.session.flash = { type: 'success', text: 'Settings updated successfully.' };
+  req.session.flash = { type: 'success', text: 'Settings updated successfully. Admin OTP email updated.' };
   return res.redirect('/admin/dashboard?section=settings');
 });
 
@@ -5596,16 +5668,17 @@ app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const rollNo = (req.body.rollNo || '').trim();
+  const studentLookup = (req.body.studentLookup || '').trim();
   const attendanceDate = req.body.attendanceDate;
   const status = req.body.status;
   const notes = (req.body.notes || '').trim();
 
-  const student = await get(
-    `SELECT id, roll_no, name, guardian_phone, parent_whatsapp_number FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
-    [coachingId, rollNo]
-  );
+  const { student, error: studentResolveError } = await resolveStudentForAdminEntry(coachingId, {
+    rollNo,
+    studentLookup,
+  });
   if (!student) {
-    req.session.flash = { type: 'error', text: 'Student roll number not found' };
+    req.session.flash = { type: 'error', text: studentResolveError || 'Student not found' };
     return res.redirect('/admin/dashboard?section=attendance');
   }
 
@@ -5635,7 +5708,7 @@ app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
   await auditActor(req, 'attendance_saved_single', {
     targetType: 'student',
     targetId: student.id,
-    details: { rollNo, attendanceDate, status },
+    details: { rollNo: student.roll_no, attendanceDate, status },
   });
   return res.redirect(`/admin/dashboard?section=attendance&attendanceDate=${encodeURIComponent(attendanceDate)}`);
 });
@@ -5723,20 +5796,19 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
 app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
   const rollNo = (req.body.rollNo || '').trim();
+  const studentLookup = (req.body.studentLookup || '').trim();
   const amount = Number(req.body.amount);
   const dueDate = req.body.dueDate || null;
   const paymentDate = req.body.paymentDate || null;
   const status = req.body.status;
   const notes = (req.body.notes || '').trim();
 
-  const student = await get(
-    `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
-     FROM users
-     WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
-    [coachingId, rollNo]
-  );
+  const { student, error: studentResolveError } = await resolveStudentForAdminEntry(coachingId, {
+    rollNo,
+    studentLookup,
+  });
   if (!student) {
-    req.session.flash = { type: 'error', text: 'Student roll number not found' };
+    req.session.flash = { type: 'error', text: studentResolveError || 'Student not found' };
     return res.redirect('/admin/dashboard?section=fees');
   }
 

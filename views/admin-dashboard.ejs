@@ -666,7 +666,18 @@
                 <div id="tab-single" class="ops2-tab-panel active">
                   <form method="post" action="/admin/attendance" class="ops2-form-grid">
                     <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                    <div class="ops2-field"><label>Roll Number</label><input type="text" name="rollNo" required /></div>
+                    <div class="ops2-field full">
+                      <label>Student Name / Roll Number</label>
+                      <input type="text" name="studentLookup" list="attendance-student-options" data-student-picker="attendance" placeholder="Type N to find Nilesh" autocomplete="off" required />
+                      <input type="hidden" name="rollNo" data-student-roll-target="attendance" required />
+                      <p class="tiny-note">Start typing student name, then choose the student. Roll number is filled automatically.</p>
+                      <datalist id="attendance-student-options">
+                        <% students.forEach((student) => { %>
+                          <option value="<%= student.name || 'Student' %> - Roll <%= student.roll_no %>" data-roll="<%= student.roll_no %>" label="<%= student.batch_name || 'No batch' %>"></option>
+                          <option value="<%= student.roll_no %> - <%= student.name || 'Student' %>" data-roll="<%= student.roll_no %>" label="<%= student.batch_name || 'No batch' %>"></option>
+                        <% }) %>
+                      </datalist>
+                    </div>
                     <div class="ops2-field"><label>Date</label><input type="date" name="attendanceDate" required /></div>
                     <div class="ops2-field"><label>Status</label><select name="status" required><option value="present">Present</option><option value="absent">Absent</option><option value="late">Late</option></select></div>
                     <div class="ops2-field full"><label>Notes</label><input type="text" name="notes" /></div>
@@ -748,7 +759,18 @@
                 <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Finance</p><h3>Add fee record</h3></div></div>
                 <form method="post" action="/admin/fees" class="ops2-form-grid">
                   <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
-                  <div class="ops2-field"><label>Roll Number</label><input type="text" name="rollNo" required /></div>
+                  <div class="ops2-field full">
+                    <label>Student Name / Roll Number</label>
+                    <input type="text" name="studentLookup" list="fees-student-options" data-student-picker="fees" placeholder="Type N to find Nilesh" autocomplete="off" required />
+                    <input type="hidden" name="rollNo" data-student-roll-target="fees" required />
+                    <p class="tiny-note">Start typing student name, then choose the student. Roll number is filled automatically.</p>
+                    <datalist id="fees-student-options">
+                      <% students.forEach((student) => { %>
+                        <option value="<%= student.name || 'Student' %> - Roll <%= student.roll_no %>" data-roll="<%= student.roll_no %>" label="<%= student.batch_name || 'No batch' %>"></option>
+                        <option value="<%= student.roll_no %> - <%= student.name || 'Student' %>" data-roll="<%= student.roll_no %>" label="<%= student.batch_name || 'No batch' %>"></option>
+                      <% }) %>
+                    </datalist>
+                  </div>
                   <div class="ops2-field"><label>Amount</label><input type="number" name="amount" step="0.01" min="0" required /></div>
                   <div class="ops2-field"><label>Status</label><select name="status" required><option value="pending">Pending</option><option value="paid">Paid</option><option value="overdue">Overdue</option></select></div>
                   <div class="ops2-field"><label>Due Date</label><input type="date" name="dueDate" /></div>
@@ -1046,7 +1068,11 @@
                   <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                   <div class="ops2-field"><label>Admin Display Name</label><input type="text" name="adminDisplayName" value="<%= user.name || '' %>" required /></div>
                   <div class="ops2-field"><label>Admin Contact Number</label><input type="text" name="adminContactPhone" value="<%= adminProfile?.contact_phone || user.contactPhone || '' %>" placeholder="9876543210" /></div>
-                  <div class="ops2-field"><label>Admin Email</label><input type="email" name="adminEmail" value="<%= adminProfile?.email || user.email || '' %>" placeholder="admin@class.com" /></div>
+                  <div class="ops2-field">
+                    <label>Admin OTP Email</label>
+                    <input type="email" name="adminEmail" value="<%= adminProfile?.email || user.email || '' %>" placeholder="admin@class.com" required />
+                    <p class="tiny-note">Login and password reset OTPs will be sent to this email.</p>
+                  </div>
                   <div class="ops2-field"><label>Coaching Name</label><input type="text" name="coachingName" value="<%= coaching?.name || '' %>" required /></div>
                   <div class="ops2-field full"><label>Portal Display Name</label><input type="text" name="brandName" value="<%= coaching?.brand_name || coaching?.name || '' %>" /></div>
                   <div class="ops2-field"><label>Contact Email</label><input type="email" name="contactEmail" value="<%= coaching?.contact_email || '' %>" /></div>
@@ -1131,6 +1157,32 @@
           }
           button.textContent = 'Saving...';
         });
+      });
+    });
+
+    document.querySelectorAll('[data-student-picker]').forEach((input) => {
+      const pickerKey = input.dataset.studentPicker;
+      const rollTarget = document.querySelector(`[data-student-roll-target="${pickerKey}"]`);
+      const options = Array.from(document.querySelectorAll(`#${input.getAttribute('list')} option`));
+
+      const resolveRollNumber = () => {
+        const typedValue = input.value.trim().toLowerCase();
+        const exactOption = options.find((option) => option.value.trim().toLowerCase() === typedValue);
+        const rollMatch = input.value.trim().match(/\broll\s+([^\s-]+)/i) || input.value.trim().match(/^([^\s-]+)\s+-/);
+        const directRollOption = options.find((option) => String(option.dataset.roll || '').toLowerCase() === typedValue);
+        const selectedRoll = exactOption?.dataset.roll || directRollOption?.dataset.roll || rollMatch?.[1] || '';
+
+        if (rollTarget) rollTarget.value = selectedRoll;
+        return selectedRoll;
+      };
+
+      input.addEventListener('input', resolveRollNumber);
+      input.form?.addEventListener('submit', (event) => {
+        if (!resolveRollNumber()) {
+          event.preventDefault();
+          input.focus();
+          alert('Please choose a student from the suggestions before saving.');
+        }
       });
     });
   </script>
