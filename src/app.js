@@ -38,6 +38,7 @@ const {
 } = require('./services/notificationService');
 const {
   findStudentByParentPhone,
+  findStudentByParentPhoneAnyCoaching,
   findStudentByParentSession,
   generateFeeReceiptPdf,
   getCoachingByWhatsAppPhoneNumberId,
@@ -3255,6 +3256,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
             if (!msg) continue;
 
             try {
+              let student = null;
               if (!coaching) {
                 coaching = await getCoachingByWhatsAppPhoneNumberId(phoneNumberId);
                 console.log('[COACHING] Lookup result:', coaching ? {
@@ -3264,10 +3266,48 @@ app.post('/webhook/whatsapp', async (req, res) => {
                 } : null);
               }
               if (!coaching) {
-                console.error('[COACHING] No coaching found for phone number ID', { phoneNumberId });
+                student = await findStudentByParentPhoneAnyCoaching(incomingMessage.from);
+                console.log('[STUDENT] Global phone lookup result:', student ? {
+                  id: student.id,
+                  rollNo: student.roll_no,
+                  coachingId: student.coaching_id,
+                } : null);
+
+                if (student) {
+                  await run(
+                    `INSERT INTO whatsapp_settings (coaching_id, phone_number_id, updated_at)
+                     VALUES (?, ?, CURRENT_TIMESTAMP)
+                     ON CONFLICT (coaching_id)
+                     DO UPDATE SET phone_number_id = EXCLUDED.phone_number_id,
+                                   updated_at = CURRENT_TIMESTAMP`,
+                    [student.coaching_id, phoneNumberId]
+                  );
+                  coaching = {
+                    coaching_id: student.coaching_id,
+                    name: student.coaching_name,
+                    contact_email: student.contact_email,
+                    phone: phoneNumberId,
+                    admin_contact_phone: student.admin_contact_phone,
+                    contact_phone: student.contact_phone,
+                    whatsapp_number: student.admin_whatsapp_number,
+                  };
+                  console.log('[COACHING] Mapped phone number ID from unique parent phone lookup', {
+                    coachingId: coaching.coaching_id,
+                    studentId: student.id,
+                    phoneNumberId,
+                  });
+                }
+              }
+              if (!coaching) {
+                console.error('[COACHING] No coaching found for phone number ID or sender phone', {
+                  phoneNumberId,
+                  from: incomingMessage.from,
+                });
                 continue;
               }
-              let student = await findStudentByParentPhone(coaching.coaching_id, incomingMessage.from);
+              if (!student) {
+                student = await findStudentByParentPhone(coaching.coaching_id, incomingMessage.from);
+              }
               console.log('[STUDENT] Direct phone lookup result:', student ? {
                 id: student.id,
                 rollNo: student.roll_no,

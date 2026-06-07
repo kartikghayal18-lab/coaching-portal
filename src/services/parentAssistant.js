@@ -397,6 +397,71 @@ async function findStudentByParentPhone(coachingId, phone) {
   );
 }
 
+async function findStudentByParentPhoneAnyCoaching(phone) {
+  const cleanPhone = cleanPhoneNumber(phone);
+  const phoneSuffix = cleanPhone.slice(-10);
+  if (!cleanPhone) return null;
+
+  const matches = await all(
+    `SELECT u.id, u.coaching_id, u.roll_no, u.name, u.contact_phone, u.guardian_phone,
+            u.whatsapp_number, u.parent_whatsapp_number, b.name AS batch_name,
+            cc.name AS coaching_name, cc.contact_email,
+            admin.contact_phone AS admin_contact_phone,
+            admin.contact_phone AS contact_phone,
+            admin.whatsapp_number AS admin_whatsapp_number
+     FROM users u
+     JOIN coaching_classes cc ON cc.id = u.coaching_id
+     LEFT JOIN batches b ON b.id = u.batch_id
+     LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.role = 'admin'
+     WHERE u.role = 'student'
+       AND (
+         REGEXP_REPLACE(COALESCE(u.parent_whatsapp_number, ''), '[^0-9]', '', 'g') = ?
+         OR REGEXP_REPLACE(COALESCE(u.guardian_phone, ''), '[^0-9]', '', 'g') = ?
+         OR REGEXP_REPLACE(COALESCE(u.contact_phone, ''), '[^0-9]', '', 'g') = ?
+         OR REGEXP_REPLACE(COALESCE(u.whatsapp_number, ''), '[^0-9]', '', 'g') = ?
+         OR RIGHT(REGEXP_REPLACE(COALESCE(u.parent_whatsapp_number, ''), '[^0-9]', '', 'g'), 10) = ?
+         OR RIGHT(REGEXP_REPLACE(COALESCE(u.guardian_phone, ''), '[^0-9]', '', 'g'), 10) = ?
+         OR RIGHT(REGEXP_REPLACE(COALESCE(u.contact_phone, ''), '[^0-9]', '', 'g'), 10) = ?
+         OR RIGHT(REGEXP_REPLACE(COALESCE(u.whatsapp_number, ''), '[^0-9]', '', 'g'), 10) = ?
+       )
+     ORDER BY CASE
+       WHEN REGEXP_REPLACE(COALESCE(u.parent_whatsapp_number, ''), '[^0-9]', '', 'g') = ? THEN 1
+       WHEN REGEXP_REPLACE(COALESCE(u.guardian_phone, ''), '[^0-9]', '', 'g') = ? THEN 2
+       WHEN RIGHT(REGEXP_REPLACE(COALESCE(u.parent_whatsapp_number, ''), '[^0-9]', '', 'g'), 10) = ? THEN 3
+       WHEN RIGHT(REGEXP_REPLACE(COALESCE(u.guardian_phone, ''), '[^0-9]', '', 'g'), 10) = ? THEN 4
+       ELSE 5
+     END
+     LIMIT 2`,
+    [
+      cleanPhone,
+      cleanPhone,
+      cleanPhone,
+      cleanPhone,
+      phoneSuffix,
+      phoneSuffix,
+      phoneSuffix,
+      phoneSuffix,
+      cleanPhone,
+      cleanPhone,
+      phoneSuffix,
+      phoneSuffix,
+    ]
+  );
+
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    console.error('[STUDENT] Ambiguous global parent phone lookup', {
+      phoneSuffix,
+      matches: matches.map((student) => ({
+        id: student.id,
+        coachingId: student.coaching_id,
+        rollNo: student.roll_no,
+      })),
+    });
+  }
+  return null;
+}
+
 async function findStudentByParentSession(coachingId, phone) {
   const session = await getParentSession({ coachingId, phone });
   if (!session?.student_id) return null;
@@ -1085,6 +1150,7 @@ module.exports = {
   createFeeReceiptAndSend,
   createMonthlyReportAndSend,
   findStudentByParentPhone,
+  findStudentByParentPhoneAnyCoaching,
   findStudentByParentSession,
   generateFeeReceiptPdf,
   getCoachingByWhatsAppPhoneNumberId,
