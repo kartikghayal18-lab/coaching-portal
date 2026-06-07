@@ -17,7 +17,7 @@
         <div>
           <p class="eyebrow"><%= branding?.brandName || coaching?.name || branding?.portalLabel || 'Coaching Portal' %></p>
           <h1>Legal Agreement Required</h1>
-          <p class="muted">This is shown only on first admin login. Please review and accept the Terms and Conditions, Privacy Policy, and SaaS Agreement to continue.</p>
+          <p class="muted">This is shown only on first admin login. Please review and accept the Terms and Conditions and Privacy Policy to continue.</p>
         </div>
       </div>
       <form method="post" action="/logout">
@@ -79,9 +79,9 @@
       </section>
 
       <section class="card legal-doc">
-        <h2>SaaS Agreement</h2>
+        <h2>Portal Usage Agreement</h2>
         <h3>1. Service Description</h3>
-        <p>This platform provides software tools for coaching institutes to manage students, attendance, fees, and academic records.</p>
+        <p>This portal provides tools for SHIV CHHATRAPATI CLASSES to manage students, attendance, fees, and academic records.</p>
 
         <h3>2. License</h3>
         <ul>
@@ -105,8 +105,8 @@
         <h3>6. Service Availability</h3>
         <p>The service may experience downtime. Uninterrupted access is not guaranteed.</p>
 
-        <h3>7. Payment Terms</h3>
-        <p>An active subscription is required for continued access. Failure to pay may result in restricted access.</p>
+        <h3>7. Access Terms</h3>
+        <p>Access may be restricted if misuse, unauthorized access, or operational risk is detected.</p>
 
         <h3>8. Limitation of Liability</h3>
         <p>We are not liable for data loss beyond stated policies, financial losses, business losses, or service downtime.</p>
@@ -115,7 +115,7 @@
         <p>Accounts may be suspended if terms are violated or illegal activity is detected.</p>
 
         <h3>10. Modifications</h3>
-        <p>Features, pricing, and policies may change at any time.</p>
+        <p>Features and policies may change as the institute updates its operational process.</p>
 
         <h3>11. Governing Law</h3>
         <p>This agreement is governed by applicable local laws.</p>
@@ -153,7 +153,7 @@
           <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
       <label class="checkbox-row"><input type="checkbox" name="acceptTerms" required /> I agree to the Terms and Conditions</label>
       <label class="checkbox-row"><input type="checkbox" name="acceptPrivacy" required /> I agree to the Privacy Policy</label>
-      <label class="checkbox-row"><input type="checkbox" name="acceptSaas" required /> I agree to the SaaS Agreement</label>
+      <label class="checkbox-row"><input type="checkbox" name="acceptPortal" required /> I agree to the Portal Usage Agreement</label>
       <button type="submit" class="btn">Accept and Continue</button>
     </form>
   </div>

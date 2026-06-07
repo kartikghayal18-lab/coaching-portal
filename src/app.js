@@ -109,6 +109,8 @@ function getCurrentMonthValue() {
 }
 
 const PORT = process.env.PORT || 3000;
+const SINGLE_CLIENT_COACHING_SLUG = String(process.env.CLIENT_COACHING_SLUG || 'scc').trim().toLowerCase();
+const SINGLE_CLIENT_NAME = 'SHIV CHHATRAPATI CLASSES';
 const OWNER_SECTIONS = new Set(['overview', 'coachings', 'trial-requests']);
 const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes', 'whatsapp', 'notifications', 'settings']);
 const ALLOWED_UPLOAD_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/jpg']);
@@ -429,19 +431,7 @@ async function signInUser(req, user, coaching = null) {
 }
 
 function buildRoleAwareLoginUrl(sessionUser) {
-  if (!sessionUser) return '/login';
-  if (sessionUser.isOwner) return '/owner/login';
-
-  const params = new URLSearchParams();
-  if (sessionUser.coachingSlug) {
-    params.set('coaching', sessionUser.coachingSlug);
-  }
-  if (sessionUser.role === 'admin' || sessionUser.role === 'student') {
-    params.set('role', sessionUser.role);
-  }
-
-  const query = params.toString();
-  return query ? `/login?${query}` : '/login';
+  return '/login';
 }
 
 function getRequestBaseUrl(req) {
@@ -2142,10 +2132,9 @@ async function getAdminLegalAcceptance(userId, coachingId) {
 }
 
 async function renderLoginPage(req, res, flash = null) {
-  const coachingHint = (req.query.coaching || req.body?.coachingSlug || '').trim().toLowerCase();
   const requestedRole = String(req.query.role || req.body?.role || '').trim().toLowerCase();
   const loginRole = requestedRole === 'student' ? 'student' : 'admin';
-  const coaching = coachingHint ? await getCoachingBySlug(coachingHint) : null;
+  const coaching = await getCoachingBySlug(SINGLE_CLIENT_COACHING_SLUG);
   const nextFlash = flash || req.session?.flash || null;
   const captcha = getCaptchaChallenge(req, 'login');
   if (req.session) req.session.flash = null;
@@ -2153,9 +2142,9 @@ async function renderLoginPage(req, res, flash = null) {
   return renderWithMessage(res, 'auth-login', {
     flash: nextFlash,
     coaching,
-    coachingHint,
+    coachingHint: SINGLE_CLIENT_COACHING_SLUG,
     loginRole,
-    branding: buildBranding(coaching),
+    branding: buildBranding(coaching || { name: SINGLE_CLIENT_NAME, brand_name: SINGLE_CLIENT_NAME, slug: SINGLE_CLIENT_COACHING_SLUG }),
     captcha,
   });
 }
@@ -2481,7 +2470,7 @@ app.use(async (req, res, next) => {
 
 app.get('/', (req, res) => {
   if (!req.session.user) return res.redirect('/login');
-  if (req.session.user.isOwner) return res.redirect('/owner/dashboard');
+  if (req.session.user.isOwner) return res.redirect('/login');
   if (req.session.user.role === 'admin') return res.redirect('/admin/dashboard');
   return res.redirect('/student/dashboard');
 });
@@ -2764,6 +2753,9 @@ app.post('/admin/reset-password', async (req, res) => {
   return res.redirect('/login');
 });
 
+app.all('/trial/apply', (req, res) => res.redirect('/login'));
+app.all(['/owner', '/owner/*'], (req, res) => res.redirect('/login'));
+
 app.get('/trial/apply', async (req, res) => {
   if (req.session.user) return res.redirect('/');
   return renderTrialApplyPage(req, res);
@@ -2971,11 +2963,8 @@ app.post('/login', async (req, res) => {
   const role = (req.body.role || '').trim();
   const username = (req.body.username || '').trim();
   const submittedPassword = req.body.password || '';
-  const password =
-    role === 'student' && !submittedPassword.trim()
-      ? username
-      : submittedPassword;
-  const coachingSlug = (req.body.coachingSlug || '').trim().toLowerCase();
+  const password = submittedPassword;
+  const coachingSlug = SINGLE_CLIENT_COACHING_SLUG;
 
   if (!verifyCaptcha(req, 'login', req.body.captchaAnswer)) {
     return renderLoginPage(req, res, {
@@ -2991,7 +2980,7 @@ app.post('/login', async (req, res) => {
     coaching = await getCoachingBySlug(coachingSlug);
 
     if (!coaching) {
-      return renderLoginPage(req, res, { type: 'error', text: 'Invalid coaching code' });
+      return renderLoginPage(req, res, { type: 'error', text: `${SINGLE_CLIENT_NAME} portal is not configured yet.` });
     }
 
     if (role === 'admin') {
@@ -3516,12 +3505,12 @@ app.get('/admin/legal', requireCoachingAdmin, async (req, res) => {
 app.post('/admin/legal/accept', requireCoachingAdmin, async (req, res) => {
   const acceptedTerms = req.body.acceptTerms === 'on';
   const acceptedPrivacy = req.body.acceptPrivacy === 'on';
-  const acceptedSaas = req.body.acceptSaas === 'on';
+  const acceptedPortal = req.body.acceptPortal === 'on';
 
-  if (!acceptedTerms || !acceptedPrivacy || !acceptedSaas) {
+  if (!acceptedTerms || !acceptedPrivacy || !acceptedPortal) {
     req.session.flash = {
       type: 'error',
-      text: 'You must accept the Terms and Conditions, Privacy Policy, and SaaS Agreement to continue.',
+      text: 'You must accept the Terms and Conditions, Privacy Policy, and Portal Usage Agreement to continue.',
     };
     return res.redirect('/admin/legal');
   }

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title><%= branding?.brandName || 'Demo Coaching' %> - Login</title>
+  <title><%= branding?.brandName || 'SHIV CHHATRAPATI CLASSES' %> - Login</title>
   <link rel="icon" type="image/x-icon" href="<%= branding?.faviconUrl || '/branding/favicon.ico' %>" />
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
@@ -17,23 +17,19 @@
               <img src="<%= branding.logoUrl %>" alt="<%= branding.brandName %> logo" class="brand-logo" />
             <% } %>
             <div>
-              <p class="eyebrow"><%= coaching ? (branding?.portalLabel || 'Coaching Portal') : (branding?.platformLabel || 'Coaching Platform') %></p>
-              <h1><%= branding?.brandName || 'Demo Coaching' %></h1>
+              <p class="eyebrow">Coaching Portal</p>
+              <h1><%= branding?.brandName || 'SHIV CHHATRAPATI CLASSES' %></h1>
             </div>
           </div>
 
           <p class="muted auth-lead">
-            <% if (coaching) { %>
-              Sign in to <strong><%= coaching.name %></strong> with your coaching code and account details.
-            <% } else { %>
-              One portal for every coaching. Admins and students open only their own dashboard using the coaching code.
-            <% } %>
+            Sign in to <strong><%= coaching?.name || 'SHIV CHHATRAPATI CLASSES' %></strong> with your account details.
           </p>
 
           <div class="hero-chip-row">
-            <span class="info-chip">Multi Coaching SaaS</span>
-            <span class="info-chip">Student Papers + Fees</span>
-            <span class="info-chip">Attendance + Notes</span>
+            <span class="info-chip">Student Papers</span>
+            <span class="info-chip">Fees + Attendance</span>
+            <span class="info-chip">Parent Updates</span>
           </div>
         </div>
 
@@ -47,8 +43,8 @@
             <strong>Open papers, check attendance, pending fees, notes, and progress without switching apps.</strong>
           </article>
           <article class="feature-item">
-            <span class="feature-kicker">For Each Coaching</span>
-            <strong>Separate login, separate data, separate branding, same website.</strong>
+            <span class="feature-kicker">For Parents</span>
+            <strong>Get important attendance, fee, result, and paper updates directly on WhatsApp.</strong>
           </article>
         </div>
       </section>
@@ -60,14 +56,13 @@
 
         <form method="post" action="/login" class="card auth-form">
           <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+          <input type="hidden" name="coachingSlug" value="<%= coachingHint || 'scc' %>" />
+
           <div class="form-title-row">
             <div>
               <p class="eyebrow">Sign In</p>
               <h2>Open Your Portal</h2>
             </div>
-            <% if (coaching) { %>
-              <span class="info-chip">Code: <strong><%= coaching.slug %></strong></span>
-            <% } %>
           </div>
 
           <label>Login Type</label>
@@ -76,27 +71,11 @@
             <option value="student" <%= loginRole === 'student' ? 'selected' : '' %>>Student</option>
           </select>
 
-          <div id="coachingField">
-            <label>Coaching Code</label>
-            <input
-              type="text"
-              id="coachingSlug"
-              name="coachingSlug"
-              value="<%= coachingHint || '' %>"
-              placeholder="e.g. alpha-jee-academy"
-              required
-            />
-            <% if (coaching) { %>
-              <p class="muted">Opening portal for <strong><%= branding?.brandName || coaching.name %></strong> (<%= coaching.slug %>)</p>
-            <% } %>
-          </div>
-
           <label id="usernameLabel">Admin Username</label>
-          <input type="text" id="usernameInput" name="username" placeholder="Enter username" required />
+          <input type="text" id="usernameInput" name="username" placeholder="Enter admin username" required />
 
           <label id="passwordLabel">Password</label>
-          <input type="password" id="passwordInput" name="password" required />
-          <p id="passwordHelp" class="muted"></p>
+          <input type="password" id="passwordInput" name="password" placeholder="Enter password" required />
 
           <label>Security Check: <%= captcha.prompt %> = ?</label>
           <input type="text" name="captchaAnswer" inputmode="numeric" placeholder="Enter answer" required />
@@ -104,17 +83,6 @@
           <button type="submit" class="btn">Login</button>
           <a href="/admin/forgot-password" class="mini-link">Forgot admin password?</a>
         </form>
-
-        <section class="card trial-cta">
-          <div class="form-title-row">
-            <div>
-              <p class="eyebrow">New Coaching</p>
-              <h2>Need a Trial Portal?</h2>
-            </div>
-          </div>
-          <p class="muted">Apply for a manual trial account. Share your coaching details and the owner can review and activate your portal.</p>
-          <a href="/trial/apply" class="btn secondary">Apply for Trial</a>
-        </section>
       </div>
     </div>
   </div>
@@ -123,41 +91,23 @@
     const roleSelect = document.getElementById('role');
     const usernameLabel = document.getElementById('usernameLabel');
     const usernameInput = document.getElementById('usernameInput');
-    const passwordLabel = document.getElementById('passwordLabel');
     const passwordInput = document.getElementById('passwordInput');
-    const passwordHelp = document.getElementById('passwordHelp');
 
     function toggleLoginForm() {
-      const role = roleSelect.value;
-
-      if (role === 'admin') {
+      if (roleSelect.value === 'admin') {
         usernameLabel.textContent = 'Admin Username';
         usernameInput.placeholder = 'Enter admin username';
-        passwordLabel.textContent = 'Password';
         passwordInput.placeholder = 'Enter admin password';
-        passwordInput.required = true;
-        passwordHelp.textContent = '';
         return;
       }
 
       usernameLabel.textContent = 'Student Roll Number';
-      usernameInput.placeholder = 'e.g. 101';
-      passwordLabel.textContent = 'Password';
-      passwordInput.placeholder = 'Leave blank to use roll number';
-      passwordInput.required = false;
-      passwordHelp.textContent = 'Default student password is the roll number unless the admin set a custom password.';
+      usernameInput.placeholder = 'Enter student roll number';
+      passwordInput.placeholder = 'Enter password';
     }
 
     roleSelect.addEventListener('change', toggleLoginForm);
     toggleLoginForm();
-
-    document.addEventListener('keydown', (event) => {
-      const isOwnerShortcut = (event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'o';
-      if (!isOwnerShortcut) return;
-
-      event.preventDefault();
-      window.location.href = '/owner/login';
-    });
   </script>
 </body>
 </html>
