@@ -331,6 +331,10 @@ function isTwoFactorAuthPostPath(req) {
   return getRequestPathCandidates(req).some((requestPath) => TWO_FACTOR_AUTH_POST_PATHS.has(requestPath));
 }
 
+function isLoginPostPath(req) {
+  return getRequestPathCandidates(req).some((requestPath) => requestPath === '/login');
+}
+
 function isLogoutPostPath(req) {
   return getRequestPathCandidates(req).some((requestPath) => requestPath === '/logout');
 }
@@ -1058,6 +1062,14 @@ app.use((req, res, next) => {
   }
 
   if (!ensureCsrf(req)) {
+    if (req.method === 'POST' && isLoginPostPath(req)) {
+      req.session.flash = {
+        type: 'error',
+        text: 'Your login page expired. Please try again.',
+      };
+      return res.redirect('/login');
+    }
+
     return res.status(403).send('Invalid security token');
   }
 
@@ -2477,6 +2489,7 @@ app.get('/', (req, res) => {
 
 app.get('/login', async (req, res) => {
   if (req.session.user) return res.redirect('/');
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   return renderLoginPage(req, res);
 });
 
