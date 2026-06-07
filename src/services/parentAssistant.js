@@ -786,13 +786,15 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
     console.log('Student:', student?.id);
 
     if (normalizedOption === 'MENU' || (normalizedOption === 'GREETING' && !session)) {
-      await sendWhatsAppNotification({
+      console.log('[HANDLER] Enter MENU');
+      const notificationResult = await sendWhatsAppNotification({
         studentId: student.id,
         phone,
         type: 'parent_menu',
         message: buildParentMenuMessage(coaching),
         eventKey: `parent_menu:${student.id}:${Date.now()}`,
       });
+      console.log('[WHATSAPP] Menu result:', notificationResult);
       await saveParentSession({
         coachingId: student.coaching_id,
         studentId: student.id,
@@ -801,13 +803,12 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
         lastMessage: normalizedOption,
       });
       return true;
-    }
-
-    console.log('Before FEES block');
-    if (normalizedOption === 'FEES') {
+    } else if (normalizedOption === 'FEES') {
+      console.log('Before FEES block');
+      console.log('[HANDLER] Enter FEES');
       const feeSummary = await getStudentFeeSummary(student.coaching_id, student.id);
       const nextDueDate = await getNextDueDate(student.coaching_id, student.id);
-      await sendWhatsAppNotification({
+      const notificationResult = await sendWhatsAppNotification({
         studentId: student.id,
         phone,
         type: 'parent_menu_fee_summary',
@@ -826,6 +827,7 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
         ]),
         eventKey: `parent_menu_fee_summary:${student.id}:${Date.now()}`,
       });
+      console.log('[WHATSAPP] Fee summary result:', notificationResult);
       await saveParentSession({
         coachingId: student.coaching_id,
         studentId: student.id,
@@ -834,10 +836,9 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
         lastMessage: normalizedOption,
       });
       return true;
-    }
-
-    console.log('Before ATTENDANCE block');
-    if (normalizedOption === 'ATTENDANCE') {
+    } else if (normalizedOption === 'ATTENDANCE') {
+      console.log('Before ATTENDANCE block');
+      console.log('[HANDLER] Enter ATTENDANCE');
       const summary = await get(
         `SELECT COUNT(*) AS total,
                 SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) AS present_count,
@@ -850,7 +851,7 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
       const total = Number(summary?.total || 0);
       const present = Number(summary?.present_count || 0);
       const percent = total ? ((present / total) * 100).toFixed(1) : '0.0';
-      await sendWhatsAppNotification({
+      const notificationResult = await sendWhatsAppNotification({
         studentId: student.id,
         phone,
         type: 'parent_menu_attendance',
@@ -863,6 +864,7 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
         ]),
         eventKey: `parent_menu_attendance:${student.id}:${Date.now()}`,
       });
+      console.log('[WHATSAPP] Attendance result:', notificationResult);
       await saveParentSession({
         coachingId: student.coaching_id,
         studentId: student.id,
@@ -871,13 +873,14 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
         lastMessage: normalizedOption,
       });
       return true;
-    }
-
-    console.log('Before RESULTS block');
-    if (normalizedOption === 'RESULTS') {
+    } else if (normalizedOption === 'RESULTS') {
+      console.log('Before RESULTS block');
+      console.log('[HANDLER] Enter RESULTS');
       const sent = await sendLatestResult(student, phone);
+      console.log('[WHATSAPP] Latest result send status:', sent);
       if (!sent) {
-        await sendWhatsAppNotification({ studentId: student.id, phone, type: 'parent_menu_latest_result', message: 'No result PDF is available yet.', eventKey: `parent_menu_latest_result_empty:${student.id}:${Date.now()}` });
+        const notificationResult = await sendWhatsAppNotification({ studentId: student.id, phone, type: 'parent_menu_latest_result', message: 'No result PDF is available yet.', eventKey: `parent_menu_latest_result_empty:${student.id}:${Date.now()}` });
+        console.log('[WHATSAPP] Empty latest result response:', notificationResult);
       }
       await saveParentSession({
         coachingId: student.coaching_id,
@@ -887,16 +890,15 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
         lastMessage: normalizedOption,
       });
       return true;
-    }
-
-    console.log('Before PERFORMANCE block');
-    if (normalizedOption === 'PERFORMANCE') {
+    } else if (normalizedOption === 'PERFORMANCE') {
+      console.log('Before PERFORMANCE block');
+      console.log('[HANDLER] Enter PERFORMANCE');
       const performance = await buildStudentPerformance(student.coaching_id, student.id);
       const percentages = performance.progressSeries.map((item) => Number(item.percent)).filter(Number.isFinite);
       const average = Number(performance.marksSummary.papersCount || 0) > 0 ? performance.marksSummary.marksPercent : '0';
       const highest = percentages.length ? formatPercent(Math.max(...percentages)) : '0';
       const latest = percentages.length ? formatPercent(percentages[percentages.length - 1]) : '0';
-      await sendWhatsAppNotification({
+      const notificationResult = await sendWhatsAppNotification({
         studentId: student.id,
         phone,
         type: 'parent_menu_performance_report',
@@ -914,7 +916,9 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
         ]),
         eventKey: `parent_menu_performance_report:${student.id}:${Date.now()}`,
       });
-      await sendPerformanceGraph(student, phone, coaching, { sendMessage: false });
+      console.log('[WHATSAPP] Performance report result:', notificationResult);
+      const graphResult = await sendPerformanceGraph(student, phone, coaching, { sendMessage: false });
+      console.log('[WHATSAPP] Performance graph result:', graphResult);
       await saveParentSession({
         coachingId: student.coaching_id,
         studentId: student.id,
@@ -923,11 +927,10 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
         lastMessage: normalizedOption,
       });
       return true;
-    }
-
-    console.log('Before STUDENT_INFO block');
-    if (normalizedOption === 'STUDENT_INFO') {
-      await sendWhatsAppNotification({
+    } else if (normalizedOption === 'STUDENT_INFO') {
+      console.log('Before STUDENT_INFO block');
+      console.log('[HANDLER] Enter STUDENT_INFO');
+      const notificationResult = await sendWhatsAppNotification({
         studentId: student.id,
         phone,
         type: 'parent_menu_student_profile',
@@ -940,6 +943,7 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
         ]),
         eventKey: `parent_menu_student_profile:${student.id}:${Date.now()}`,
       });
+      console.log('[WHATSAPP] Student info result:', notificationResult);
       await saveParentSession({
         coachingId: student.coaching_id,
         studentId: student.id,
@@ -950,6 +954,7 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
       return true;
     }
 
+    console.log('[HANDLER] No matching option:', normalizedOption);
     return false;
   } catch (error) {
     console.error('Parent Assistant Error', error);

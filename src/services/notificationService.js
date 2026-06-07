@@ -96,6 +96,13 @@ async function sendWhatsAppNotification({
   message,
   eventKey = null,
 }) {
+  console.log('[WHATSAPP] sendWhatsAppNotification input:', {
+    studentId,
+    phone: cleanPhoneNumber(phone),
+    type,
+    hasMessage: Boolean(String(message || '').trim()),
+    eventKey,
+  });
   const student = await get(
     `SELECT id, coaching_id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
      FROM users
@@ -105,6 +112,7 @@ async function sendWhatsAppNotification({
   );
 
   if (!student) {
+    console.error('[WHATSAPP] Notification skipped: student not found', { studentId, type });
     return { ok: false, skipped: true, reason: 'Student not found' };
   }
 
@@ -124,8 +132,23 @@ async function sendWhatsAppNotification({
     eventKey,
   });
   const settings = await getWhatsAppSettings(student.coaching_id);
+  console.log('[WHATSAPP] Notification payload:', {
+    coachingId: student.coaching_id,
+    studentId: student.id,
+    type: notificationType,
+    phone: resolvedPhone,
+    eventKey: notificationEventKey,
+    hasAccessToken: Boolean(settings.accessToken),
+    phoneNumberId: settings.phoneNumberId || null,
+    messagePreview: notificationMessage.slice(0, 160),
+  });
   const toggleKey = getToggleKeyForType(notificationType);
   if (toggleKey && settings[toggleKey] === false) {
+    console.error('[WHATSAPP] Notification skipped: disabled by settings', {
+      studentId: student.id,
+      type: notificationType,
+      toggleKey,
+    });
     return { ok: false, skipped: true, reason: 'Notification type disabled' };
   }
 
@@ -137,6 +160,11 @@ async function sendWhatsAppNotification({
     [notificationEventKey]
   );
   if (existing) {
+    console.log('[WHATSAPP] Notification skipped: duplicate event key', {
+      logId: existing.id,
+      status: existing.status,
+      eventKey: notificationEventKey,
+    });
     return { ok: true, skipped: true, duplicate: true, logId: existing.id, status: existing.status };
   }
 
@@ -162,10 +190,17 @@ async function sendWhatsAppNotification({
       `UPDATE notification_logs SET status = ?, error_message = ? WHERE id = ?`,
       ['skipped', 'WhatsApp number missing', logId]
     );
+    console.error('[WHATSAPP] Notification skipped: phone missing', { logId, studentId: student.id });
     return { ok: false, skipped: true, reason: 'WhatsApp number missing', logId };
   }
 
   try {
+    console.log('[WHATSAPP] Sending text notification', {
+      logId,
+      studentId: student.id,
+      phone: resolvedPhone,
+      type: notificationType,
+    });
     const result = await sendTextMessage({
       coachingId: student.coaching_id,
       studentId: student.id,
@@ -173,6 +208,7 @@ async function sendWhatsAppNotification({
       message: notificationMessage,
       settings,
     });
+    console.log('[WHATSAPP] Text notification response:', result);
     if (result?.failed) {
       await run(
         `UPDATE notification_logs

@@ -3239,6 +3239,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
         const incomingMessages = Array.isArray(change?.value?.messages) ? change.value.messages : [];
         const phoneNumberId = String(change?.value?.metadata?.phone_number_id || '').trim();
         if (incomingMessages.length && phoneNumberId) {
+          console.log('[WEBHOOK] Phone number ID:', phoneNumberId);
           let coaching = null;
           for (const incomingMessage of incomingMessages) {
             const incomingText = incomingMessage?.text?.body
@@ -3248,17 +3249,37 @@ app.post('/webhook/whatsapp', async (req, res) => {
               || incomingMessage?.interactive?.list_reply?.id
               || '';
             const msg = incomingText.trim().toLowerCase();
+            console.log('[WEBHOOK] Message received');
+            console.log('[WEBHOOK] Incoming text:', incomingText);
             console.log('Incoming message:', incomingText);
             if (!msg) continue;
 
             try {
               if (!coaching) {
                 coaching = await getCoachingByWhatsAppPhoneNumberId(phoneNumberId);
+                console.log('[COACHING] Lookup result:', coaching ? {
+                  coachingId: coaching.coaching_id,
+                  name: coaching.name,
+                  phoneNumberId,
+                } : null);
               }
-              if (!coaching) continue;
+              if (!coaching) {
+                console.error('[COACHING] No coaching found for phone number ID', { phoneNumberId });
+                continue;
+              }
               let student = await findStudentByParentPhone(coaching.coaching_id, incomingMessage.from);
+              console.log('[STUDENT] Direct phone lookup result:', student ? {
+                id: student.id,
+                rollNo: student.roll_no,
+                coachingId: student.coaching_id,
+              } : null);
               if (!student) {
                 student = await findStudentByParentSession(coaching.coaching_id, incomingMessage.from);
+                console.log('[STUDENT] Session lookup result:', student ? {
+                  id: student.id,
+                  rollNo: student.roll_no,
+                  coachingId: student.coaching_id,
+                } : null);
               }
               if (!student) {
                 console.error('WhatsApp parent assistant student not found', {
@@ -3273,7 +3294,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
                 from: incomingMessage.from,
                 text: incomingText,
               });
-              console.log('Parent assistant handled:', handled);
+              console.log('[PARENT ASSISTANT RESULT]', handled);
             } catch (error) {
               console.error('WhatsApp parent assistant failed', {
                 phoneNumberId,

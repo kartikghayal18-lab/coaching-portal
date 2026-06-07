@@ -178,7 +178,15 @@ async function sendMetaMessage({ settings, payload }) {
       throw new Error('WhatsApp access token and phone number ID are required');
     }
 
-    const response = await fetch(`${GRAPH_API_BASE_URL}/${settings.phoneNumberId}/messages`, {
+    const apiUrl = `${GRAPH_API_BASE_URL}/${settings.phoneNumberId}/messages`;
+    console.log('[WHATSAPP] API request:', {
+      url: apiUrl,
+      type: payload?.type || null,
+      to: payload?.to || null,
+      payload,
+    });
+
+    const response = await fetch(apiUrl, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${settings.accessToken}`,
@@ -191,6 +199,12 @@ async function sendMetaMessage({ settings, payload }) {
     });
 
     const body = await response.json().catch(() => ({}));
+    console.log('[WHATSAPP] API response:', {
+      url: apiUrl,
+      status: response.status,
+      ok: response.ok,
+      body,
+    });
     if (!response.ok) {
       const message = body?.error?.message || `WhatsApp API request failed with status ${response.status}`;
       const error = new Error(message);
@@ -201,6 +215,12 @@ async function sendMetaMessage({ settings, payload }) {
 
     return body;
   } catch (error) {
+    console.error('[WHATSAPP] API error:', {
+      status: error.status || null,
+      response: error.response || null,
+      message: error.message,
+      stack: error.stack,
+    });
     console.error('WhatsApp API send failed', error);
     throw error;
   }
@@ -220,6 +240,14 @@ async function sendTextMessage({ coachingId, studentId = null, to, message, sett
 
   try {
     const activeSettings = settings || await getWhatsAppSettings(coachingId);
+    console.log('[WHATSAPP] Text payload:', {
+      coachingId,
+      studentId,
+      phone: phoneNumber,
+      phoneNumberId: activeSettings.phoneNumberId || null,
+      hasAccessToken: Boolean(activeSettings.accessToken),
+      messagePreview: messageContent.slice(0, 160),
+    });
     const response = await sendMetaMessage({
       settings: activeSettings,
       payload: {
@@ -238,6 +266,13 @@ async function sendTextMessage({ coachingId, studentId = null, to, message, sett
     );
     return { ok: true, metaMessageId, response };
   } catch (error) {
+    console.error('[WHATSAPP] Text error:', {
+      coachingId,
+      studentId,
+      phone: phoneNumber,
+      message: error.message,
+      stack: error.stack,
+    });
     console.error('sendTextMessage failed', error);
     await run(
       `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
