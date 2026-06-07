@@ -265,18 +265,90 @@ async function getPaperDocument(paper) {
 
 async function getCoachingByWhatsAppPhoneNumberId(phoneNumberId) {
   if (!phoneNumberId) return null;
-  return get(
-    `SELECT ws.coaching_id, cc.name, cc.contact_email, ws.phone_number_id AS phone,
-            admin.contact_phone AS admin_contact_phone,
-            admin.contact_phone AS contact_phone,
-            admin.whatsapp_number AS whatsapp_number
-     FROM whatsapp_settings ws
-     JOIN coaching_classes cc ON cc.id = ws.coaching_id
-     LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.role = 'admin'
+
+  const selectCoachingSql = `
+    SELECT ws.coaching_id, cc.name, cc.contact_email, ws.phone_number_id AS phone,
+           admin.contact_phone AS admin_contact_phone,
+           admin.contact_phone AS contact_phone,
+           admin.whatsapp_number AS whatsapp_number
+    FROM whatsapp_settings ws
+    JOIN coaching_classes cc ON cc.id = ws.coaching_id
+    LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.role = 'admin'
+  `;
+
+  const exactMatch = await get(
+    `${selectCoachingSql}
      WHERE ws.phone_number_id = ?
      LIMIT 1`,
     [phoneNumberId]
   );
+  if (exactMatch) return exactMatch;
+
+  console.error('[COACHING] No exact WhatsApp phone_number_id mapping found', { phoneNumberId });
+
+  const settingsRows = await all(
+    `${selectCoachingSql}
+     ORDER BY ws.updated_at DESC
+     LIMIT 2`
+  );
+  if (settingsRows.length === 1) {
+    await run(
+      `UPDATE whatsapp_settings
+       SET phone_number_id = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE coaching_id = ?`,
+      [phoneNumberId, settingsRows[0].coaching_id]
+    );
+    console.log('[COACHING] Repaired WhatsApp phone_number_id mapping', {
+      coachingId: settingsRows[0].coaching_id,
+      phoneNumberId,
+    });
+    return {
+      ...settingsRows[0],
+      phone: phoneNumberId,
+    };
+  }
+
+  if (settingsRows.length > 1) {
+    console.error('[COACHING] Ambiguous WhatsApp settings; cannot choose coaching automatically', {
+      phoneNumberId,
+      matchingRows: settingsRows.length,
+    });
+    return null;
+  }
+
+  const coachingRows = await all(
+    `SELECT cc.id AS coaching_id, cc.name, cc.contact_email, ? AS phone,
+            admin.contact_phone AS admin_contact_phone,
+            admin.contact_phone AS contact_phone,
+            admin.whatsapp_number AS whatsapp_number
+     FROM coaching_classes cc
+     LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.role = 'admin'
+     ORDER BY cc.id ASC
+     LIMIT 2`,
+    [phoneNumberId]
+  );
+
+  if (coachingRows.length === 1) {
+    await run(
+      `INSERT INTO whatsapp_settings (coaching_id, phone_number_id, updated_at)
+       VALUES (?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT (coaching_id)
+       DO UPDATE SET phone_number_id = EXCLUDED.phone_number_id,
+                     updated_at = CURRENT_TIMESTAMP`,
+      [coachingRows[0].coaching_id, phoneNumberId]
+    );
+    console.log('[COACHING] Created WhatsApp phone_number_id mapping from single coaching fallback', {
+      coachingId: coachingRows[0].coaching_id,
+      phoneNumberId,
+    });
+    return coachingRows[0];
+  }
+
+  console.error('[COACHING] Unable to resolve WhatsApp phone_number_id mapping', {
+    phoneNumberId,
+    coachingRows: coachingRows.length,
+  });
+  return null;
 }
 
 async function findStudentByParentPhone(coachingId, phone) {
