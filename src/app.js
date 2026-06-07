@@ -38,6 +38,7 @@ const {
 } = require('./services/notificationService');
 const {
   findStudentByParentPhone,
+  findStudentByParentSession,
   generateFeeReceiptPdf,
   getCoachingByWhatsAppPhoneNumberId,
   handleParentAssistantMessage,
@@ -3240,36 +3241,25 @@ app.post('/webhook/whatsapp', async (req, res) => {
         if (incomingMessages.length && phoneNumberId) {
           let coaching = null;
           for (const incomingMessage of incomingMessages) {
-            const incomingText = incomingMessage?.text?.body || '';
+            const incomingText = incomingMessage?.text?.body
+              || incomingMessage?.interactive?.button_reply?.title
+              || incomingMessage?.interactive?.button_reply?.id
+              || incomingMessage?.interactive?.list_reply?.title
+              || incomingMessage?.interactive?.list_reply?.id
+              || '';
             const msg = incomingText.trim().toLowerCase();
-            console.log('Incoming message:', msg);
+            console.log('Incoming message:', incomingText);
             if (!msg) continue;
-
-            if (
-              msg === 'hi'
-              || msg === 'hello'
-              || msg === 'menu'
-              || msg === 'start'
-              || msg === 'help'
-            ) {
-              console.log('Menu command detected');
-              try {
-                await sendImmediateParentPortalMenu({
-                  phoneNumberId,
-                  to: incomingMessage.from,
-                });
-              } catch (error) {
-                console.error('WhatsApp menu command failed', error);
-              }
-              continue;
-            }
 
             try {
               if (!coaching) {
                 coaching = await getCoachingByWhatsAppPhoneNumberId(phoneNumberId);
               }
               if (!coaching) continue;
-              const student = await findStudentByParentPhone(coaching.coaching_id, incomingMessage.from);
+              let student = await findStudentByParentPhone(coaching.coaching_id, incomingMessage.from);
+              if (!student) {
+                student = await findStudentByParentSession(coaching.coaching_id, incomingMessage.from);
+              }
               if (!student) {
                 console.error('WhatsApp parent assistant student not found', {
                   phoneNumberId,
@@ -3277,18 +3267,21 @@ app.post('/webhook/whatsapp', async (req, res) => {
                 });
                 continue;
               }
-              await handleParentAssistantMessage({
+              const handled = await handleParentAssistantMessage({
                 coaching,
                 student,
                 from: incomingMessage.from,
-                text: msg,
+                text: incomingText,
               });
+              console.log('Parent assistant handled:', handled);
             } catch (error) {
               console.error('WhatsApp parent assistant failed', {
                 phoneNumberId,
                 from: incomingMessage.from,
                 error: error.message,
               });
+              console.error('Parent Assistant Error', error);
+              console.error(error.stack);
             }
           }
         }

@@ -325,6 +325,21 @@ async function findStudentByParentPhone(coachingId, phone) {
   );
 }
 
+async function findStudentByParentSession(coachingId, phone) {
+  const session = await getParentSession({ coachingId, phone });
+  if (!session?.student_id) return null;
+
+  return get(
+    `SELECT u.id, u.coaching_id, u.roll_no, u.name, u.contact_phone, u.guardian_phone,
+            u.whatsapp_number, u.parent_whatsapp_number, b.name AS batch_name
+     FROM users u
+     LEFT JOIN batches b ON b.id = u.batch_id
+     WHERE u.coaching_id = ? AND u.role = 'student' AND u.id = ?
+     LIMIT 1`,
+    [coachingId, session.student_id]
+  );
+}
+
 function buildParentMenuMessage(coaching) {
   return [
     `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
@@ -361,6 +376,33 @@ async function saveParentSession({ coachingId, studentId, phone, state, lastMess
                    updated_at = CURRENT_TIMESTAMP`,
     [coachingId, studentId || null, cleanPhone, state || 'menu', lastMessage || null]
   );
+}
+
+async function getParentSession({ coachingId, phone }) {
+  const cleanPhone = cleanPhoneNumber(phone);
+  if (!cleanPhone || !coachingId) return null;
+  return get(
+    `SELECT id, coaching_id, student_id, phone_number, state, last_message, updated_at
+     FROM whatsapp_parent_sessions
+     WHERE coaching_id = ? AND phone_number = ?
+     LIMIT 1`,
+    [coachingId, cleanPhone]
+  );
+}
+
+function normalizeParentOption(text) {
+  const command = String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!command) return '';
+
+  if (command.startsWith('1') || command === 'fees' || command === 'fee') return 'FEES';
+  if (command.startsWith('2') || command === 'attendance') return 'ATTENDANCE';
+  if (command.startsWith('3') || command === 'results' || command === 'result') return 'RESULTS';
+  if (command.startsWith('4') || command === 'performance') return 'PERFORMANCE';
+  if (command.startsWith('5') || command === 'student info' || command === 'student' || command === 'info') return 'STUDENT_INFO';
+  if (command === 'menu' || command === 'start' || command === 'help') return 'MENU';
+  if (command === 'hi' || command === 'hello') return 'GREETING';
+
+  return command.toUpperCase();
 }
 
 async function buildStudentPerformance(coachingId, studentId) {
@@ -729,136 +771,191 @@ async function createMonthlyReportAndSend({ student, coaching, phone, monthKey }
 }
 
 async function handleParentAssistantMessage({ coaching, student, from, text }) {
-  const command = String(text || '').trim().toUpperCase();
-  const phone = cleanPhoneNumber(from);
-  if (!student) return false;
-  await saveParentSession({
-    coachingId: student.coaching_id,
-    studentId: student.id,
-    phone,
-    state: 'menu',
-    lastMessage: command,
-  });
-
-  if (['HI', 'HELLO', 'MENU', 'START', 'HELP'].includes(command)) {
-    await sendWhatsAppNotification({
-      studentId: student.id,
+  try {
+    const incomingText = String(text || '').trim();
+    const normalizedOption = normalizeParentOption(incomingText);
+    const phone = cleanPhoneNumber(from);
+    if (!student) return false;
+    const session = await getParentSession({
+      coachingId: student.coaching_id,
       phone,
-      type: 'parent_menu',
-      message: buildParentMenuMessage(coaching),
-      eventKey: `parent_menu:${student.id}:${Date.now()}`,
     });
-    return true;
-  }
+    console.log('Incoming message:', incomingText);
+    console.log('Normalized option:', normalizedOption);
+    console.log('Session:', session);
+    console.log('Student:', student?.id);
 
-  if (command === '1' || command === 'FEES') {
-    const feeSummary = await getStudentFeeSummary(student.coaching_id, student.id);
-    const nextDueDate = await getNextDueDate(student.coaching_id, student.id);
-    await sendWhatsAppNotification({
-      studentId: student.id,
-      phone,
-      type: 'parent_menu_fee_summary',
-      message: compactWhatsAppMessage([
-        `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
-        '',
-        '💰 Fee Summary',
-        '',
-        `Student: ${student.name || '-'}`,
-        `Total Fees: ₹${formatAmount(feeSummary.totalFee)}`,
-        `Paid Fees: ₹${formatAmount(feeSummary.paidFee)}`,
-        `Pending Fees: ₹${formatAmount(feeSummary.pendingFee)}`,
-        '',
-        'Next Due Date:',
-        formatDate(nextDueDate),
-      ]),
-      eventKey: `parent_menu_fee_summary:${student.id}:${Date.now()}`,
-    });
-    return true;
-  }
-
-  if (command === '2' || command === 'ATTENDANCE') {
-    const summary = await get(
-      `SELECT COUNT(*) AS total,
-              SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) AS present_count,
-              SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) AS absent_count,
-              SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) AS late_count
-       FROM attendance
-       WHERE coaching_id = ? AND student_id = ?`,
-      [student.coaching_id, student.id]
-    );
-    const total = Number(summary?.total || 0);
-    const present = Number(summary?.present_count || 0);
-    const percent = total ? ((present / total) * 100).toFixed(1) : '0.0';
-    await sendWhatsAppNotification({
-      studentId: student.id,
-      phone,
-      type: 'parent_menu_attendance',
-      message: compactWhatsAppMessage([
-        '📅 Attendance Summary',
-        '',
-        `Present: ${present}`,
-        `Absent: ${Number(summary?.absent_count || 0)}`,
-        `Attendance Percentage: ${percent}%`,
-      ]),
-      eventKey: `parent_menu_attendance:${student.id}:${Date.now()}`,
-    });
-    return true;
-  }
-
-  if (command === '3' || command === 'RESULTS' || command === 'RESULT') {
-    const sent = await sendLatestResult(student, phone);
-    if (!sent) {
-      await sendWhatsAppNotification({ studentId: student.id, phone, type: 'parent_menu_latest_result', message: 'No result PDF is available yet.', eventKey: `parent_menu_latest_result_empty:${student.id}:${Date.now()}` });
+    if (normalizedOption === 'MENU' || (normalizedOption === 'GREETING' && !session)) {
+      await sendWhatsAppNotification({
+        studentId: student.id,
+        phone,
+        type: 'parent_menu',
+        message: buildParentMenuMessage(coaching),
+        eventKey: `parent_menu:${student.id}:${Date.now()}`,
+      });
+      await saveParentSession({
+        coachingId: student.coaching_id,
+        studentId: student.id,
+        phone,
+        state: 'menu',
+        lastMessage: normalizedOption,
+      });
+      return true;
     }
-    return true;
-  }
 
-  if (command === '4' || command === 'PERFORMANCE') {
-    const performance = await buildStudentPerformance(student.coaching_id, student.id);
-    const percentages = performance.progressSeries.map((item) => Number(item.percent)).filter(Number.isFinite);
-    const average = Number(performance.marksSummary.papersCount || 0) > 0 ? performance.marksSummary.marksPercent : '0';
-    const highest = percentages.length ? formatPercent(Math.max(...percentages)) : '0';
-    const latest = percentages.length ? formatPercent(percentages[percentages.length - 1]) : '0';
-    await sendWhatsAppNotification({
-      studentId: student.id,
-      phone,
-      type: 'parent_menu_performance_report',
-      message: compactWhatsAppMessage([
-        '📈 Performance Report',
-        '',
-        'Overall:',
-        `${average}%`,
-        'Highest:',
-        `${highest}%`,
-        'Latest:',
-        `${latest}%`,
-        '',
-        'Graph attached.',
-      ]),
-      eventKey: `parent_menu_performance_report:${student.id}:${Date.now()}`,
-    });
-    await sendPerformanceGraph(student, phone, coaching, { sendMessage: false });
-    return true;
-  }
+    console.log('Before FEES block');
+    if (normalizedOption === 'FEES') {
+      const feeSummary = await getStudentFeeSummary(student.coaching_id, student.id);
+      const nextDueDate = await getNextDueDate(student.coaching_id, student.id);
+      await sendWhatsAppNotification({
+        studentId: student.id,
+        phone,
+        type: 'parent_menu_fee_summary',
+        message: compactWhatsAppMessage([
+          `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
+          '',
+          '💰 Fee Summary',
+          '',
+          `Student: ${student.name || '-'}`,
+          `Total Fees: ₹${formatAmount(feeSummary.totalFee)}`,
+          `Paid Fees: ₹${formatAmount(feeSummary.paidFee)}`,
+          `Pending Fees: ₹${formatAmount(feeSummary.pendingFee)}`,
+          '',
+          'Next Due Date:',
+          formatDate(nextDueDate),
+        ]),
+        eventKey: `parent_menu_fee_summary:${student.id}:${Date.now()}`,
+      });
+      await saveParentSession({
+        coachingId: student.coaching_id,
+        studentId: student.id,
+        phone,
+        state: 'fees',
+        lastMessage: normalizedOption,
+      });
+      return true;
+    }
 
-  if (command === '5' || command === 'STUDENT INFO' || command === 'STUDENT' || command === 'INFO') {
-    await sendWhatsAppNotification({
-      studentId: student.id,
-      phone,
-      type: 'parent_menu_student_profile',
-      message: compactWhatsAppMessage([
-        '👨‍🎓 Student Information',
-        '',
-        `Name: ${student.name || '-'}`,
-        `Roll No: ${student.roll_no || '-'}`,
-        `Batch: ${student.batch_name || '-'}`,
-      ]),
-      eventKey: `parent_menu_student_profile:${student.id}:${Date.now()}`,
-    });
-    return true;
-  }
+    console.log('Before ATTENDANCE block');
+    if (normalizedOption === 'ATTENDANCE') {
+      const summary = await get(
+        `SELECT COUNT(*) AS total,
+                SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) AS present_count,
+                SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) AS absent_count,
+                SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) AS late_count
+         FROM attendance
+         WHERE coaching_id = ? AND student_id = ?`,
+        [student.coaching_id, student.id]
+      );
+      const total = Number(summary?.total || 0);
+      const present = Number(summary?.present_count || 0);
+      const percent = total ? ((present / total) * 100).toFixed(1) : '0.0';
+      await sendWhatsAppNotification({
+        studentId: student.id,
+        phone,
+        type: 'parent_menu_attendance',
+        message: compactWhatsAppMessage([
+          '📅 Attendance Summary',
+          '',
+          `Present: ${present}`,
+          `Absent: ${Number(summary?.absent_count || 0)}`,
+          `Attendance Percentage: ${percent}%`,
+        ]),
+        eventKey: `parent_menu_attendance:${student.id}:${Date.now()}`,
+      });
+      await saveParentSession({
+        coachingId: student.coaching_id,
+        studentId: student.id,
+        phone,
+        state: 'attendance',
+        lastMessage: normalizedOption,
+      });
+      return true;
+    }
 
-  return false;
+    console.log('Before RESULTS block');
+    if (normalizedOption === 'RESULTS') {
+      const sent = await sendLatestResult(student, phone);
+      if (!sent) {
+        await sendWhatsAppNotification({ studentId: student.id, phone, type: 'parent_menu_latest_result', message: 'No result PDF is available yet.', eventKey: `parent_menu_latest_result_empty:${student.id}:${Date.now()}` });
+      }
+      await saveParentSession({
+        coachingId: student.coaching_id,
+        studentId: student.id,
+        phone,
+        state: 'results',
+        lastMessage: normalizedOption,
+      });
+      return true;
+    }
+
+    console.log('Before PERFORMANCE block');
+    if (normalizedOption === 'PERFORMANCE') {
+      const performance = await buildStudentPerformance(student.coaching_id, student.id);
+      const percentages = performance.progressSeries.map((item) => Number(item.percent)).filter(Number.isFinite);
+      const average = Number(performance.marksSummary.papersCount || 0) > 0 ? performance.marksSummary.marksPercent : '0';
+      const highest = percentages.length ? formatPercent(Math.max(...percentages)) : '0';
+      const latest = percentages.length ? formatPercent(percentages[percentages.length - 1]) : '0';
+      await sendWhatsAppNotification({
+        studentId: student.id,
+        phone,
+        type: 'parent_menu_performance_report',
+        message: compactWhatsAppMessage([
+          '📈 Performance Report',
+          '',
+          'Overall:',
+          `${average}%`,
+          'Highest:',
+          `${highest}%`,
+          'Latest:',
+          `${latest}%`,
+          '',
+          'Graph attached.',
+        ]),
+        eventKey: `parent_menu_performance_report:${student.id}:${Date.now()}`,
+      });
+      await sendPerformanceGraph(student, phone, coaching, { sendMessage: false });
+      await saveParentSession({
+        coachingId: student.coaching_id,
+        studentId: student.id,
+        phone,
+        state: 'performance',
+        lastMessage: normalizedOption,
+      });
+      return true;
+    }
+
+    console.log('Before STUDENT_INFO block');
+    if (normalizedOption === 'STUDENT_INFO') {
+      await sendWhatsAppNotification({
+        studentId: student.id,
+        phone,
+        type: 'parent_menu_student_profile',
+        message: compactWhatsAppMessage([
+          '👨‍🎓 Student Information',
+          '',
+          `Name: ${student.name || '-'}`,
+          `Roll No: ${student.roll_no || '-'}`,
+          `Batch: ${student.batch_name || '-'}`,
+        ]),
+        eventKey: `parent_menu_student_profile:${student.id}:${Date.now()}`,
+      });
+      await saveParentSession({
+        coachingId: student.coaching_id,
+        studentId: student.id,
+        phone,
+        state: 'student_info',
+        lastMessage: normalizedOption,
+      });
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error('Parent Assistant Error', error);
+    console.error(error.stack);
+    return false;
+  }
 }
 
 async function sendMonthlyParentReports({ monthKey, coachingId = null }) {
@@ -911,6 +1008,7 @@ module.exports = {
   createFeeReceiptAndSend,
   createMonthlyReportAndSend,
   findStudentByParentPhone,
+  findStudentByParentSession,
   generateFeeReceiptPdf,
   getCoachingByWhatsAppPhoneNumberId,
   handleParentAssistantMessage,
