@@ -71,6 +71,14 @@
     const currentSectionMeta = sectionMetaMap[activeSection] || sectionMetaMap.overview;
     const todayLabel = new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' });
     const feesPaidThisMonthAmount = (feesPaidThisMonth || []).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const attendanceReportHref = `/admin/reports/attendance.pdf?attendanceMonth=${encodeURIComponent(attendanceMonthFilter || '')}&attendanceDate=${encodeURIComponent(attendanceDateFilter || '')}`;
+    const feesReportHref = `/admin/reports/fees.pdf?feesMonth=${encodeURIComponent(feesMonthFilter || '')}&feesDate=${encodeURIComponent(feesDateFilter || '')}`;
+    const formatDashboardDate = (value) => {
+      const raw = String(value || '').slice(0, 10);
+      const parsed = new Date(`${raw}T00:00:00`);
+      if (Number.isNaN(parsed.getTime())) return value || '-';
+      return parsed.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+    };
     const activeBatchesCount = (batches || []).filter((batch) => batch.status !== 'completed').length;
     const completedBatchesCount = (batches || []).filter((batch) => batch.status === 'completed').length;
     const activeUploadWindows = (answerRequestSummaries || []).filter((item) => item.state.isActive).length;
@@ -706,22 +714,41 @@
                 <form method="get" action="/admin/dashboard" class="ops2-form-grid ops2-form-grid--tight">
                   <input type="hidden" name="section" value="attendance" />
                   <div class="ops2-field"><label>Month</label><input type="month" name="attendanceMonth" value="<%= attendanceMonthFilter %>" /></div>
-                  <div class="ops2-field"><label>Date</label><select name="attendanceDate"><option value="">All Dates</option><% attendanceDates.forEach((d) => { %><option value="<%= d.attendance_date %>" <%= attendanceDateFilter === d.attendance_date ? 'selected' : '' %>><%= d.attendance_date %></option><% }) %></select></div>
+                  <div class="ops2-field"><label>Date</label><select name="attendanceDate"><option value="">All Dates</option><% attendanceDates.forEach((d) => { %><option value="<%= d.attendance_date %>" <%= attendanceDateFilter === d.attendance_date ? 'selected' : '' %>><%= formatDashboardDate(d.attendance_date) %></option><% }) %></select></div>
                   <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Apply Filters</button></div>
                 </form>
                 <div class="ops2-chip-row">
                   <span class="ops2-chip"><strong><%= attendanceThisMonthCount %></strong> entries</span>
+                  <% if (attendanceDateFilter) { %>
+                    <a href="<%= attendanceReportHref %>" class="ops2-inline-link">Download PDF</a>
+                  <% } %>
                   <a href="/admin/dashboard?section=attendance" class="ops2-inline-link">Clear Filter</a>
                 </div>
               </section>
             </section>
+
+            <% if (!attendanceDateFilter) { %>
+              <section class="ops2-panel">
+                <div class="empty-state">
+                  <strong>Select an attendance date to view records.</strong>
+                  <p>Choose a date above, apply the filter, then download the filtered attendance PDF if needed.</p>
+                </div>
+              </section>
+            <% } else if (!Object.keys(attendanceByDate || {}).length) { %>
+              <section class="ops2-panel">
+                <div class="empty-state">
+                  <strong>No attendance records found.</strong>
+                  <p>No student attendance is saved for the selected date.</p>
+                </div>
+              </section>
+            <% } %>
 
             <% Object.keys(attendanceByDate || {}).forEach((day) => { %>
               <section class="ops2-panel">
                 <div class="ops2-panel__header compact">
                   <div>
                     <p class="ops2-eyebrow">Attendance Date</p>
-                    <h3><%= day %></h3>
+                    <h3><%= formatDashboardDate(day) %></h3>
                   </div>
                 </div>
                 <div class="ops2-table-shell">
@@ -785,9 +812,10 @@
                 <form method="get" action="/admin/dashboard" class="ops2-form-grid ops2-form-grid--tight">
                   <input type="hidden" name="section" value="fees" />
                   <div class="ops2-field"><label>Month</label><input type="month" name="feesMonth" value="<%= feesMonthFilter %>" /></div>
+                  <div class="ops2-field"><label>Date</label><input type="date" name="feesDate" value="<%= feesDateFilter %>" /></div>
                   <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Apply</button></div>
                 </form>
-                <div class="ops2-chip-row"><span class="ops2-chip"><strong><%= paidFeesCount %></strong> paid</span><span class="ops2-chip"><strong><%= pendingFeesCount %></strong> pending</span><a href="/admin/dashboard?section=fees" class="ops2-inline-link">Clear</a></div>
+                <div class="ops2-chip-row"><span class="ops2-chip"><strong><%= paidFeesCount %></strong> paid</span><span class="ops2-chip"><strong><%= pendingFeesCount %></strong> pending</span><a href="<%= feesReportHref %>" class="ops2-inline-link">Download PDF</a><a href="/admin/dashboard?section=fees" class="ops2-inline-link">Clear</a></div>
               </section>
             </section>
 

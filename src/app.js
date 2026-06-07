@@ -6,6 +6,7 @@ const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
+const PDFDocument = require('pdfkit');
 require('../config/env');
 
 const { getPool, run, get, all, withTransaction } = require('./db');
@@ -1230,6 +1231,73 @@ function groupAttendanceByDate(rows) {
   }, {});
 }
 
+function normalizeDateOnlyFilter(value) {
+  const normalized = String(value || '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : '';
+}
+
+function normalizeMonthOnlyFilter(value, fallback = '') {
+  const normalized = String(value || '').trim();
+  return /^\d{4}-\d{2}$/.test(normalized) ? normalized : fallback;
+}
+
+async function getAttendanceReportRows(coachingId, {
+  attendanceDate = '',
+  attendanceMonth = '',
+  limit = 300,
+} = {}) {
+  let attendanceSql = `
+    SELECT a.id, CAST(a.attendance_date AS TEXT) AS attendance_date, a.status, a.notes, u.roll_no, u.name, u.batch_id, u.standard, u.course, b.name AS batch_name
+    FROM attendance a
+    JOIN users u ON u.id = a.student_id
+    LEFT JOIN batches b ON b.id = u.batch_id
+    WHERE a.coaching_id = ?
+  `;
+  const attendanceParams = [coachingId];
+  if (attendanceDate) {
+    attendanceSql += ` AND a.attendance_date = ? `;
+    attendanceParams.push(attendanceDate);
+  } else if (attendanceMonth) {
+    attendanceSql += ` AND CAST(a.attendance_date AS TEXT) LIKE ? `;
+    attendanceParams.push(`${attendanceMonth}%`);
+  }
+  attendanceSql += ` ORDER BY a.attendance_date DESC, a.id DESC LIMIT ? `;
+  attendanceParams.push(limit);
+  return all(attendanceSql, attendanceParams);
+}
+
+async function getFeeReportRows(coachingId, {
+  feesDate = '',
+  feesMonth = '',
+  limit = 150,
+} = {}) {
+  let feesSql = `
+    SELECT f.id, f.amount, CAST(f.due_date AS TEXT) AS due_date, CAST(f.payment_date AS TEXT) AS payment_date, f.status, f.notes,
+            u.id AS student_id, u.roll_no, u.name, u.guardian_phone, u.parent_whatsapp_number, u.batch_id, u.standard, u.course,
+            b.name AS batch_name
+     FROM fees f
+     JOIN users u ON u.id = f.student_id
+     LEFT JOIN batches b ON b.id = u.batch_id
+     WHERE f.coaching_id = ?
+  `;
+  const feesParams = [coachingId];
+  if (feesDate) {
+    feesSql += ` AND (f.payment_date = ? OR f.due_date = ?) `;
+    feesParams.push(feesDate, feesDate);
+  } else if (feesMonth) {
+    feesSql += `
+       AND (
+         CAST(COALESCE(f.payment_date, '') AS TEXT) LIKE ?
+         OR CAST(COALESCE(f.due_date, '') AS TEXT) LIKE ?
+       )
+    `;
+    feesParams.push(`${feesMonth}%`, `${feesMonth}%`);
+  }
+  feesSql += ` ORDER BY f.created_at DESC LIMIT ? `;
+  feesParams.push(limit);
+  return all(feesSql, feesParams);
+}
+
 function isValidHttpUrl(value) {
   try {
     const url = new URL(value);
@@ -1355,6 +1423,77 @@ function formatDateTimeLabel(value) {
     hour: 'numeric',
     minute: '2-digit',
   });
+}
+
+function formatReportAmount(value) {
+  const amount = Number(value || 0);
+  if (!Number.isFinite(amount)) return 'Rs. 0';
+  return `Rs. ${amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')}`;
+}
+
+function streamTablePdfReport(res, {
+  fileName,
+  title,
+  subtitle,
+  columns,
+  rows,
+  emptyMessage = 'No records found.',
+}) {
+  const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 36 });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${String(fileName || 'report.pdf').replace(/"/g, '')}"`);
+  doc.pipe(res);
+
+  const left = doc.page.margins.left;
+  const right = doc.page.width - doc.page.margins.right;
+  const bottom = doc.page.height - doc.page.margins.bottom;
+
+  const drawTitle = () => {
+    doc.font('Helvetica-Bold').fontSize(18).fillColor('#111827').text(title, left, 36, { width: right - left });
+    doc.font('Helvetica').fontSize(10).fillColor('#4b5563').text(subtitle, left, 60, { width: right - left });
+    doc.moveTo(left, 82).lineTo(right, 82).strokeColor('#d1d5db').stroke();
+  };
+
+  const drawHeader = (y) => {
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#374151');
+    let x = left;
+    columns.forEach((column) => {
+      doc.text(column.label, x, y, { width: column.width, height: 18 });
+      x += column.width;
+    });
+    doc.moveTo(left, y + 18).lineTo(right, y + 18).strokeColor('#e5e7eb').stroke();
+    return y + 26;
+  };
+
+  drawTitle();
+  let y = drawHeader(96);
+
+  if (!rows.length) {
+    doc.font('Helvetica').fontSize(12).fillColor('#6b7280').text(emptyMessage, left, y + 10);
+    doc.end();
+    return;
+  }
+
+  rows.forEach((row) => {
+    const rowHeight = 34;
+    if (y + rowHeight > bottom) {
+      doc.addPage();
+      drawTitle();
+      y = drawHeader(96);
+    }
+
+    doc.font('Helvetica').fontSize(9).fillColor('#111827');
+    let x = left;
+    columns.forEach((column, index) => {
+      const value = String(row[index] ?? '-');
+      doc.text(value, x, y, { width: column.width, height: rowHeight - 8, ellipsis: true });
+      x += column.width;
+    });
+    doc.moveTo(left, y + rowHeight - 6).lineTo(right, y + rowHeight - 6).strokeColor('#f3f4f6').stroke();
+    y += rowHeight;
+  });
+
+  doc.end();
 }
 
 function toDateTimeLocalInput(date = new Date()) {
@@ -3940,6 +4079,84 @@ app.post('/admin/whatsapp/fee-reminders/due', requireCoachingAdmin, async (req, 
   return res.redirect('/admin/dashboard?section=whatsapp');
 });
 
+app.get('/admin/reports/attendance.pdf', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
+  const currentMonth = getCurrentMonthValue();
+  const attendanceDate = normalizeDateOnlyFilter(req.query.attendanceDate);
+  const attendanceMonth = normalizeMonthOnlyFilter(req.query.attendanceMonth, currentMonth);
+  const rows = await getAttendanceReportRows(coachingId, {
+    attendanceDate,
+    attendanceMonth: attendanceDate ? '' : attendanceMonth,
+    limit: 1000,
+  });
+  const periodLabel = attendanceDate
+    ? `Date: ${formatDateLabel(attendanceDate)}`
+    : `Month: ${attendanceMonth}`;
+
+  return streamTablePdfReport(res, {
+    fileName: `attendance-report-${attendanceDate || attendanceMonth}.pdf`,
+    title: `${coaching?.name || 'Coaching'} - Attendance Report`,
+    subtitle: `${periodLabel} | Generated on ${formatDateTimeLabel(new Date().toISOString())}`,
+    columns: [
+      { label: 'Roll', width: 55 },
+      { label: 'Name', width: 130 },
+      { label: 'Batch', width: 120 },
+      { label: 'Status', width: 75 },
+      { label: 'Notes', width: 390 },
+    ],
+    rows: rows.map((row) => [
+      row.roll_no || '-',
+      row.name || '-',
+      row.batch_name || '-',
+      row.status || '-',
+      row.notes || '-',
+    ]),
+    emptyMessage: 'No attendance records found for this filter.',
+  });
+});
+
+app.get('/admin/reports/fees.pdf', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
+  const currentMonth = getCurrentMonthValue();
+  const feesDate = normalizeDateOnlyFilter(req.query.feesDate);
+  const feesMonth = normalizeMonthOnlyFilter(req.query.feesMonth, currentMonth);
+  const rows = await getFeeReportRows(coachingId, {
+    feesDate,
+    feesMonth: feesDate ? '' : feesMonth,
+    limit: 1000,
+  });
+  const periodLabel = feesDate ? `Date: ${formatDateLabel(feesDate)}` : `Month: ${feesMonth}`;
+
+  return streamTablePdfReport(res, {
+    fileName: `fees-report-${feesDate || feesMonth}.pdf`,
+    title: `${coaching?.name || 'Coaching'} - Fee Report`,
+    subtitle: `${periodLabel} | Generated on ${formatDateTimeLabel(new Date().toISOString())}`,
+    columns: [
+      { label: 'Roll', width: 50 },
+      { label: 'Name', width: 120 },
+      { label: 'Batch', width: 105 },
+      { label: 'Amount', width: 85 },
+      { label: 'Due Date', width: 85 },
+      { label: 'Payment', width: 85 },
+      { label: 'Status', width: 75 },
+      { label: 'Notes', width: 165 },
+    ],
+    rows: rows.map((row) => [
+      row.roll_no || '-',
+      row.name || '-',
+      row.batch_name || '-',
+      formatReportAmount(row.amount),
+      row.due_date ? formatDateLabel(row.due_date) : '-',
+      row.payment_date ? formatDateLabel(row.payment_date) : '-',
+      row.status || '-',
+      row.notes || '-',
+    ]),
+    emptyMessage: 'No fee records found for this filter.',
+  });
+});
+
 app.get('/owner/dashboard', requireOwner, async (req, res) => {
   const activeSection = getOwnerSection(req.query.section);
   const planSql = buildResolvedPlanSql('cc');
@@ -4386,11 +4603,12 @@ app.post('/owner/trial-requests/:id/review', requireOwner, async (req, res) => {
 app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const subscriptionState = req.subscriptionState || getSubscriptionState(req.currentCoaching);
   const activeSection = subscriptionState.accessBlocked ? 'overview' : getAdminSection(req.query.section);
-  const attendanceDateFilter = (req.query.attendanceDate || '').trim();
   const currentMonth = getCurrentMonthValue();
-  const attendanceMonthFilter = (req.query.attendanceMonth || currentMonth).trim();
-  const papersMonthFilter = (req.query.papersMonth || currentMonth).trim();
-  const feesMonthFilter = (req.query.feesMonth || currentMonth).trim();
+  const attendanceDateFilter = normalizeDateOnlyFilter(req.query.attendanceDate);
+  const attendanceMonthFilter = normalizeMonthOnlyFilter(req.query.attendanceMonth, currentMonth);
+  const papersMonthFilter = normalizeMonthOnlyFilter(req.query.papersMonth, currentMonth);
+  const feesDateFilter = normalizeDateOnlyFilter(req.query.feesDate);
+  const feesMonthFilter = normalizeMonthOnlyFilter(req.query.feesMonth, currentMonth);
   const studentSearchQuery = (req.query.studentSearch || '').trim();
   const coachingId = req.session.user.coachingId;
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
@@ -4450,26 +4668,17 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     [coachingId, `${papersMonthFilter}%`]
   );
 
-  let attendanceSql = `
-    SELECT a.id, a.attendance_date, a.status, a.notes, u.roll_no, u.name, u.batch_id, u.standard, u.course, b.name AS batch_name
-    FROM attendance a
-    JOIN users u ON u.id = a.student_id
-    LEFT JOIN batches b ON b.id = u.batch_id
-    WHERE a.coaching_id = ?
-  `;
-  const attendanceParams = [coachingId];
-  if (attendanceDateFilter) {
-    attendanceSql += ` AND a.attendance_date = ? `;
-    attendanceParams.push(attendanceDateFilter);
-  } else if (attendanceMonthFilter) {
-    attendanceSql += ` AND CAST(a.attendance_date AS TEXT) LIKE ? `;
-    attendanceParams.push(`${attendanceMonthFilter}%`);
-  }
-  attendanceSql += ` ORDER BY a.attendance_date DESC, a.id DESC LIMIT 300 `;
-  const attendance = await all(attendanceSql, attendanceParams);
+  const shouldLoadAttendanceRecords = activeSection !== 'attendance' || Boolean(attendanceDateFilter);
+  const attendance = shouldLoadAttendanceRecords
+    ? await getAttendanceReportRows(coachingId, {
+      attendanceDate: attendanceDateFilter,
+      attendanceMonth: attendanceDateFilter ? '' : attendanceMonthFilter,
+      limit: 300,
+    })
+    : [];
 
   const attendanceDates = await all(
-    `SELECT DISTINCT attendance_date
+    `SELECT DISTINCT CAST(attendance_date AS TEXT) AS attendance_date
      FROM attendance
      WHERE coaching_id = ?
      ORDER BY attendance_date DESC
@@ -4477,22 +4686,11 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     [coachingId]
   );
 
-  const fees = await all(
-    `SELECT f.id, f.amount, f.due_date, f.payment_date, f.status, f.notes,
-            u.id AS student_id, u.roll_no, u.name, u.guardian_phone, u.parent_whatsapp_number, u.batch_id, u.standard, u.course,
-            b.name AS batch_name
-     FROM fees f
-     JOIN users u ON u.id = f.student_id
-     LEFT JOIN batches b ON b.id = u.batch_id
-     WHERE f.coaching_id = ?
-       AND (
-         CAST(COALESCE(f.payment_date, '') AS TEXT) LIKE ?
-         OR CAST(COALESCE(f.due_date, '') AS TEXT) LIKE ?
-       )
-     ORDER BY f.created_at DESC
-     LIMIT 150`,
-    [coachingId, `${feesMonthFilter}%`, `${feesMonthFilter}%`]
-  );
+  const fees = await getFeeReportRows(coachingId, {
+    feesDate: feesDateFilter,
+    feesMonth: feesDateFilter ? '' : feesMonthFilter,
+    limit: 150,
+  });
 
   const notes = await all(
     `SELECT bn.id, bn.batch_id, bn.standard, bn.course, bn.title, bn.resource_url, bn.description, bn.created_at,
@@ -4619,6 +4817,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     attendanceDateFilter,
     attendanceMonthFilter,
     papersMonthFilter,
+    feesDateFilter,
     feesMonthFilter,
     fees,
     feesPaidThisMonth,

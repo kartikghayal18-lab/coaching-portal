@@ -537,7 +537,7 @@ function normalizeParentOption(text) {
   if (command.startsWith('4') || command === 'performance') return 'PERFORMANCE';
   if (command.startsWith('5') || command === 'student info' || command === 'student' || command === 'info') return 'STUDENT_INFO';
   if (command === 'menu' || command === 'start' || command === 'help') return 'MENU';
-  if (command === 'hi' || command === 'hello') return 'GREETING';
+  if (command === 'hi' || command === 'hello' || command === 'hii' || command === 'hey' || command === 'i') return 'GREETING';
 
   return command.toUpperCase();
 }
@@ -922,7 +922,7 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
     console.log('Session:', session);
     console.log('Student:', student?.id);
 
-    if (normalizedOption === 'MENU' || (normalizedOption === 'GREETING' && !session)) {
+    if (normalizedOption === 'MENU' || normalizedOption === 'GREETING') {
       console.log('[HANDLER] Enter MENU');
       const notificationResult = await sendWhatsAppNotification({
         studentId: student.id,
