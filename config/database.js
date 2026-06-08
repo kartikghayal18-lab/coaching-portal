@@ -5,6 +5,7 @@ require('./env');
 const { Pool: PgPool } = require('pg');
 const { Pool: NeonPool, neonConfig } = require('@neondatabase/serverless');
 const ws = require('ws');
+const { measurePerfOperation } = require('../src/performance');
 
 let pool = null;
 
@@ -73,7 +74,16 @@ function normalizeResult(result) {
 
 async function query(executor, sql, params = []) {
   const translatedSql = translatePlaceholders(sql);
-  const result = await executor.query(translatedSql, params);
+  const sqlLabel = String(sql || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180);
+  const result = await measurePerfOperation(
+    'sql',
+    sqlLabel,
+    () => executor.query(translatedSql, params),
+    { rows: Array.isArray(params) ? params.length : 0 }
+  );
   return normalizeResult(result);
 }
 

@@ -3,6 +3,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { measurePerfOperation } = require('./performance');
 
 const ROOT_DIR = path.join(__dirname, '..');
 const LOCAL_PAPER_DIR = process.env.LOCAL_PAPER_DIR
@@ -109,14 +110,14 @@ async function uploadPaperFile(file) {
   if (storageMode === 's3') {
     const key = `papers/${new Date().toISOString().slice(0, 10)}/${Date.now()}_${crypto.randomUUID()}_${safeOriginal}`;
 
-    await getS3Client().send(
+    await measurePerfOperation('s3', 'PutObject paper upload', () => getS3Client().send(
       new PutObjectCommand({
         Bucket: s3Config.bucket,
         Key: key,
         Body: file.buffer,
         ContentType: file.mimetype || 'application/octet-stream',
       })
-    );
+    ), { key });
 
     const publicUrl = s3PublicBaseUrl ? `${s3PublicBaseUrl.replace(/\/$/, '')}/${key}` : null;
 
@@ -151,18 +152,18 @@ async function uploadGeneratedFile({ buffer, fileName, contentType = 'applicatio
   if (storageMode === 's3') {
     const key = `${folder}/${new Date().toISOString().slice(0, 10)}/${Date.now()}_${crypto.randomUUID()}_${safeOriginal}`;
 
-    await getS3Client().send(
+    await measurePerfOperation('s3', 'PutObject generated file upload', () => getS3Client().send(
       new PutObjectCommand({
         Bucket: s3Config.bucket,
         Key: key,
         Body: buffer,
         ContentType: contentType,
       })
-    );
+    ), { key, contentType });
 
     const publicUrl = s3PublicBaseUrl
       ? `${s3PublicBaseUrl.replace(/\/$/, '')}/${key}`
-      : await getSignedUrl(
+      : await measurePerfOperation('s3', 'GetObject signed URL generated file', () => getSignedUrl(
         getS3Client(),
         new GetObjectCommand({
           Bucket: s3Config.bucket,
@@ -171,7 +172,7 @@ async function uploadGeneratedFile({ buffer, fileName, contentType = 'applicatio
           ResponseContentType: contentType,
         }),
         { expiresIn: s3Config.signedUrlTtlSeconds }
-      );
+      ), { key, expiresIn: s3Config.signedUrlTtlSeconds });
 
     return {
       storedName: key,
@@ -217,9 +218,9 @@ async function getSignedPaperUrl(paper, dispositionType) {
     ResponseContentType: paper.content_type || undefined,
   });
 
-  return getSignedUrl(getS3Client(), command, {
+  return measurePerfOperation('s3', 'GetObject signed URL paper', () => getSignedUrl(getS3Client(), command, {
     expiresIn: s3Config.signedUrlTtlSeconds,
-  });
+  }), { key, expiresIn: s3Config.signedUrlTtlSeconds });
 }
 
 async function getStoredFilePublicUrl({
@@ -236,7 +237,7 @@ async function getStoredFilePublicUrl({
       return `${s3PublicBaseUrl.replace(/\/$/, '')}/${storageKey}`;
     }
 
-    return getSignedUrl(
+    return measurePerfOperation('s3', 'GetObject signed URL stored file', () => getSignedUrl(
       getS3Client(),
       new GetObjectCommand({
         Bucket: s3Config.bucket,
@@ -245,7 +246,7 @@ async function getStoredFilePublicUrl({
         ResponseContentType: contentType || undefined,
       }),
       { expiresIn: s3Config.signedUrlTtlSeconds }
-    );
+    ), { key: storageKey, expiresIn: s3Config.signedUrlTtlSeconds });
   }
 
   return getAppPublicBaseUrl()
@@ -262,12 +263,12 @@ async function getStoredFileReadStream({
   }
 
   if (storageType === 's3') {
-    const response = await getS3Client().send(
+    const response = await measurePerfOperation('s3', 'GetObject read stream', () => getS3Client().send(
       new GetObjectCommand({
         Bucket: s3Config.bucket,
         Key: storageKey,
       })
-    );
+    ), { key: storageKey });
     return {
       stream: response.Body,
       contentType: response.ContentType || 'application/octet-stream',
@@ -313,12 +314,12 @@ async function deleteStoredPaper(paper) {
   if (!storageKey) return;
 
   if (storageType === 's3') {
-    await getS3Client().send(
+    await measurePerfOperation('s3', 'DeleteObject paper', () => getS3Client().send(
       new DeleteObjectCommand({
         Bucket: s3Config.bucket,
         Key: storageKey,
       })
-    );
+    ), { key: storageKey });
     return;
   }
 

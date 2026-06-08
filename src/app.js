@@ -50,6 +50,14 @@ const {
   verifyReceiptAccessToken,
 } = require('./services/parentAssistant');
 const { buildProgressSummaryFromPapers } = require('./services/progress');
+const {
+  createPerfTrace,
+  getGlobalSlowOperations,
+  logPerfTrace,
+  nowMs,
+  recordPerfOperation,
+  runWithPerfTrace,
+} = require('./performance');
 
 console.log('[BOOT] Starting app');
 console.log('[BOOT] DATABASE_URL present:', Boolean(process.env.DATABASE_URL));
@@ -163,6 +171,40 @@ app.use(
     },
   })
 );
+app.use((req, res, next) => {
+  const shouldProfile = req.path.startsWith('/admin') || req.path.startsWith('/papers/');
+
+  if (!shouldProfile) {
+    return next();
+  }
+
+  const trace = createPerfTrace({
+    method: req.method,
+    path: req.originalUrl || req.url,
+    route: `${req.method} ${req.path}`,
+  });
+  const originalRender = res.render.bind(res);
+
+  res.render = (view, locals, callback) => {
+    const renderStartedAt = nowMs();
+    return originalRender(view, locals, (error, html) => {
+      recordPerfOperation('render', view, nowMs() - renderStartedAt, { view });
+      if (typeof callback === 'function') {
+        return callback(error, html);
+      }
+      if (error) {
+        return next(error);
+      }
+      return res.send(html);
+    });
+  };
+
+  res.on('finish', () => {
+    logPerfTrace(trace, nowMs() - trace.startedAt);
+  });
+
+  return runWithPerfTrace(trace, next);
+});
 app.use((req, res, next) => {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -446,7 +488,8 @@ function getRequestBaseUrl(req) {
   return host ? `${protocol}://${host}` : '';
 }
 
-function buildWhatsAppSettingsView(settings) {
+function buildWhatsAppSettingsView(settings = {}) {
+  settings = settings || {};
   return {
     accessTokenSaved: Boolean(settings.accessToken),
     phoneNumberId: settings.phoneNumberId || '',
@@ -1241,6 +1284,19 @@ function normalizeMonthOnlyFilter(value, fallback = '') {
   return /^\d{4}-\d{2}$/.test(normalized) ? normalized : fallback;
 }
 
+function getMonthDateRange(monthValue) {
+  const normalized = normalizeMonthOnlyFilter(monthValue);
+  if (!normalized) return null;
+  const [yearValue, monthPart] = normalized.split('-').map((part) => Number.parseInt(part, 10));
+  if (!Number.isInteger(yearValue) || !Number.isInteger(monthPart)) return null;
+  const nextMonth = monthPart === 12 ? 1 : monthPart + 1;
+  const nextYear = monthPart === 12 ? yearValue + 1 : yearValue;
+  return {
+    start: `${yearValue}-${String(monthPart).padStart(2, '0')}-01`,
+    end: `${nextYear}-${String(nextMonth).padStart(2, '0')}-01`,
+  };
+}
+
 async function getAttendanceReportRows(coachingId, {
   attendanceDate = '',
   attendanceMonth = '',
@@ -1258,8 +1314,11 @@ async function getAttendanceReportRows(coachingId, {
     attendanceSql += ` AND a.attendance_date = ? `;
     attendanceParams.push(attendanceDate);
   } else if (attendanceMonth) {
-    attendanceSql += ` AND CAST(a.attendance_date AS TEXT) LIKE ? `;
-    attendanceParams.push(`${attendanceMonth}%`);
+    const range = getMonthDateRange(attendanceMonth);
+    if (range) {
+      attendanceSql += ` AND a.attendance_date >= ? AND a.attendance_date < ? `;
+      attendanceParams.push(range.start, range.end);
+    }
   }
   attendanceSql += ` ORDER BY a.attendance_date DESC, a.id DESC LIMIT ? `;
   attendanceParams.push(limit);
@@ -1285,17 +1344,43 @@ async function getFeeReportRows(coachingId, {
     feesSql += ` AND (f.payment_date = ? OR f.due_date = ?) `;
     feesParams.push(feesDate, feesDate);
   } else if (feesMonth) {
-    feesSql += `
-       AND (
-         CAST(COALESCE(f.payment_date, '') AS TEXT) LIKE ?
-         OR CAST(COALESCE(f.due_date, '') AS TEXT) LIKE ?
-       )
-    `;
-    feesParams.push(`${feesMonth}%`, `${feesMonth}%`);
+    const range = getMonthDateRange(feesMonth);
+    if (range) {
+      feesSql += `
+         AND (
+           (f.payment_date >= ? AND f.payment_date < ?)
+           OR (f.due_date >= ? AND f.due_date < ?)
+         )
+      `;
+      feesParams.push(range.start, range.end, range.start, range.end);
+    }
   }
   feesSql += ` ORDER BY f.created_at DESC LIMIT ? `;
   feesParams.push(limit);
   return all(feesSql, feesParams);
+}
+
+async function ensurePerformanceIndexes() {
+  const indexes = [
+    `CREATE INDEX IF NOT EXISTS users_coaching_role_idx ON users (coaching_id, role)`,
+    `CREATE INDEX IF NOT EXISTS users_coaching_role_batch_idx ON users (coaching_id, role, batch_id)`,
+    `CREATE INDEX IF NOT EXISTS users_coaching_role_roll_idx ON users (coaching_id, role, roll_no)`,
+    `CREATE INDEX IF NOT EXISTS attendance_coaching_date_idx ON attendance (coaching_id, attendance_date DESC)`,
+    `CREATE INDEX IF NOT EXISTS attendance_coaching_student_date_idx ON attendance (coaching_id, student_id, attendance_date)`,
+    `CREATE INDEX IF NOT EXISTS fees_coaching_created_idx ON fees (coaching_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS fees_coaching_payment_date_idx ON fees (coaching_id, payment_date DESC)`,
+    `CREATE INDEX IF NOT EXISTS fees_coaching_due_date_idx ON fees (coaching_id, due_date DESC)`,
+    `CREATE INDEX IF NOT EXISTS test_papers_coaching_upload_idx ON test_papers (coaching_id, upload_date DESC)`,
+    `CREATE INDEX IF NOT EXISTS test_papers_coaching_student_upload_idx ON test_papers (coaching_id, student_id, upload_date DESC)`,
+    `CREATE INDEX IF NOT EXISTS test_papers_coaching_answer_request_idx ON test_papers (coaching_id, answer_request_id, upload_date DESC)`,
+    `CREATE INDEX IF NOT EXISTS batch_notes_coaching_created_idx ON batch_notes (coaching_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS answer_upload_requests_coaching_created_idx ON answer_upload_requests (coaching_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS batches_coaching_status_idx ON batches (coaching_id, status, name)`,
+  ];
+
+  for (const statement of indexes) {
+    await run(statement);
+  }
 }
 
 function isValidHttpUrl(value) {
@@ -1775,38 +1860,51 @@ function getAnswerRequestState(request) {
 }
 
 async function buildAnswerRequestSummaries(coachingId, requests) {
-  const summaries = [];
+  if (!requests.length) return [];
 
-  for (const request of requests) {
-    const targetStudents = request.batch_id
-      ? await all(
-        `SELECT u.id, u.roll_no, u.name, u.contact_phone, u.email, u.batch_id, b.name AS batch_name
-         FROM users u
-         LEFT JOIN batches b ON b.id = u.batch_id
-         WHERE u.coaching_id = ? AND u.role = 'student' AND u.batch_id = ?
-         ORDER BY u.roll_no ASC`,
-        [coachingId, request.batch_id]
-      )
-      : await all(
-        `SELECT id, roll_no, name, contact_phone, email, batch_id
-         FROM users
-         WHERE coaching_id = ? AND role = 'student' AND standard = ? AND course = ?
-         ORDER BY roll_no ASC`,
-        [coachingId, request.standard, request.course]
-      );
+  const requestIds = requests.map((request) => Number(request.id)).filter(Number.isInteger);
+  const targetStudents = await all(
+    `SELECT u.id, u.roll_no, u.name, u.contact_phone, u.email, u.batch_id, u.standard, u.course, b.name AS batch_name
+     FROM users u
+     LEFT JOIN batches b ON b.id = u.batch_id
+     WHERE u.coaching_id = ? AND u.role = 'student'
+     ORDER BY u.roll_no ASC`,
+    [coachingId]
+  );
 
-    const submissions = await all(
+  const submissions = requestIds.length
+    ? await all(
       `SELECT tp.id, tp.student_id, tp.upload_date, tp.original_name, tp.test_label, tp.content_type,
+              tp.answer_request_id,
               uploader.name AS uploaded_by_name, uploader.role AS uploaded_by_role
        FROM test_papers tp
        LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
-       WHERE tp.coaching_id = ? AND tp.answer_request_id = ?
+       WHERE tp.coaching_id = ? AND tp.answer_request_id = ANY(?::int[])
        ORDER BY tp.upload_date DESC`,
-      [coachingId, request.id]
-    );
+      [coachingId, requestIds]
+    )
+    : [];
+
+  const submissionsByRequest = new Map();
+  submissions.forEach((submission) => {
+    const requestKey = Number(submission.answer_request_id);
+    if (!submissionsByRequest.has(requestKey)) {
+      submissionsByRequest.set(requestKey, []);
+    }
+    submissionsByRequest.get(requestKey).push(submission);
+  });
+
+  return requests.map((request) => {
+    const requestTargetStudents = request.batch_id
+      ? targetStudents.filter((student) => Number(student.batch_id) === Number(request.batch_id))
+      : targetStudents.filter((student) => (
+        String(student.standard || '') === String(request.standard || '')
+        && String(student.course || '') === String(request.course || '')
+      ));
+    const requestSubmissions = submissionsByRequest.get(Number(request.id)) || [];
 
     const latestSubmissionByStudent = new Map();
-    submissions.forEach((submission) => {
+    requestSubmissions.forEach((submission) => {
       if (!latestSubmissionByStudent.has(submission.student_id)) {
         latestSubmissionByStudent.set(submission.student_id, submission);
       }
@@ -1815,7 +1913,7 @@ async function buildAnswerRequestSummaries(coachingId, requests) {
     const uploadedStudents = [];
     const pendingStudents = [];
 
-    for (const student of targetStudents) {
+    for (const student of requestTargetStudents) {
       const submission = latestSubmissionByStudent.get(student.id);
       if (submission) {
         uploadedStudents.push({
@@ -1827,19 +1925,17 @@ async function buildAnswerRequestSummaries(coachingId, requests) {
       }
     }
 
-    summaries.push({
+    return {
       ...request,
       batch_name: request.batch_name || formatLegacyBatchLabel(request.standard, request.course) || null,
       state: getAnswerRequestState(request),
-      totalStudents: targetStudents.length,
+      totalStudents: requestTargetStudents.length,
       uploadedCount: uploadedStudents.length,
       pendingCount: pendingStudents.length,
       uploadedStudents,
       pendingStudents,
-    });
-  }
-
-  return summaries;
+    };
+  });
 }
 
 async function findRecentDuplicatePaper({
@@ -4157,6 +4253,13 @@ app.get('/admin/reports/fees.pdf', requireCoachingAdmin, async (req, res) => {
   });
 });
 
+app.get('/admin/performance/slow-operations', requireCoachingAdmin, async (req, res) => {
+  res.json({
+    generatedAt: new Date().toISOString(),
+    top10: getGlobalSlowOperations(),
+  });
+});
+
 app.get('/owner/dashboard', requireOwner, async (req, res) => {
   const activeSection = getOwnerSection(req.query.section);
   const planSql = buildResolvedPlanSql('cc');
@@ -4612,19 +4715,38 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const studentSearchQuery = (req.query.studentSearch || '').trim();
   const coachingId = req.session.user.coachingId;
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
-  const adminProfile = await get(
+  const isOverviewSection = activeSection === 'overview';
+  const needsStudents = ['overview', 'students', 'attendance', 'fees', 'notes', 'whatsapp'].includes(activeSection);
+  const needsPapers = ['overview', 'papers'].includes(activeSection);
+  const needsAttendance = ['overview', 'attendance'].includes(activeSection);
+  const needsFees = ['overview', 'fees'].includes(activeSection);
+  const needsNotes = ['overview', 'notes'].includes(activeSection);
+  const needsAnswerRequests = ['overview', 'papers'].includes(activeSection);
+  const needsWhatsAppSettings = ['whatsapp', 'settings'].includes(activeSection);
+  const needsWhatsAppLogs = activeSection === 'whatsapp';
+  const needsNotificationLogs = activeSection === 'notifications';
+  const needsAdminProfile = activeSection === 'settings';
+
+  const studentCountRow = await get(
+    `SELECT COUNT(*) AS total_students
+     FROM users
+     WHERE coaching_id = ? AND role = 'student'`,
+    [coachingId]
+  );
+  const totalStudentCount = Number(studentCountRow?.total_students || 0);
+  const adminProfile = needsAdminProfile ? await get(
     `SELECT contact_phone, email
      FROM users
      WHERE id = ? AND coaching_id = ? AND role = 'admin'
      LIMIT 1`,
     [req.session.user.id, coachingId]
-  );
+  ) : null;
   const batches = await getBatchesForCoaching(coachingId);
-  const whatsappSettings = buildWhatsAppSettingsView(await getWhatsAppSettings(coachingId));
-  const whatsappLogs = await getRecentWhatsAppLogs(coachingId, 25);
-  const notificationLogs = await getRecentNotificationLogs(coachingId, 100);
+  const whatsappSettings = buildWhatsAppSettingsView(needsWhatsAppSettings ? await getWhatsAppSettings(coachingId) : null);
+  const whatsappLogs = needsWhatsAppLogs ? await getRecentWhatsAppLogs(coachingId, 25) : [];
+  const notificationLogs = needsNotificationLogs ? await getRecentNotificationLogs(coachingId, 100) : [];
 
-  const students = await all(
+  const students = needsStudents ? await all(
     `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course, u.contact_phone, u.guardian_phone, u.whatsapp_number, u.parent_whatsapp_number, u.email, u.created_at,
             u.is_retained_record, u.retention_source_batch_id,
             b.name AS batch_name, b.status AS batch_status, b.completed_at AS batch_completed_at, b.is_retention_batch
@@ -4633,9 +4755,10 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      WHERE u.role = 'student' AND u.coaching_id = ?
      ORDER BY COALESCE(b.name, ''), u.roll_no ASC`,
     [coachingId]
-  );
+  ) : [];
 
-  const papers = await all(
+  const papersMonthRange = getMonthDateRange(papersMonthFilter);
+  const papers = needsPapers ? await all(
     `SELECT
        tp.id,
        tp.original_name,
@@ -4662,13 +4785,14 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      LEFT JOIN batches b ON b.id = u.batch_id
      LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
      WHERE tp.coaching_id = ?
-       AND CAST(tp.upload_date AS TEXT) LIKE ?
+       AND tp.upload_date >= ?
+       AND tp.upload_date < ?
      ORDER BY tp.upload_date DESC
      LIMIT 250`,
-    [coachingId, `${papersMonthFilter}%`]
-  );
+    [coachingId, papersMonthRange.start, papersMonthRange.end]
+  ) : [];
 
-  const shouldLoadAttendanceRecords = activeSection !== 'attendance' || Boolean(attendanceDateFilter);
+  const shouldLoadAttendanceRecords = needsAttendance && (activeSection !== 'attendance' || Boolean(attendanceDateFilter));
   const attendance = shouldLoadAttendanceRecords
     ? await getAttendanceReportRows(coachingId, {
       attendanceDate: attendanceDateFilter,
@@ -4677,22 +4801,22 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     })
     : [];
 
-  const attendanceDates = await all(
+  const attendanceDates = activeSection === 'attendance' ? await all(
     `SELECT DISTINCT CAST(attendance_date AS TEXT) AS attendance_date
      FROM attendance
      WHERE coaching_id = ?
      ORDER BY attendance_date DESC
      LIMIT 90`,
     [coachingId]
-  );
+  ) : [];
 
-  const fees = await getFeeReportRows(coachingId, {
+  const fees = needsFees ? await getFeeReportRows(coachingId, {
     feesDate: feesDateFilter,
     feesMonth: feesDateFilter ? '' : feesMonthFilter,
     limit: 150,
-  });
+  }) : [];
 
-  const notes = await all(
+  const notes = needsNotes ? await all(
     `SELECT bn.id, bn.batch_id, bn.standard, bn.course, bn.title, bn.resource_url, bn.description, bn.created_at,
             b.name AS batch_name
      FROM batch_notes bn
@@ -4701,9 +4825,9 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      ORDER BY bn.created_at DESC
      LIMIT 150`,
     [coachingId]
-  );
+  ) : [];
 
-  const answerRequests = await all(
+  const answerRequests = needsAnswerRequests ? await all(
     `SELECT ar.id, ar.batch_id, ar.standard, ar.course, ar.title, ar.description, ar.starts_at, ar.ends_at, ar.created_at,
             b.name AS batch_name
      FROM answer_upload_requests ar
@@ -4712,11 +4836,11 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      ORDER BY ar.created_at DESC
      LIMIT 20`,
     [coachingId]
-  );
+  ) : [];
 
-  const answerRequestSummaries = await buildAnswerRequestSummaries(coachingId, answerRequests);
+  const answerRequestSummaries = needsAnswerRequests ? await buildAnswerRequestSummaries(coachingId, answerRequests) : [];
 
-  const paperStats = await all(
+  const paperStats = isOverviewSection ? await all(
     `SELECT
        student_id,
        COUNT(*) AS paper_count,
@@ -4726,15 +4850,15 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      WHERE coaching_id = ?
      GROUP BY student_id`,
     [coachingId]
-  );
+  ) : [];
 
-  const latestMarkedPapers = await all(
+  const latestMarkedPapers = isOverviewSection ? await all(
     `SELECT student_id, marks_obtained, max_marks, upload_date, test_label, original_name
      FROM test_papers
      WHERE coaching_id = ? AND marks_obtained IS NOT NULL AND max_marks IS NOT NULL AND max_marks > 0
      ORDER BY upload_date DESC`,
     [coachingId]
-  );
+  ) : [];
 
   const paperStatsByStudent = new Map();
   paperStats.forEach((row) => paperStatsByStudent.set(row.student_id, row));
@@ -4765,7 +4889,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const defaultAnswerRequestStart = toDateTimeLocalInput(new Date());
 
   const stats = {
-    totalStudents: students.length,
+    totalStudents: totalStudentCount,
     totalPapers: papers.length,
     pendingFees: fees.filter((item) => item.status === 'pending' || item.status === 'overdue').length,
     absentEntries: attendance.filter((item) => item.status === 'absent').length,
@@ -4775,23 +4899,42 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const feesPaidThisMonth = fees.filter((item) => item.status === 'paid' && String(item.payment_date || '').startsWith(feesMonthFilter));
   const papersThisMonthCount = papers.length;
   const attendanceThisMonthCount = attendance.length;
-  const studentUsage = getStudentUsage(students.length, coaching);
-  const batchSummaries = toBatchSummaries(students, batches);
-  const studentBatchGroups = toStudentBatchGroups(students, batches);
-  const studentSearch = getStudentSearchResults(students, studentSearchQuery);
-  const completedBatches = batches.filter((batch) => batch.status === 'completed' && !batch.is_retention_batch).map((batch) => ({
-    ...batch,
-    studentCount: students.filter((student) => Number(student.batch_id) === Number(batch.id) && !student.is_retained_record).length,
-    retainedCount: students.filter((student) => Number(student.retention_source_batch_id || 0) === Number(batch.id) && student.is_retained_record).length,
-    eligibleRetentionStudents: students.filter((student) => Number(student.batch_id) === Number(batch.id) && !student.is_retained_record),
-    createdDaysAgo: formatDaysAgo(batch.created_at),
-    completedDaysAgo: formatDaysAgo(batch.completed_at),
-    retentionRemaining: Math.max(
-      0,
-      RETENTION_MAX_STUDENTS_PER_SOURCE_BATCH
-        - students.filter((student) => Number(student.retention_source_batch_id || 0) === Number(batch.id) && student.is_retained_record).length
-    ),
-  }));
+  const studentUsage = getStudentUsage(totalStudentCount, coaching);
+  const batchSummaries = activeSection === 'students' ? toBatchSummaries(students, batches) : [];
+  const studentBatchGroups = activeSection === 'students' ? toStudentBatchGroups(students, batches) : [];
+  const studentSearch = activeSection === 'students' ? getStudentSearchResults(students, studentSearchQuery) : { query: studentSearchQuery, results: [] };
+  const completedBatches = activeSection === 'students'
+    ? (() => {
+      const studentCountByBatch = new Map();
+      const retainedCountBySourceBatch = new Map();
+      const eligibleStudentsByBatch = new Map();
+      students.forEach((student) => {
+        const batchId = Number(student.batch_id || 0);
+        const sourceBatchId = Number(student.retention_source_batch_id || 0);
+        if (batchId && !student.is_retained_record) {
+          studentCountByBatch.set(batchId, (studentCountByBatch.get(batchId) || 0) + 1);
+          if (!eligibleStudentsByBatch.has(batchId)) eligibleStudentsByBatch.set(batchId, []);
+          eligibleStudentsByBatch.get(batchId).push(student);
+        }
+        if (sourceBatchId && student.is_retained_record) {
+          retainedCountBySourceBatch.set(sourceBatchId, (retainedCountBySourceBatch.get(sourceBatchId) || 0) + 1);
+        }
+      });
+      return batches.filter((batch) => batch.status === 'completed' && !batch.is_retention_batch).map((batch) => {
+        const batchId = Number(batch.id);
+        const retainedCount = retainedCountBySourceBatch.get(batchId) || 0;
+        return {
+          ...batch,
+          studentCount: studentCountByBatch.get(batchId) || 0,
+          retainedCount,
+          eligibleRetentionStudents: eligibleStudentsByBatch.get(batchId) || [],
+          createdDaysAgo: formatDaysAgo(batch.created_at),
+          completedDaysAgo: formatDaysAgo(batch.completed_at),
+          retentionRemaining: Math.max(0, RETENTION_MAX_STUDENTS_PER_SOURCE_BATCH - retainedCount),
+        };
+      });
+    })()
+    : [];
 
   renderWithMessage(res, 'admin-dashboard', {
     user: req.session.user,
@@ -5953,16 +6096,23 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
   const absentees = parseAbsentees(req.body.absentRollNos);
   let absentCount = 0;
   let presentCount = 0;
+  const studentIds = students.map((student) => Number(student.id)).filter(Number.isInteger);
+  const existingRows = studentIds.length
+    ? await all(
+      `SELECT id, student_id
+       FROM attendance
+       WHERE coaching_id = ? AND attendance_date = ? AND student_id = ANY(?::int[])`,
+      [coachingId, attendanceDate, studentIds]
+    )
+    : [];
+  const existingByStudentId = new Map(existingRows.map((row) => [Number(row.student_id), row]));
 
   for (const student of students) {
     const nextStatus = absentees.has(student.roll_no) ? 'absent' : 'present';
     if (nextStatus === 'absent') absentCount += 1;
     else presentCount += 1;
 
-    const existing = await get(
-      `SELECT id FROM attendance WHERE coaching_id = ? AND student_id = ? AND attendance_date = ? LIMIT 1`,
-      [coachingId, student.id, attendanceDate]
-    );
+    const existing = existingByStudentId.get(Number(student.id));
 
     if (existing) {
       await run(
@@ -6596,6 +6746,7 @@ async function prepareApp() {
       .then(() => ensureWhatsAppSchema())
       .then(() => ensureNotificationSchema())
       .then(() => ensureFeeStructureSchema())
+      .then(() => ensurePerformanceIndexes())
       .then(async () => {
         console.log('[BOOT] Database ready');
         if (process.env.RUN_STARTUP_MAINTENANCE === 'true') {
