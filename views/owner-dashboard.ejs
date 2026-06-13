@@ -29,6 +29,33 @@
       <div class="alert <%= flash.type %>"><%= flash.text %></div>
     <% } %>
 
+    <section class="card">
+      <form method="post" action="/owner/branches/select" class="grid two">
+        <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+        <label>
+          Branch View
+          <select name="branchId" required>
+            <% (branches || []).forEach((branch) => { %>
+              <option value="<%= branch.id %>" <%= selectedBranch && Number(selectedBranch.id) === Number(branch.id) ? 'selected' : '' %>>
+                <%= branch.name %>
+              </option>
+            <% }) %>
+          </select>
+        </label>
+        <div>
+          <button type="submit" class="btn">Switch Branch</button>
+        </div>
+      </form>
+      <% if (selectedBranch) { %>
+        <div class="hero-chip-row">
+          <span class="info-chip">Selected <strong><%= selectedBranch.name %></strong></span>
+          <span class="info-chip">Students <strong><%= selectedBranch.student_count %></strong></span>
+          <span class="info-chip">Admins <strong><%= selectedBranch.admin_count %></strong></span>
+          <span class="info-chip">Batches <strong><%= selectedBranch.batch_count %></strong></span>
+        </div>
+      <% } %>
+    </section>
+
     <section class="section-switcher card">
       <div class="sidebar-brand">
         <div class="sidebar-brand-top">

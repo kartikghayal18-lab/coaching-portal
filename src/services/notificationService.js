@@ -30,6 +30,7 @@ async function ensureNotificationSchema() {
     CREATE TABLE IF NOT EXISTS notification_logs (
       id SERIAL PRIMARY KEY,
       coaching_id INTEGER,
+      branch_id INTEGER NOT NULL,
       student_id INTEGER NOT NULL,
       type VARCHAR(80) NOT NULL,
       event_type VARCHAR(80),
@@ -52,12 +53,13 @@ async function ensureNotificationSchema() {
     CREATE TABLE IF NOT EXISTS whatsapp_parent_sessions (
       id SERIAL PRIMARY KEY,
       coaching_id INTEGER,
+      branch_id INTEGER NOT NULL,
       student_id INTEGER,
       phone_number VARCHAR(20) NOT NULL,
       state VARCHAR(80) NOT NULL DEFAULT 'menu',
       last_message TEXT,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE (coaching_id, phone_number)
+      UNIQUE (branch_id, phone_number)
     )
   `);
 
@@ -104,7 +106,7 @@ async function sendWhatsAppNotification({
     eventKey,
   });
   const student = await get(
-    `SELECT id, coaching_id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
+    `SELECT id, coaching_id, branch_id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
      FROM users
      WHERE id = ? AND role = 'student'
      LIMIT 1`,
@@ -170,10 +172,11 @@ async function sendWhatsAppNotification({
 
   const logResult = await run(
     `INSERT INTO notification_logs (
-      coaching_id, student_id, type, event_type, message, status, phone_number, event_key
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      coaching_id, branch_id, student_id, type, event_type, message, status, phone_number, event_key
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       student.coaching_id,
+      student.branch_id,
       student.id,
       notificationType,
       notificationType,
@@ -251,7 +254,7 @@ async function sendDocumentNotification(
   options = {}
 ) {
   const student = await get(
-    `SELECT id, coaching_id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
+    `SELECT id, coaching_id, branch_id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
      FROM users
      WHERE id = ? AND role = 'student'
      LIMIT 1`,
@@ -306,10 +309,11 @@ async function sendDocumentNotification(
   } else {
     const logResult = await run(
       `INSERT INTO notification_logs (
-        coaching_id, student_id, type, event_type, message, attachment_url, status, phone_number, event_key
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        coaching_id, branch_id, student_id, type, event_type, message, attachment_url, status, phone_number, event_key
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         student.coaching_id,
+        student.branch_id,
         student.id,
         notificationType,
         notificationType,

@@ -47,7 +47,8 @@ async function ensureWhatsAppSchema() {
   await run(`
     CREATE TABLE IF NOT EXISTS whatsapp_settings (
       id SERIAL PRIMARY KEY,
-      coaching_id INTEGER NOT NULL UNIQUE,
+      coaching_id INTEGER NOT NULL,
+      branch_id INTEGER NOT NULL,
       access_token TEXT,
       phone_number_id VARCHAR(80),
       business_account_id VARCHAR(80),
@@ -72,6 +73,7 @@ async function ensureWhatsAppSchema() {
     CREATE TABLE IF NOT EXISTS whatsapp_logs (
       id SERIAL PRIMARY KEY,
       coaching_id INTEGER,
+      branch_id INTEGER NOT NULL,
       student_id INTEGER,
       phone_number VARCHAR(20) NOT NULL,
       message_type VARCHAR(40) NOT NULL,
@@ -103,11 +105,11 @@ async function getWhatsAppSettings(coachingId) {
 async function saveWhatsAppSettings(coachingId, settings, updatedBy = null) {
   await run(
     `INSERT INTO whatsapp_settings (
-      coaching_id, access_token, phone_number_id, business_account_id, verify_token,
+      coaching_id, branch_id, access_token, phone_number_id, business_account_id, verify_token,
       attendance_alerts_enabled, fee_alerts_enabled, result_alerts_enabled, test_paper_alerts_enabled, notice_alerts_enabled,
       updated_by, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT (coaching_id)
+    ) VALUES (?, app_current_branch_id(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT (branch_id)
     DO UPDATE SET
       access_token = EXCLUDED.access_token,
       phone_number_id = EXCLUDED.phone_number_id,
@@ -138,6 +140,7 @@ async function saveWhatsAppSettings(coachingId, settings, updatedBy = null) {
 
 async function logWhatsAppMessage({
   coachingId = null,
+  branchId = null,
   studentId = null,
   phoneNumber,
   messageType,
@@ -145,12 +148,22 @@ async function logWhatsAppMessage({
   status = 'pending',
   metaMessageId = null,
 }) {
+  let resolvedBranchId = branchId;
+  if (!resolvedBranchId && studentId) {
+    const student = await get(
+      `SELECT branch_id FROM users WHERE id = ? AND role = 'student' LIMIT 1`,
+      [studentId]
+    );
+    resolvedBranchId = student?.branch_id || null;
+  }
+
   const result = await run(
     `INSERT INTO whatsapp_logs (
-      coaching_id, student_id, phone_number, message_type, message_content, status, meta_message_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      coaching_id, branch_id, student_id, phone_number, message_type, message_content, status, meta_message_id
+    ) VALUES (?, COALESCE(?, app_current_branch_id()), ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
+      resolvedBranchId,
       studentId,
       cleanPhoneNumber(phoneNumber),
       String(messageType || 'text').slice(0, 40),

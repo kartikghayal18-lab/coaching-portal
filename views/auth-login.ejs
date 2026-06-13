@@ -102,6 +102,14 @@
 
           <div class="space-y-5">
             <div>
+              <label class="mb-2 block text-sm font-extrabold text-slate-700">Branch</label>
+              <select name="branchCode" required class="h-14 w-full rounded-2xl border border-blue-100 bg-white/85 px-4 text-base font-bold text-slate-800 outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10">
+                <% (branches || []).forEach((branch) => { %>
+                  <option value="<%= branch.code %>" <%= selectedBranchCode === branch.code ? 'selected' : '' %>><%= branch.name %></option>
+                <% }) %>
+              </select>
+            </div>
+            <div>
               <label class="mb-2 block text-sm font-extrabold text-slate-700">Login Type</label>
               <select name="role" id="role" required class="h-14 w-full rounded-2xl border border-blue-100 bg-white/85 px-4 text-base font-bold text-slate-800 outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10">
                 <option value="admin" <%= loginRole === 'admin' ? 'selected' : '' %>>Coaching Admin</option>

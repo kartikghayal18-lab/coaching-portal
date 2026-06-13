@@ -58,6 +58,7 @@ const {
   recordPerfOperation,
   runWithPerfTrace,
 } = require('./performance');
+const { runWithBranchContext } = require('./branch-context');
 
 console.log('[BOOT] Starting app');
 console.log('[BOOT] DATABASE_URL present:', Boolean(process.env.DATABASE_URL));
@@ -171,6 +172,10 @@ app.use(
     },
   })
 );
+app.use((req, res, next) => runWithBranchContext({
+  branchId: req.session?.user?.branchId || null,
+  isSuperAdmin: !req.session?.user || Boolean(req.session.user.isOwner),
+}, next));
 app.use((req, res, next) => {
   const shouldProfile = req.path.startsWith('/admin') || req.path.startsWith('/papers/');
 
@@ -1009,6 +1014,7 @@ async function createPendingTwoFactorLogin(req, user, coaching = null) {
   req.session.pendingLogin = {
     userId: user.id,
     coachingId: user.coaching_id || null,
+    branchId: user.branch_id || null,
     isOwner: Boolean(user.is_owner),
     role: user.is_owner ? 'owner' : user.role,
     coachingName: coaching?.name || null,
@@ -1020,7 +1026,14 @@ async function getPendingTwoFactorContext(req) {
   const pending = req.session?.pendingLogin;
   if (!pending?.userId) return null;
 
-  const user = await get(`SELECT * FROM users WHERE id = ? LIMIT 1`, [pending.userId]);
+  const user = await get(
+    `SELECT u.*, b.code AS branch_code, b.name AS branch_name
+     FROM users u
+     LEFT JOIN branches b ON b.id = u.branch_id
+     WHERE u.id = ?
+     LIMIT 1`,
+    [pending.userId]
+  );
   if (!user) return null;
 
   const coaching = pending.coachingId ? await getCoachingContextById(pending.coachingId) : null;
@@ -2347,6 +2360,9 @@ function buildSessionUser(user, coaching = null) {
     coachingPlanMaxStudents: getStudentLimitValue(coaching),
     coachingSubscriptionStatus: coaching?.subscription_status || null,
     coachingSubscriptionEndsAt: coaching?.subscription_ends_at || null,
+    branchId: user.branch_id || null,
+    branchCode: user.branch_code || null,
+    branchName: user.branch_name || null,
     username: user.username || null,
     rollNo: user.roll_no || null,
     name: user.name || null,
@@ -2382,6 +2398,13 @@ async function renderLoginPage(req, res, flash = null) {
   const requestedRole = String(req.query.role || req.body?.role || '').trim().toLowerCase();
   const loginRole = requestedRole === 'student' ? 'student' : 'admin';
   const coaching = await getCoachingBySlug(SINGLE_CLIENT_COACHING_SLUG);
+  const branches = coaching ? await all(
+    `SELECT id, code, name
+     FROM branches
+     WHERE coaching_id = ? AND is_active = TRUE
+     ORDER BY CASE code WHEN 'satpur' THEN 1 WHEN 'meri' THEN 2 ELSE 3 END, name`,
+    [coaching.id]
+  ) : [];
   const nextFlash = flash || req.session?.flash || null;
   const captcha = getCaptchaChallenge(req, 'login');
   if (req.session) req.session.flash = null;
@@ -2390,6 +2413,8 @@ async function renderLoginPage(req, res, flash = null) {
     flash: nextFlash,
     coaching,
     coachingHint: SINGLE_CLIENT_COACHING_SLUG,
+    branches,
+    selectedBranchCode: String(req.body?.branchCode || req.query?.branch || branches[0]?.code || '').trim(),
     loginRole,
     branding: buildBranding(coaching || { name: SINGLE_CLIENT_NAME, brand_name: SINGLE_CLIENT_NAME, slug: SINGLE_CLIENT_COACHING_SLUG }),
     captcha,
@@ -2623,8 +2648,22 @@ app.use(async (req, res, next) => {
     return;
   }
 
+  const branch = await get(
+    `SELECT b.id, b.code, b.name
+     FROM users u
+     JOIN branches b ON b.id = u.branch_id
+     WHERE u.id = ? AND u.coaching_id = ? AND u.branch_id = ? AND b.is_active = TRUE
+     LIMIT 1`,
+    [req.session.user.id, req.session.user.coachingId, req.session.user.branchId]
+  );
+  if (!branch) {
+    req.session.destroy(() => res.redirect('/login'));
+    return;
+  }
+
   const subscriptionState = getSubscriptionState(coaching);
   req.currentCoaching = coaching;
+  req.currentBranch = branch;
   req.subscriptionState = subscriptionState;
   req.session.user = {
     ...req.session.user,
@@ -2635,6 +2674,9 @@ app.use(async (req, res, next) => {
     coachingPlanMaxStudents: getStudentLimitValue(coaching),
     coachingSubscriptionStatus: coaching.subscription_status,
     coachingSubscriptionEndsAt: coaching.subscription_ends_at || null,
+    branchId: branch.id,
+    branchCode: branch.code,
+    branchName: branch.name,
   };
 
   if (!subscriptionState.accessBlocked) {
@@ -2717,7 +2759,7 @@ app.use(async (req, res, next) => {
 
 app.get('/', (req, res) => {
   if (!req.session.user) return res.redirect('/login');
-  if (req.session.user.isOwner) return res.redirect('/login');
+  if (req.session.user.isOwner) return res.redirect('/owner/dashboard');
   if (req.session.user.role === 'admin') return res.redirect('/admin/dashboard');
   return res.redirect('/student/dashboard');
 });
@@ -3002,7 +3044,6 @@ app.post('/admin/reset-password', async (req, res) => {
 });
 
 app.all('/trial/apply', (req, res) => res.redirect('/login'));
-app.all(['/owner', '/owner/*'], (req, res) => res.redirect('/login'));
 
 app.get('/trial/apply', async (req, res) => {
   if (req.session.user) return res.redirect('/');
@@ -3213,6 +3254,7 @@ app.post('/login', async (req, res) => {
   const submittedPassword = req.body.password || '';
   const password = submittedPassword;
   const coachingSlug = SINGLE_CLIENT_COACHING_SLUG;
+  const branchCode = String(req.body.branchCode || '').trim().toLowerCase();
 
   if (!verifyCaptcha(req, 'login', req.body.captchaAnswer)) {
     return renderLoginPage(req, res, {
@@ -3231,19 +3273,36 @@ app.post('/login', async (req, res) => {
       return renderLoginPage(req, res, { type: 'error', text: `${SINGLE_CLIENT_NAME} portal is not configured yet.` });
     }
 
+    const branch = await get(
+      `SELECT id, code, name
+       FROM branches
+       WHERE coaching_id = ? AND code = ? AND is_active = TRUE
+       LIMIT 1`,
+      [coaching.id, branchCode]
+    );
+    if (!branch) {
+      return renderLoginPage(req, res, { type: 'error', text: 'Select a valid branch' });
+    }
+
     if (role === 'admin') {
       user = await get(
-        `SELECT * FROM users
-         WHERE coaching_id = ? AND role = 'admin' AND is_owner = 0 AND username = ?
+        `SELECT u.*, b.code AS branch_code, b.name AS branch_name
+         FROM users u
+         JOIN branches b ON b.id = u.branch_id
+         WHERE u.coaching_id = ? AND u.branch_id = ?
+           AND u.role = 'admin' AND u.is_owner = 0 AND u.username = ?
          LIMIT 1`,
-        [coaching.id, username]
+        [coaching.id, branch.id, username]
       );
     } else {
       user = await get(
-        `SELECT * FROM users
-         WHERE coaching_id = ? AND role = 'student' AND roll_no = ?
+        `SELECT u.*, b.code AS branch_code, b.name AS branch_name
+         FROM users u
+         JOIN branches b ON b.id = u.branch_id
+         WHERE u.coaching_id = ? AND u.branch_id = ?
+           AND u.role = 'student' AND u.roll_no = ?
          LIMIT 1`,
-        [coaching.id, username]
+        [coaching.id, branch.id, username]
       );
     }
   }
@@ -3584,12 +3643,12 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
                 if (student) {
                   await run(
-                    `INSERT INTO whatsapp_settings (coaching_id, phone_number_id, updated_at)
-                     VALUES (?, ?, CURRENT_TIMESTAMP)
-                     ON CONFLICT (coaching_id)
+                    `INSERT INTO whatsapp_settings (coaching_id, branch_id, phone_number_id, updated_at)
+                     VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                     ON CONFLICT (branch_id)
                      DO UPDATE SET phone_number_id = EXCLUDED.phone_number_id,
                                    updated_at = CURRENT_TIMESTAMP`,
-                    [student.coaching_id, phoneNumberId]
+                    [student.coaching_id, student.branch_id, phoneNumberId]
                   );
                   coaching = {
                     coaching_id: student.coaching_id,
@@ -3615,7 +3674,11 @@ app.post('/webhook/whatsapp', async (req, res) => {
                 continue;
               }
               if (!student) {
-                student = await findStudentByParentPhone(coaching.coaching_id, incomingMessage.from);
+                student = await findStudentByParentPhone(
+                  coaching.coaching_id,
+                  incomingMessage.from,
+                  coaching.branch_id || null
+                );
               }
               console.log('[STUDENT] Direct phone lookup result:', student ? {
                 id: student.id,
@@ -3623,7 +3686,11 @@ app.post('/webhook/whatsapp', async (req, res) => {
                 coachingId: student.coaching_id,
               } : null);
               if (!student) {
-                student = await findStudentByParentSession(coaching.coaching_id, incomingMessage.from);
+                student = await findStudentByParentSession(
+                  coaching.coaching_id,
+                  incomingMessage.from,
+                  coaching.branch_id || null
+                );
                 console.log('[STUDENT] Session lookup result:', student ? {
                   id: student.id,
                   rollNo: student.roll_no,
@@ -4263,6 +4330,27 @@ app.get('/admin/performance/slow-operations', requireCoachingAdmin, async (req, 
 app.get('/owner/dashboard', requireOwner, async (req, res) => {
   const activeSection = getOwnerSection(req.query.section);
   const planSql = buildResolvedPlanSql('cc');
+  const requestedBranchId = Number.parseInt(String(req.query.branchId || req.session.ownerBranchId || ''), 10);
+  const branches = await all(
+    `SELECT
+       b.id,
+       b.code,
+       b.name,
+       b.coaching_id,
+       cc.name AS coaching_name,
+       COUNT(DISTINCT CASE WHEN u.role = 'student' THEN u.id END) AS student_count,
+       COUNT(DISTINCT CASE WHEN u.role = 'admin' AND u.is_owner = 0 THEN u.id END) AS admin_count,
+       COUNT(DISTINCT batch.id) AS batch_count
+     FROM branches b
+     JOIN coaching_classes cc ON cc.id = b.coaching_id
+     LEFT JOIN users u ON u.branch_id = b.id
+     LEFT JOIN batches batch ON batch.branch_id = b.id
+     WHERE b.is_active = TRUE
+     GROUP BY b.id, cc.name
+     ORDER BY cc.name, b.name`
+  );
+  const selectedBranch = branches.find((branch) => Number(branch.id) === requestedBranchId) || branches[0] || null;
+  req.session.ownerBranchId = selectedBranch?.id || null;
 
   const coachings = await all(
     `SELECT
@@ -4306,7 +4394,15 @@ app.get('/owner/dashboard', requireOwner, async (req, res) => {
        ) AS oldest_batch_created_at
      FROM coaching_classes cc
      LEFT JOIN subscription_plans sp ON sp.id = cc.subscription_plan_id
-     LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.role = 'admin' AND admin.is_owner = 0
+     LEFT JOIN users admin
+       ON admin.coaching_id = cc.id
+      AND admin.role = 'admin'
+      AND admin.is_owner = 0
+      AND admin.branch_id = (
+        SELECT MIN(owner_branch.id)
+        FROM branches owner_branch
+        WHERE owner_branch.coaching_id = cc.id
+      )
      GROUP BY
        cc.id,
        sp.id,
@@ -4370,9 +4466,26 @@ app.get('/owner/dashboard', requireOwner, async (req, res) => {
       pendingTrialRequests: trialRequests.filter((item) => item.status === 'pending').length,
     },
     trialRequests,
+    branches,
+    selectedBranch,
     flash: req.session.flash,
   });
   req.session.flash = null;
+});
+
+app.post('/owner/branches/select', requireOwner, async (req, res) => {
+  const branchId = Number.parseInt(String(req.body.branchId || ''), 10);
+  const branch = await get(
+    `SELECT id FROM branches WHERE id = ? AND is_active = TRUE LIMIT 1`,
+    [branchId]
+  );
+  if (!branch) {
+    req.session.flash = { type: 'error', text: 'Branch not found' };
+    return res.redirect('/owner/dashboard');
+  }
+
+  req.session.ownerBranchId = branch.id;
+  return res.redirect(`/owner/dashboard?branchId=${branch.id}`);
 });
 
 app.post('/owner/plans/:id', requireOwner, async (req, res) => {
@@ -4520,12 +4633,19 @@ app.post('/owner/coachings', requireOwner, async (req, res) => {
 
   const coachingId = coachingInsert.lastID;
   const passwordHash = await bcrypt.hash(adminPassword, 10);
+  const branchInsert = await run(
+    `INSERT INTO branches (coaching_id, code, name)
+     VALUES (?, 'main', ?)
+     RETURNING id`,
+    [coachingId, `${name} - Main Branch`]
+  );
+  const branchId = branchInsert.lastID;
 
   await run(
     `INSERT INTO users (
-      coaching_id, role, is_owner, username, roll_no, name, standard, course, contact_phone, email, password_hash, must_change_password
-    ) VALUES (?, 'admin', 0, ?, NULL, ?, NULL, NULL, ?, ?, ?, 1)`,
-    [coachingId, adminUsername, adminName, adminContactPhone, adminEmail, passwordHash]
+      coaching_id, branch_id, role, is_owner, username, roll_no, name, standard, course, contact_phone, email, password_hash, must_change_password
+    ) VALUES (?, ?, 'admin', 0, ?, NULL, ?, NULL, NULL, ?, ?, ?, 1)`,
+    [coachingId, branchId, adminUsername, adminName, adminContactPhone, adminEmail, passwordHash]
   );
 
   req.session.flash = {
@@ -4939,6 +5059,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   renderWithMessage(res, 'admin-dashboard', {
     user: req.session.user,
     coaching,
+    branch: req.currentBranch,
     branding: buildBranding(coaching),
     adminProfile,
     whatsappSettings,

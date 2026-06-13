@@ -157,6 +157,7 @@
         <div>
           <p class="ops2-eyebrow">Workspace</p>
           <h2><%= coaching?.name || branding?.brandName || 'Demo Coaching' %></h2>
+          <p class="tiny-note"><%= branch?.name || user?.branchName || 'Branch' %></p>
         </div>
       </div>
 
@@ -198,7 +199,7 @@
           <a href="<%= currentSectionMeta.actionHref %>" class="ops2-primary-btn"><%= currentSectionMeta.actionLabel %></a>
           <div class="ops2-topbar__user">
             <span class="ops2-topbar__dot"></span>
-            <span class="ops2-topbar__meta"><strong><%= user.name %></strong><small><%= todayLabel %></small></span>
+            <span class="ops2-topbar__meta"><strong><%= user.name %></strong><small><%= branch?.name || user?.branchName || 'Branch' %> · <%= todayLabel %></small></span>
           </div>
         </div>
       </header>

@@ -10,13 +10,14 @@ async function ensureFeeStructureSchema() {
     CREATE TABLE IF NOT EXISTS student_fee_structure (
       id SERIAL PRIMARY KEY,
       coaching_id INTEGER,
+      branch_id INTEGER NOT NULL,
       student_id INTEGER NOT NULL,
       total_fee NUMERIC(12,2) DEFAULT 0,
       paid_fee NUMERIC(12,2) DEFAULT 0,
       pending_fee NUMERIC(12,2) DEFAULT 0,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE (coaching_id, student_id)
+      UNIQUE (branch_id, student_id)
     )
   `);
 }
@@ -74,9 +75,9 @@ async function setStudentTotalFee({ coachingId, studentId, totalFee }) {
   const pendingFee = Math.max(total - paidFee, 0);
 
   await run(
-    `INSERT INTO student_fee_structure (coaching_id, student_id, total_fee, paid_fee, pending_fee, updated_at)
-     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-     ON CONFLICT (coaching_id, student_id)
+    `INSERT INTO student_fee_structure (coaching_id, branch_id, student_id, total_fee, paid_fee, pending_fee, updated_at)
+     VALUES (?, app_current_branch_id(), ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT (branch_id, student_id)
      DO UPDATE SET
        total_fee = EXCLUDED.total_fee,
        pending_fee = GREATEST(EXCLUDED.total_fee - student_fee_structure.paid_fee, 0),
@@ -105,9 +106,9 @@ async function applyStudentPayment({ coachingId, studentId, amount }) {
     const paidFee = Number(legacy.paidFee || paymentAmount);
     const pendingFee = Math.max(Number(legacy.pendingFee || 0) - paymentAmount, 0);
     await run(
-      `INSERT INTO student_fee_structure (coaching_id, student_id, total_fee, paid_fee, pending_fee, updated_at)
-       VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT (coaching_id, student_id) DO NOTHING`,
+      `INSERT INTO student_fee_structure (coaching_id, branch_id, student_id, total_fee, paid_fee, pending_fee, updated_at)
+       VALUES (?, app_current_branch_id(), ?, ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT (branch_id, student_id) DO NOTHING`,
       [
         coachingId,
         studentId,
@@ -120,9 +121,9 @@ async function applyStudentPayment({ coachingId, studentId, amount }) {
   }
 
   await run(
-    `INSERT INTO student_fee_structure (coaching_id, student_id, total_fee, paid_fee, pending_fee, updated_at)
-     VALUES (?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
-     ON CONFLICT (coaching_id, student_id)
+    `INSERT INTO student_fee_structure (coaching_id, branch_id, student_id, total_fee, paid_fee, pending_fee, updated_at)
+     VALUES (?, app_current_branch_id(), ?, ?, ?, 0, CURRENT_TIMESTAMP)
+     ON CONFLICT (branch_id, student_id)
      DO UPDATE SET
        paid_fee = student_fee_structure.paid_fee + EXCLUDED.paid_fee,
        pending_fee = GREATEST(student_fee_structure.pending_fee - EXCLUDED.paid_fee, 0),

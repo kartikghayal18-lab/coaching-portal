@@ -267,13 +267,13 @@ async function getCoachingByWhatsAppPhoneNumberId(phoneNumberId) {
   if (!phoneNumberId) return null;
 
   const selectCoachingSql = `
-    SELECT ws.coaching_id, cc.name, cc.contact_email, ws.phone_number_id AS phone,
+    SELECT ws.coaching_id, ws.branch_id, cc.name, cc.contact_email, ws.phone_number_id AS phone,
            admin.contact_phone AS admin_contact_phone,
            admin.contact_phone AS contact_phone,
            admin.whatsapp_number AS whatsapp_number
     FROM whatsapp_settings ws
     JOIN coaching_classes cc ON cc.id = ws.coaching_id
-    LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.role = 'admin'
+    LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.branch_id = ws.branch_id AND admin.role = 'admin'
   `;
 
   const exactMatch = await get(
@@ -295,8 +295,8 @@ async function getCoachingByWhatsAppPhoneNumberId(phoneNumberId) {
     await run(
       `UPDATE whatsapp_settings
        SET phone_number_id = ?, updated_at = CURRENT_TIMESTAMP
-       WHERE coaching_id = ?`,
-      [phoneNumberId, settingsRows[0].coaching_id]
+       WHERE coaching_id = ? AND branch_id = ?`,
+      [phoneNumberId, settingsRows[0].coaching_id, settingsRows[0].branch_id]
     );
     console.log('[COACHING] Repaired WhatsApp phone_number_id mapping', {
       coachingId: settingsRows[0].coaching_id,
@@ -317,12 +317,13 @@ async function getCoachingByWhatsAppPhoneNumberId(phoneNumberId) {
   }
 
   const coachingRows = await all(
-    `SELECT cc.id AS coaching_id, cc.name, cc.contact_email, ? AS phone,
+    `SELECT cc.id AS coaching_id, branch.id AS branch_id, cc.name, cc.contact_email, ? AS phone,
             admin.contact_phone AS admin_contact_phone,
             admin.contact_phone AS contact_phone,
             admin.whatsapp_number AS whatsapp_number
-     FROM coaching_classes cc
-     LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.role = 'admin'
+     FROM branches branch
+     JOIN coaching_classes cc ON cc.id = branch.coaching_id
+     LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.branch_id = branch.id AND admin.role = 'admin'
      ORDER BY cc.id ASC
      LIMIT 2`,
     [phoneNumberId]
@@ -330,12 +331,12 @@ async function getCoachingByWhatsAppPhoneNumberId(phoneNumberId) {
 
   if (coachingRows.length === 1) {
     await run(
-      `INSERT INTO whatsapp_settings (coaching_id, phone_number_id, updated_at)
-       VALUES (?, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT (coaching_id)
+      `INSERT INTO whatsapp_settings (coaching_id, branch_id, phone_number_id, updated_at)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT (branch_id)
        DO UPDATE SET phone_number_id = EXCLUDED.phone_number_id,
                      updated_at = CURRENT_TIMESTAMP`,
-      [coachingRows[0].coaching_id, phoneNumberId]
+      [coachingRows[0].coaching_id, coachingRows[0].branch_id, phoneNumberId]
     );
     console.log('[COACHING] Created WhatsApp phone_number_id mapping from single coaching fallback', {
       coachingId: coachingRows[0].coaching_id,
@@ -351,16 +352,17 @@ async function getCoachingByWhatsAppPhoneNumberId(phoneNumberId) {
   return null;
 }
 
-async function findStudentByParentPhone(coachingId, phone) {
+async function findStudentByParentPhone(coachingId, phone, branchId = null) {
   const cleanPhone = cleanPhoneNumber(phone);
   const phoneSuffix = cleanPhone.slice(-10);
   if (!cleanPhone) return null;
   return get(
-    `SELECT u.id, u.coaching_id, u.roll_no, u.name, u.contact_phone, u.guardian_phone,
+    `SELECT u.id, u.coaching_id, u.branch_id, u.roll_no, u.name, u.contact_phone, u.guardian_phone,
             u.whatsapp_number, u.parent_whatsapp_number, b.name AS batch_name
      FROM users u
      LEFT JOIN batches b ON b.id = u.batch_id
      WHERE u.coaching_id = ? AND u.role = 'student'
+       AND (?::int IS NULL OR u.branch_id = ?)
        AND (
          REGEXP_REPLACE(COALESCE(u.parent_whatsapp_number, ''), '[^0-9]', '', 'g') = ?
          OR REGEXP_REPLACE(COALESCE(u.guardian_phone, ''), '[^0-9]', '', 'g') = ?
@@ -381,6 +383,8 @@ async function findStudentByParentPhone(coachingId, phone) {
      LIMIT 1`,
     [
       coachingId,
+      branchId,
+      branchId,
       cleanPhone,
       cleanPhone,
       cleanPhone,
@@ -403,7 +407,7 @@ async function findStudentByParentPhoneAnyCoaching(phone) {
   if (!cleanPhone) return null;
 
   const matches = await all(
-    `SELECT u.id, u.coaching_id, u.roll_no, u.name, u.contact_phone, u.guardian_phone,
+    `SELECT u.id, u.coaching_id, u.branch_id, u.roll_no, u.name, u.contact_phone, u.guardian_phone,
             u.whatsapp_number, u.parent_whatsapp_number, b.name AS batch_name,
             cc.name AS coaching_name, cc.contact_email,
             admin.contact_phone AS admin_contact_phone,
@@ -462,8 +466,8 @@ async function findStudentByParentPhoneAnyCoaching(phone) {
   return null;
 }
 
-async function findStudentByParentSession(coachingId, phone) {
-  const session = await getParentSession({ coachingId, phone });
+async function findStudentByParentSession(coachingId, phone, branchId = null) {
+  const session = await getParentSession({ coachingId, branchId, phone });
   if (!session?.student_id) return null;
 
   return get(
@@ -503,27 +507,31 @@ function buildParentMenuMessage(coaching) {
 async function saveParentSession({ coachingId, studentId, phone, state, lastMessage }) {
   const cleanPhone = cleanPhoneNumber(phone);
   if (!cleanPhone || !coachingId) return;
+  const student = studentId ? await get(
+    `SELECT branch_id FROM users WHERE id = ? AND coaching_id = ? LIMIT 1`,
+    [studentId, coachingId]
+  ) : null;
   await run(
-    `INSERT INTO whatsapp_parent_sessions (coaching_id, student_id, phone_number, state, last_message, updated_at)
-     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-     ON CONFLICT (coaching_id, phone_number)
+    `INSERT INTO whatsapp_parent_sessions (coaching_id, branch_id, student_id, phone_number, state, last_message, updated_at)
+     VALUES (?, COALESCE(?, app_current_branch_id()), ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT (branch_id, phone_number)
      DO UPDATE SET student_id = EXCLUDED.student_id,
                    state = EXCLUDED.state,
                    last_message = EXCLUDED.last_message,
                    updated_at = CURRENT_TIMESTAMP`,
-    [coachingId, studentId || null, cleanPhone, state || 'menu', lastMessage || null]
+    [coachingId, student?.branch_id || null, studentId || null, cleanPhone, state || 'menu', lastMessage || null]
   );
 }
 
-async function getParentSession({ coachingId, phone }) {
+async function getParentSession({ coachingId, branchId = null, phone }) {
   const cleanPhone = cleanPhoneNumber(phone);
   if (!cleanPhone || !coachingId) return null;
   return get(
-    `SELECT id, coaching_id, student_id, phone_number, state, last_message, updated_at
+    `SELECT id, coaching_id, branch_id, student_id, phone_number, state, last_message, updated_at
      FROM whatsapp_parent_sessions
-     WHERE coaching_id = ? AND phone_number = ?
+     WHERE coaching_id = ? AND (?::int IS NULL OR branch_id = ?) AND phone_number = ?
      LIMIT 1`,
-    [coachingId, cleanPhone]
+    [coachingId, branchId, branchId, cleanPhone]
   );
 }
 
@@ -915,6 +923,7 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
     if (!student) return false;
     const session = await getParentSession({
       coachingId: student.coaching_id,
+      branchId: student.branch_id,
       phone,
     });
     console.log('Incoming message:', incomingText);

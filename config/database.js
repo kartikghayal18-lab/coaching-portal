@@ -6,6 +6,7 @@ const { Pool: PgPool } = require('pg');
 const { Pool: NeonPool, neonConfig } = require('@neondatabase/serverless');
 const ws = require('ws');
 const { measurePerfOperation } = require('../src/performance');
+const { getBranchContext } = require('../src/branch-context');
 
 let pool = null;
 
@@ -78,13 +79,38 @@ async function query(executor, sql, params = []) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 180);
-  const result = await measurePerfOperation(
-    'sql',
-    sqlLabel,
-    () => executor.query(translatedSql, params),
-    { rows: Array.isArray(params) ? params.length : 0 }
-  );
-  return normalizeResult(result);
+  const scope = getBranchContext();
+  const client = typeof executor.connect === 'function'
+    ? await executor.connect()
+    : executor;
+  const shouldRelease = client !== executor;
+
+  try {
+    await client.query(
+      `SELECT
+         set_config('app.branch_id', $1, false),
+         set_config('app.is_super_admin', $2, false)`,
+      [
+        scope.branchId ? String(scope.branchId) : '',
+        scope.isSuperAdmin ? 'true' : 'false',
+      ]
+    );
+    const result = await measurePerfOperation(
+      'sql',
+      sqlLabel,
+      () => client.query(translatedSql, params),
+      { rows: Array.isArray(params) ? params.length : 0 }
+    );
+    return normalizeResult(result);
+  } finally {
+    if (shouldRelease) {
+      try {
+        await client.query('RESET app.branch_id; RESET app.is_super_admin;');
+      } finally {
+        client.release();
+      }
+    }
+  }
 }
 
 function inferInsertId(result) {
@@ -158,9 +184,19 @@ function createTransactionHelpers(client) {
 
 async function withTransaction(work) {
   const client = await getPool().connect();
+  const scope = getBranchContext();
 
   try {
     await client.query('BEGIN');
+    await client.query(
+      `SELECT
+         set_config('app.branch_id', $1, true),
+         set_config('app.is_super_admin', $2, true)`,
+      [
+        scope.branchId ? String(scope.branchId) : '',
+        scope.isSuperAdmin ? 'true' : 'false',
+      ]
+    );
     const tx = createTransactionHelpers(client);
     const result = await work(tx);
     await client.query('COMMIT');

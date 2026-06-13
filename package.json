@@ -9,6 +9,9 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "node src/app.js",
+    "migrate:branches": "node scripts/migrate-branches.js",
+    "seed:branches": "node scripts/seed-branches.js",
+    "verify:branches": "node scripts/verify-branch-isolation.js",
     "migrate:papers:cloud": "node scripts/migrate-papers-to-cloud.js",
     "check:cloud": "node scripts/check-cloud-storage.js"
   },
