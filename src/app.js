@@ -5270,8 +5270,18 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
     });
   }
 
-  const parentAdmissionPhone = parentWhatsappNumber || guardianPhone;
-  if (parentAdmissionPhone) {
+  const admissionRecipients = [
+    { key: 'student', phone: whatsappNumber || contactPhone },
+    { key: 'parent', phone: parentWhatsappNumber || guardianPhone },
+  ].filter((recipient, index, recipients) => {
+    if (!recipient.phone) return false;
+    const phoneKey = String(recipient.phone).replace(/[^\d]/g, '').slice(-10);
+    return recipients.findIndex((item) => (
+      String(item.phone || '').replace(/[^\d]/g, '').slice(-10) === phoneKey
+    )) === index;
+  });
+
+  if (admissionRecipients.length) {
     const admissionMessageLines = [
       `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
       '🎉 Admission Confirmed',
@@ -5289,23 +5299,38 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
     );
     const admissionMessage = compactWhatsAppMessage(admissionMessageLines);
 
-    try {
-      const admissionNotificationResult = await sendWhatsAppNotification({
-        studentId: createdStudentId,
-        phone: parentAdmissionPhone,
-        type: 'admission_confirmed',
-        message: admissionMessage,
-        eventKey: `admission_confirmed:${createdStudentId}`,
-        templateName: String(process.env.WHATSAPP_REGISTRATION_TEMPLATE_NAME || 'hello_world').trim(),
-        templateLanguage: String(process.env.WHATSAPP_REGISTRATION_TEMPLATE_LANGUAGE || 'en_US').trim(),
-      });
-      console.log('[WHATSAPP] Admission confirmation result:', admissionNotificationResult);
-    } catch (error) {
-      console.error('[WHATSAPP] Admission confirmation failed', {
-        studentId: createdStudentId,
-        phone: parentAdmissionPhone,
-        error: error.message,
-      });
+    for (const recipient of admissionRecipients) {
+      try {
+        const admissionNotificationResult = await sendWhatsAppNotification({
+          studentId: createdStudentId,
+          phone: recipient.phone,
+          type: 'admission_confirmed',
+          message: admissionMessage,
+          eventKey: `admission_confirmed:${recipient.key}:${createdStudentId}`,
+          templateName: String(process.env.WHATSAPP_REGISTRATION_TEMPLATE_NAME || 'hello_world').trim(),
+          templateLanguage: String(process.env.WHATSAPP_REGISTRATION_TEMPLATE_LANGUAGE || 'en_US').trim(),
+        });
+        if (admissionNotificationResult?.failed) {
+          console.error('[WHATSAPP] Admission confirmation API failure', {
+            studentId: createdStudentId,
+            recipient: recipient.key,
+            phone: recipient.phone,
+            error: admissionNotificationResult.error || 'WhatsApp send failed',
+          });
+        } else {
+          console.log('[WHATSAPP] Admission confirmation result:', {
+            recipient: recipient.key,
+            result: admissionNotificationResult,
+          });
+        }
+      } catch (error) {
+        console.error('[WHATSAPP] Admission confirmation failed', {
+          studentId: createdStudentId,
+          recipient: recipient.key,
+          phone: recipient.phone,
+          error: error.message,
+        });
+      }
     }
   }
 

@@ -4,9 +4,12 @@ const GRAPH_API_VERSION = process.env.WHATSAPP_GRAPH_API_VERSION || 'v23.0';
 const GRAPH_API_BASE_URL = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
 
 function cleanPhoneNumber(value) {
-  const input = String(value || '').trim();
-  if (!input) return '';
-  return input.replace(/[^\d]/g, '');
+  let digits = String(value || '').replace(/[^\d]/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (/^\d{10}$/.test(digits)) return `91${digits}`;
+  if (/^0\d{10}$/.test(digits)) return `91${digits.slice(1)}`;
+  if (/^910\d{10}$/.test(digits)) return `91${digits.slice(3)}`;
+  return digits;
 }
 
 function normalizeStatus(value) {

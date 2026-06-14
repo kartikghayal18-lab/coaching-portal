@@ -8,7 +8,12 @@ const {
 } = require('./whatsapp');
 
 function cleanPhoneNumber(value) {
-  return String(value || '').replace(/[^\d]/g, '');
+  let digits = String(value || '').replace(/[^\d]/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (/^\d{10}$/.test(digits)) return `91${digits}`;
+  if (/^0\d{10}$/.test(digits)) return `91${digits.slice(1)}`;
+  if (/^910\d{10}$/.test(digits)) return `91${digits.slice(3)}`;
+  return digits;
 }
 
 function buildEventKey({ studentId, type, message, eventKey }) {
@@ -259,6 +264,14 @@ async function sendWhatsAppNotification({
       });
     console.log('[WHATSAPP] Notification response:', result);
     if (result?.failed) {
+      console.error('[WHATSAPP] Notification API failure:', {
+        studentId: student.id,
+        type: notificationType,
+        phone: resolvedPhone,
+        templateName,
+        templateLanguage: templateName ? templateLanguage : null,
+        error: result.error || 'WhatsApp send failed',
+      });
       await run(
         `UPDATE notification_logs
          SET status = ?, error_message = ?
