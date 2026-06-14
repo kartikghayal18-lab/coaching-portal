@@ -5307,7 +5307,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
           type: 'admission_confirmed',
           message: admissionMessage,
           eventKey: `admission_confirmed:${recipient.key}:${createdStudentId}`,
-          templateName: String(process.env.WHATSAPP_REGISTRATION_TEMPLATE_NAME || 'hello_world').trim(),
+          templateName: String(process.env.WHATSAPP_REGISTRATION_TEMPLATE_NAME || 'admission_confirmed').trim(),
           templateLanguage: String(process.env.WHATSAPP_REGISTRATION_TEMPLATE_LANGUAGE || 'en_US').trim(),
         });
         if (admissionNotificationResult?.failed) {
