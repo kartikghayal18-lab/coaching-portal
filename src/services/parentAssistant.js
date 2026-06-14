@@ -404,8 +404,8 @@ async function findStudentByParentPhoneAnyCoaching(phone) {
             admin.whatsapp_number AS admin_whatsapp_number
      FROM users u
      JOIN coaching_classes cc ON cc.id = u.coaching_id
-     LEFT JOIN batches b ON b.id = u.batch_id
-     LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.role = 'admin'
+     LEFT JOIN batches b ON b.id = u.batch_id AND b.branch_id = u.branch_id
+     LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.branch_id = u.branch_id AND admin.role = 'admin'
      WHERE u.role = 'student'
        AND (
          REGEXP_REPLACE(COALESCE(u.parent_whatsapp_number, ''), '[^0-9]', '', 'g') = ?

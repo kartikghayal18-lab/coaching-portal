@@ -3645,8 +3645,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
         const phoneNumberId = String(change?.value?.metadata?.phone_number_id || '').trim();
         if (incomingMessages.length && phoneNumberId) {
           console.log('[WEBHOOK] Phone number ID:', phoneNumberId);
-          let coaching = null;
           for (const incomingMessage of incomingMessages) {
+            let coaching = null;
             const incomingText = incomingMessage?.text?.body
               || incomingMessage?.interactive?.button_reply?.title
               || incomingMessage?.interactive?.button_reply?.id
@@ -3660,47 +3660,32 @@ app.post('/webhook/whatsapp', async (req, res) => {
             if (!msg) continue;
 
             try {
-              let student = null;
-              if (!coaching) {
-                coaching = await getCoachingByWhatsAppPhoneNumberId(phoneNumberId);
-                console.log('[COACHING] Lookup result:', coaching ? {
-                  coachingId: coaching.coaching_id,
-                  name: coaching.name,
-                  phoneNumberId,
-                } : null);
-              }
-              if (!coaching) {
-                student = await findStudentByParentPhoneAnyCoaching(incomingMessage.from);
-                console.log('[STUDENT] Global phone lookup result:', student ? {
+              let student = await findStudentByParentPhoneAnyCoaching(incomingMessage.from);
+              if (student) {
+                coaching = {
+                  coaching_id: student.coaching_id,
+                  branch_id: student.branch_id,
+                  name: student.coaching_name,
+                  contact_email: student.contact_email,
+                  phone: phoneNumberId,
+                  admin_contact_phone: student.admin_contact_phone,
+                  contact_phone: student.contact_phone,
+                  whatsapp_number: student.admin_whatsapp_number,
+                };
+                console.log('[STUDENT] Sender phone lookup result:', {
                   id: student.id,
                   rollNo: student.roll_no,
                   coachingId: student.coaching_id,
+                  branchId: student.branch_id,
+                });
+              } else if (!coaching) {
+                coaching = await getCoachingByWhatsAppPhoneNumberId(phoneNumberId);
+                console.log('[COACHING] Lookup result:', coaching ? {
+                  coachingId: coaching.coaching_id,
+                  branchId: coaching.branch_id,
+                  name: coaching.name,
+                  phoneNumberId,
                 } : null);
-
-                if (student) {
-                  await run(
-                    `INSERT INTO whatsapp_settings (coaching_id, branch_id, phone_number_id, updated_at)
-                     VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                     ON CONFLICT (branch_id)
-                     DO UPDATE SET phone_number_id = EXCLUDED.phone_number_id,
-                                   updated_at = CURRENT_TIMESTAMP`,
-                    [student.coaching_id, student.branch_id, phoneNumberId]
-                  );
-                  coaching = {
-                    coaching_id: student.coaching_id,
-                    name: student.coaching_name,
-                    contact_email: student.contact_email,
-                    phone: phoneNumberId,
-                    admin_contact_phone: student.admin_contact_phone,
-                    contact_phone: student.contact_phone,
-                    whatsapp_number: student.admin_whatsapp_number,
-                  };
-                  console.log('[COACHING] Mapped phone number ID from unique parent phone lookup', {
-                    coachingId: coaching.coaching_id,
-                    studentId: student.id,
-                    phoneNumberId,
-                  });
-                }
               }
               if (!coaching) {
                 console.error('[COACHING] No coaching found for phone number ID or sender phone', {
@@ -5298,6 +5283,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
       'Welcome to our coaching family.',
     );
     const admissionMessage = compactWhatsAppMessage(admissionMessageLines);
+    const admissionTemplateName = 'admission_confirmed';
 
     for (const recipient of admissionRecipients) {
       try {
@@ -5307,7 +5293,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
           type: 'admission_confirmed',
           message: admissionMessage,
           eventKey: `admission_confirmed:${recipient.key}:${createdStudentId}`,
-          templateName: String(process.env.WHATSAPP_REGISTRATION_TEMPLATE_NAME || 'admission_confirmed').trim(),
+          templateName: admissionTemplateName,
           templateLanguage: String(process.env.WHATSAPP_REGISTRATION_TEMPLATE_LANGUAGE || 'en_US').trim(),
         });
         if (admissionNotificationResult?.failed) {
