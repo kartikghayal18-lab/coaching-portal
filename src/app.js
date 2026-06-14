@@ -5204,7 +5204,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
     [coachingId, branchId, rollNo]
   );
   if (existing) {
-    req.session.flash = { type: 'error', text: 'Roll number already exists in this coaching' };
+    req.session.flash = { type: 'error', text: 'Roll number already exists in this branch.' };
     return res.redirect('/admin/dashboard?section=students');
   }
 
@@ -5222,27 +5222,41 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
-  const createdStudentResult = await run(
-    `INSERT INTO users (
-      coaching_id, branch_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, guardian_phone, parent_name, whatsapp_number, parent_whatsapp_number, email, password_hash
-    ) VALUES (?, ?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      coachingId,
-      branchId,
-      rollNo,
-      name,
-      batch.id,
-      batch.standard || null,
-      batch.course || null,
-      contactPhone || null,
-      guardianPhone || null,
-      parentName || null,
-      whatsappNumber || null,
-      parentWhatsappNumber || null,
-      email || null,
-      passwordHash,
-    ]
-  );
+  let createdStudentResult;
+  try {
+    createdStudentResult = await run(
+      `INSERT INTO users (
+        coaching_id, branch_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, guardian_phone, parent_name, whatsapp_number, parent_whatsapp_number, email, password_hash
+      ) VALUES (?, ?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        coachingId,
+        branchId,
+        rollNo,
+        name,
+        batch.id,
+        batch.standard || null,
+        batch.course || null,
+        contactPhone || null,
+        guardianPhone || null,
+        parentName || null,
+        whatsappNumber || null,
+        parentWhatsappNumber || null,
+        email || null,
+        passwordHash,
+      ]
+    );
+  } catch (error) {
+    const duplicateBranchRoll = error.code === '23505'
+      && (
+        error.constraint === 'idx_users_coaching_branch_roll'
+        || String(error.detail || '').includes('(coaching_id, branch_id, roll_no)')
+      );
+    if (duplicateBranchRoll) {
+      req.session.flash = { type: 'error', text: 'Roll number already exists in this branch.' };
+      return res.redirect('/admin/dashboard?section=students');
+    }
+    throw error;
+  }
   const createdStudentId = createdStudentResult.lastID;
   let createdFeeSummary = null;
 
@@ -5395,27 +5409,40 @@ app.post('/admin/students/import', requireCoachingAdmin, async (req, res) => {
     const email = String(emailRaw || '').trim().toLowerCase();
     const passwordHash = await bcrypt.hash(rollNo, 10);
 
-    await run(
-      `INSERT INTO users (
-        coaching_id, branch_id, role, is_owner, username, roll_no, name, batch_id, standard, course,
-        contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number, email, password_hash
-      ) VALUES (?, ?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        coachingId,
-        branchId,
-        rollNo,
-        name,
-        batch.id,
-        batch.standard || null,
-        batch.course || null,
-        whatsappNumber || null,
-        parentWhatsappNumber || null,
-        whatsappNumber || null,
-        parentWhatsappNumber || null,
-        email || null,
-        passwordHash,
-      ]
-    );
+    try {
+      await run(
+        `INSERT INTO users (
+          coaching_id, branch_id, role, is_owner, username, roll_no, name, batch_id, standard, course,
+          contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number, email, password_hash
+        ) VALUES (?, ?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          coachingId,
+          branchId,
+          rollNo,
+          name,
+          batch.id,
+          batch.standard || null,
+          batch.course || null,
+          whatsappNumber || null,
+          parentWhatsappNumber || null,
+          whatsappNumber || null,
+          parentWhatsappNumber || null,
+          email || null,
+          passwordHash,
+        ]
+      );
+    } catch (error) {
+      const duplicateBranchRoll = error.code === '23505'
+        && (
+          error.constraint === 'idx_users_coaching_branch_roll'
+          || String(error.detail || '').includes('(coaching_id, branch_id, roll_no)')
+        );
+      if (duplicateBranchRoll) {
+        summary.skipped += 1;
+        continue;
+      }
+      throw error;
+    }
     summary.created += 1;
   }
 
