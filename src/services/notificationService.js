@@ -20,6 +20,7 @@ function buildEventKey({ studentId, type, message, eventKey }) {
 async function ensureNotificationSchema() {
   await run(`ALTER TABLE users ADD COLUMN IF NOT EXISTS whatsapp_number VARCHAR(20)`);
   await run(`ALTER TABLE users ADD COLUMN IF NOT EXISTS parent_whatsapp_number VARCHAR(20)`);
+  await run(`ALTER TABLE users ADD COLUMN IF NOT EXISTS parent_name VARCHAR(180)`);
   await run(`ALTER TABLE whatsapp_settings ADD COLUMN IF NOT EXISTS attendance_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
   await run(`ALTER TABLE whatsapp_settings ADD COLUMN IF NOT EXISTS fee_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
   await run(`ALTER TABLE whatsapp_settings ADD COLUMN IF NOT EXISTS result_alerts_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
@@ -30,6 +31,12 @@ async function ensureNotificationSchema() {
   await run(`ALTER TABLE fees ADD COLUMN IF NOT EXISTS receipt_storage_key TEXT`);
   await run(`ALTER TABLE fees ADD COLUMN IF NOT EXISTS receipt_storage_type VARCHAR(20)`);
   await run(`ALTER TABLE fees ADD COLUMN IF NOT EXISTS receipt_generated_at TIMESTAMPTZ`);
+  await run(`ALTER TABLE fees ADD COLUMN IF NOT EXISTS payment_mode VARCHAR(80)`);
+  await run(`
+    CREATE INDEX IF NOT EXISTS fees_branch_due_date_idx
+    ON fees (branch_id, due_date)
+    WHERE due_date IS NOT NULL
+  `);
 
   await run(`
     CREATE TABLE IF NOT EXISTS notification_logs (
@@ -181,7 +188,8 @@ async function sendWhatsAppNotification({
   const logResult = await run(
     `INSERT INTO notification_logs (
       coaching_id, branch_id, student_id, type, event_type, message, status, phone_number, event_key
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (event_key) DO NOTHING`,
     [
       student.coaching_id,
       student.branch_id,
@@ -195,6 +203,22 @@ async function sendWhatsAppNotification({
     ]
   );
   const logId = logResult.lastID;
+  if (!logId) {
+    const duplicate = await get(
+      `SELECT id, status
+       FROM notification_logs
+       WHERE event_key = ? AND branch_id = ?
+       LIMIT 1`,
+      [notificationEventKey, student.branch_id]
+    );
+    return {
+      ok: true,
+      skipped: true,
+      duplicate: true,
+      logId: duplicate?.id || null,
+      status: duplicate?.status || null,
+    };
+  }
 
   if (!resolvedPhone) {
     await run(

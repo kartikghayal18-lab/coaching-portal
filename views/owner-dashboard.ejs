@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title><%= branding?.brandName || 'Demo Coaching' %> - Owner Dashboard</title>
-  <link rel="icon" type="image/x-icon" href="<%= branding?.faviconUrl || '/branding/favicon.ico' %>" />
+  <link rel="icon" href="<%= branding?.faviconUrl || '/public/scc-icon.svg' %>" />
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
 <body class="dashboard-shell" style="<%= branding?.cssVars || '' %>">
@@ -59,7 +59,7 @@
     <section class="section-switcher card">
       <div class="sidebar-brand">
         <div class="sidebar-brand-top">
-          <img src="<%= branding?.logoUrl || '/branding/logo.png' %>" alt="<%= branding?.brandName || 'Demo Coaching' %> logo" class="brand-logo" />
+          <img src="<%= branding?.logoUrl || '/public/scc-logo.svg' %>" alt="<%= branding?.brandName || 'SCC' %> logo" class="brand-logo" />
           <div>
             <p class="sidebar-kicker">Owner Console</p>
             <p class="sidebar-title"><%= branding?.ownerConsoleLabel || ((branding?.brandName || 'Demo Coaching') + ' Control') %></p>

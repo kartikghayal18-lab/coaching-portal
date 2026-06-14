@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title><%= branding?.brandName || coaching?.name || 'Demo Coaching' %> - Student Overview</title>
-  <link rel="icon" type="image/x-icon" href="<%= branding?.faviconUrl || '/branding/favicon.ico' %>" />
+  <link rel="icon" href="<%= branding?.faviconUrl || '/public/scc-icon.svg' %>" />
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
 <body style="<%= branding?.cssVars || '' %>">
@@ -48,6 +48,7 @@
         <label>Contact Number <input type="text" name="contactPhone" value="<%= student?.contact_phone || '' %>" /></label>
         <label>Student WhatsApp <input type="text" name="whatsappNumber" value="<%= student?.whatsapp_number || student?.contact_phone || '' %>" /></label>
         <label>Guardian Phone <input type="text" name="guardianPhone" value="<%= student?.guardian_phone || '' %>" /></label>
+        <label>Parent Name <input type="text" name="parentName" value="<%= student?.parent_name || '' %>" /></label>
         <label>Parent WhatsApp <input type="text" name="parentWhatsappNumber" value="<%= student?.parent_whatsapp_number || student?.guardian_phone || '' %>" /></label>
         <div class="inline-actions">
           <button type="submit" class="btn compact">Save Student Details</button>

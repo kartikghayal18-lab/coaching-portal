@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title><%= branding?.brandName || coaching?.name || 'Demo Coaching' %> · Admin</title>
-  <link rel="icon" type="image/x-icon" href="<%= branding?.faviconUrl || '/branding/favicon.ico' %>" />
+  <link rel="icon" href="<%= branding?.faviconUrl || '/public/scc-icon.svg' %>" />
   <link rel="stylesheet" href="/public/styles.css" />
 </head>
 <body class="dashboard-shell ops-dashboard-v2" style="<%= branding?.cssVars || '' %>">
@@ -617,6 +617,7 @@
                     <div class="ops2-field"><label>Contact Number</label><input type="text" name="contactPhone" placeholder="9876543210" /></div>
                     <div class="ops2-field"><label>Student WhatsApp</label><input type="text" name="whatsappNumber" placeholder="919876543210" /></div>
                     <div class="ops2-field"><label>Guardian Phone</label><input type="text" name="guardianPhone" placeholder="9876543210" /></div>
+                    <div class="ops2-field"><label>Parent Name</label><input type="text" name="parentName" /></div>
                     <div class="ops2-field"><label>Parent WhatsApp</label><input type="text" name="parentWhatsappNumber" placeholder="919876543210" /></div>
                     <div class="ops2-field"><label>Email ID</label><input type="email" name="email" placeholder="student@example.com" /></div>
                     <div class="ops2-field"><label>Total Fees</label><input type="number" name="totalFee" min="0" step="0.01" placeholder="50000" /></div>
@@ -801,8 +802,9 @@
                   </div>
                   <div class="ops2-field"><label>Amount</label><input type="number" name="amount" step="0.01" min="0" required /></div>
                   <div class="ops2-field"><label>Status</label><select name="status" required><option value="pending">Pending</option><option value="paid">Paid</option><option value="overdue">Overdue</option></select></div>
-                  <div class="ops2-field"><label>Due Date</label><input type="date" name="dueDate" /></div>
+                  <div class="ops2-field"><label>Next Due Date (optional)</label><input type="date" name="dueDate" /></div>
                   <div class="ops2-field"><label>Payment Date</label><input type="date" name="paymentDate" /></div>
+                  <div class="ops2-field"><label>Payment Mode</label><select name="paymentMode"><option value="">Not specified</option><option value="Cash">Cash</option><option value="UPI">UPI</option><option value="Bank Transfer">Bank Transfer</option><option value="Card">Card</option><option value="Cheque">Cheque</option></select></div>
                   <div class="ops2-field full"><label>Notes</label><input type="text" name="notes" /></div>
                   <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Save Fee</button></div>
                 </form>
@@ -824,20 +826,23 @@
               <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Ledger</p><h3>Fee records</h3></div></div>
               <div class="ops2-table-shell">
                 <table class="ops2-table ops2-table--wide">
-                  <thead><tr><th>Roll</th><th>Name</th><th>Batch</th><th>Amount</th><th>Due</th><th>Payment</th><th>Status</th><th>Notes</th><th>Reminder</th></tr></thead>
+                  <thead><tr><th>Roll</th><th>Name</th><th>Batch</th><th>Amount</th><th>Next Due</th><th>Payment</th><th>Status</th><th>Notes</th><th>Actions</th></tr></thead>
                   <tbody>
                     <% fees.forEach((f) => { %>
                       <tr>
                         <td><%= f.roll_no %></td><td><%= f.name %></td><td><%= f.batch_name || '-' %></td><td><%= f.amount %></td><td><%= f.due_date || '-' %></td><td><%= f.payment_date || '-' %></td><td><span class="status <%= f.status %>"><%= f.status %></span></td><td><%= f.notes || '-' %></td>
                         <td>
-                          <% if (f.status !== 'paid') { %>
+                          <% if (f.due_date) { %>
                             <form method="post" action="/admin/fees/<%= f.id %>/send-reminder">
                               <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                               <button type="submit" class="ops2-inline-link-btn" <%= (f.parent_whatsapp_number || f.guardian_phone) ? '' : 'disabled' %>>Send Reminder</button>
                             </form>
-                          <% } else { %>
-                            <span class="muted">-</span>
                           <% } %>
+                          <% if (f.status === 'paid') { %>
+                            <a class="ops2-inline-link" href="/admin/fees/<%= f.id %>/receipt?disposition=inline" target="_blank">Print</a>
+                            <a class="ops2-inline-link" href="/admin/fees/<%= f.id %>/receipt?disposition=attachment">PDF</a>
+                          <% } %>
+                          <% if (!f.due_date && f.status !== 'paid') { %><span class="muted">-</span><% } %>
                         </td>
                       </tr>
                     <% }) %>

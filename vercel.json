@@ -8,11 +8,11 @@
   "rewrites": [
     {
       "source": "/favicon.ico",
-      "destination": "/public/edusync-logo.png"
+      "destination": "/public/scc-icon.svg"
     },
     {
       "source": "/favicon.png",
-      "destination": "/public/edusync-logo.png"
+      "destination": "/public/scc-icon.svg"
     },
     {
       "source": "/(.*)",

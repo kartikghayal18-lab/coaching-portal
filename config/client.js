@@ -54,8 +54,8 @@ function getClientConfig() {
       domain,
       primaryColor,
       supportEmail,
-      logoPath: '/branding/logo.png',
-      faviconPath: '/branding/favicon.ico',
+      logoPath: '/public/scc-logo.svg',
+      faviconPath: '/public/scc-icon.svg',
       uploadPrefix: slugify(clientName),
     };
   }

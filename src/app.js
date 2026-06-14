@@ -90,8 +90,6 @@ const TWO_FACTOR_AUTH_POST_PATHS = new Set([
   '/auth/2fa/verify',
 ]);
 const PUBLIC_WEBHOOK_POST_PATHS = new Set(['/webhook/whatsapp']);
-const DEFAULT_FEE_REMINDER_DAYS_BEFORE = 7;
-
 function resolvePort(value) {
   const raw = String(value || '').trim();
   if (!raw) return 3000;
@@ -271,7 +269,8 @@ app.get('/receipts/:feeId/:token/:fileName', async (req, res) => {
     });
     const fileName = `${fee.receipt_number}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${fileName.replace(/"/g, '')}"`);
+    const disposition = req.query.disposition === 'inline' ? 'inline' : 'attachment';
+    res.setHeader('Content-Disposition', `${disposition}; filename="${fileName.replace(/"/g, '')}"`);
     res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
     if (storedFile.contentLength) {
       res.setHeader('Content-Length', String(storedFile.contentLength));
@@ -760,17 +759,18 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
 }
 
 async function getFeeReminderContext(coachingId, feeId) {
+  const branchId = getBranchContext().branchId;
   const row = await get(
     `SELECT
        f.id AS fee_id, f.amount, f.due_date, f.payment_date, f.status, f.notes,
-       u.id AS student_id, u.roll_no, u.name, u.contact_phone, u.guardian_phone, u.whatsapp_number, u.parent_whatsapp_number,
+       u.id AS student_id, u.roll_no, u.name, u.branch_id, u.contact_phone, u.guardian_phone, u.whatsapp_number, u.parent_whatsapp_number,
        cc.name AS coaching_name
      FROM fees f
-     JOIN users u ON u.id = f.student_id
+     JOIN users u ON u.id = f.student_id AND u.coaching_id = f.coaching_id AND u.branch_id = f.branch_id
      JOIN coaching_classes cc ON cc.id = f.coaching_id
-     WHERE f.id = ? AND f.coaching_id = ?
+     WHERE f.id = ? AND f.coaching_id = ? AND f.branch_id = ?
      LIMIT 1`,
-    [feeId, coachingId]
+    [feeId, coachingId, branchId]
   );
 
   if (!row) return null;
@@ -796,25 +796,33 @@ async function getFeeReminderContext(coachingId, feeId) {
   };
 }
 
-async function sendFeeReminderByFeeId({ coachingId, feeId }) {
-  const context = await getFeeReminderContext(coachingId, feeId);
-  if (!context) return { ok: false, reason: 'Fee record not found' };
+async function sendFeeReminderByFeeId({ coachingId, branchId, feeId }) {
+  return runWithBranchContext({ branchId, isSuperAdmin: false }, async () => {
+    const context = await getFeeReminderContext(coachingId, feeId);
+    if (!context) return { ok: false, reason: 'Fee record not found' };
+    if (!context.fee.due_date) return { ok: false, skipped: true, reason: 'Next due date is not set.' };
 
-  if (String(context.fee.status || '').toLowerCase() === 'overdue') {
-    return sendOverdueReminder({ coachingId, ...context });
-  }
+    if (String(context.fee.status || '').toLowerCase() === 'overdue') {
+      return sendOverdueReminder({ coachingId, ...context });
+    }
 
-  return sendDueFeeReminder({ coachingId, ...context });
+    return sendDueFeeReminder({ coachingId, ...context });
+  });
 }
 
-async function sendScheduledFeeReminders({ coachingId = null, daysBefore = DEFAULT_FEE_REMINDER_DAYS_BEFORE } = {}) {
-  const params = [Number(daysBefore)];
+async function sendScheduledFeeReminders({ coachingId = null, branchId = null } = {}) {
+  const params = [];
   let sql = `
     SELECT
       f.id AS fee_id,
       f.amount,
       f.due_date,
       f.status,
+      f.branch_id,
+      CASE
+        WHEN CAST(f.due_date AS DATE) = CURRENT_DATE THEN 'due_date'
+        ELSE 'three_days_before'
+      END AS reminder_stage,
       u.id AS student_id,
       u.roll_no,
       u.name,
@@ -823,21 +831,21 @@ async function sendScheduledFeeReminders({ coachingId = null, daysBefore = DEFAU
       cc.id AS coaching_id,
       cc.name AS coaching_name
     FROM fees f
-    JOIN users u ON u.id = f.student_id
+    JOIN users u ON u.id = f.student_id AND u.branch_id = f.branch_id
     JOIN coaching_classes cc ON cc.id = f.coaching_id
-    WHERE f.status <> 'paid'
-      AND COALESCE(u.parent_whatsapp_number, u.guardian_phone) IS NOT NULL
+    WHERE COALESCE(u.parent_whatsapp_number, u.guardian_phone) IS NOT NULL
       AND TRIM(COALESCE(u.parent_whatsapp_number, u.guardian_phone, '')) <> ''
       AND f.due_date IS NOT NULL
-      AND (
-        CAST(f.due_date AS DATE) < CURRENT_DATE
-        OR CAST(f.due_date AS DATE) BETWEEN CURRENT_DATE AND (CURRENT_DATE + ($1::INTEGER * INTERVAL '1 day'))
-      )
+      AND CAST(f.due_date AS DATE) IN (CURRENT_DATE, CURRENT_DATE + INTERVAL '3 days')
   `;
 
   if (coachingId) {
     params.push(coachingId);
     sql += ` AND f.coaching_id = $${params.length}`;
+  }
+  if (branchId) {
+    params.push(branchId);
+    sql += ` AND f.branch_id = $${params.length}`;
   }
 
   sql += ` ORDER BY f.due_date ASC LIMIT 200`;
@@ -846,26 +854,14 @@ async function sendScheduledFeeReminders({ coachingId = null, daysBefore = DEFAU
   const summary = { sent: 0, failed: 0, skipped: 0 };
 
   for (const row of rows) {
-    const existingToday = await get(
-      `SELECT id
-       FROM whatsapp_logs
-       WHERE coaching_id = ?
-         AND student_id = ?
-         AND message_type = 'text'
-         AND message_content LIKE ?
-         AND CAST(created_at AS DATE) = CURRENT_DATE
-       LIMIT 1`,
-      [row.coaching_id, row.student_id, `%Due Date: ${String(row.due_date).slice(0, 10)}%`]
-    );
-    if (existingToday) {
-      summary.skipped += 1;
-      continue;
-    }
+    const dueDate = String(row.due_date).slice(0, 10);
+    const eventKey = `fee_reminder:${row.reminder_stage}:${row.branch_id}:${row.fee_id}:${dueDate}`;
 
     const context = {
       coachingId: row.coaching_id,
       student: {
         id: row.student_id,
+        branch_id: row.branch_id,
         roll_no: row.roll_no,
         name: row.name,
         guardian_phone: row.guardian_phone,
@@ -881,12 +877,10 @@ async function sendScheduledFeeReminders({ coachingId = null, daysBefore = DEFAU
     };
 
     try {
-      let result;
-      if (String(row.status || '').toLowerCase() === 'overdue' || new Date(row.due_date) < new Date(new Date().toDateString())) {
-        result = await sendOverdueReminder(context);
-      } else {
-        result = await sendDueFeeReminder(context);
-      }
+      const result = await runWithBranchContext(
+        { branchId: row.branch_id, isSuperAdmin: false },
+        () => sendDueFeeReminder({ ...context, eventKey })
+      );
       if (result?.skipped) {
         summary.skipped += 1;
       } else {
@@ -1355,6 +1349,7 @@ async function getFeeReportRows(coachingId, branchId, options = {}) {
   } = options;
   let feesSql = `
     SELECT f.id, f.amount, CAST(f.due_date AS TEXT) AS due_date, CAST(f.payment_date AS TEXT) AS payment_date, f.status, f.notes,
+            f.payment_mode, f.receipt_number, f.receipt_file_url,
             u.id AS student_id, u.roll_no, u.name, u.guardian_phone, u.parent_whatsapp_number, u.batch_id, u.standard, u.course,
             b.name AS batch_name
      FROM fees f
@@ -1565,8 +1560,12 @@ function streamTablePdfReport(res, {
   const bottom = doc.page.height - doc.page.margins.bottom;
 
   const drawTitle = () => {
-    doc.font('Helvetica-Bold').fontSize(18).fillColor('#111827').text(title, left, 36, { width: right - left });
-    doc.font('Helvetica').fontSize(10).fillColor('#4b5563').text(subtitle, left, 60, { width: right - left });
+    const logoPath = path.join(__dirname, '..', 'public', 'scc-icon.png');
+    if (fs.existsSync(logoPath)) {
+      doc.image(logoPath, right - 54, 24, { fit: [52, 52] });
+    }
+    doc.font('Helvetica-Bold').fontSize(18).fillColor('#35438f').text(title, left, 36, { width: right - left - 70 });
+    doc.font('Helvetica').fontSize(10).fillColor('#4b5563').text(subtitle, left, 60, { width: right - left - 70 });
     doc.moveTo(left, 82).lineTo(right, 82).strokeColor('#d1d5db').stroke();
   };
 
@@ -1709,12 +1708,15 @@ function buildBranding(coaching = null) {
   const themePrimary = normalizeHexColor(coaching?.theme_primary, DEFAULT_THEME.brand);
   const themeBackground = normalizeHexColor(coaching?.theme_background, DEFAULT_THEME.background);
   const themeSurface = normalizeHexColor(coaching?.theme_surface, DEFAULT_THEME.surface);
-  const brandName = String(coaching?.brand_name || coaching?.name || 'Edusync').trim();
+  const isScc = String(coaching?.slug || '').toLowerCase() === 'scc'
+    || /^scc\b/i.test(String(coaching?.name || ''));
+  const brandName = String(isScc ? 'SCC' : coaching?.brand_name || coaching?.name || 'SCC').trim();
 
   return {
     brandName,
     coachingName: coaching?.name || brandName,
-    logoUrl: normalizeLogoUrl(coaching?.logo_url || '/public/edusync-logo.png'),
+    logoUrl: isScc ? '/public/scc-logo.svg' : normalizeLogoUrl(coaching?.logo_url || '/public/scc-logo.svg'),
+    faviconUrl: '/public/scc-icon.svg',
     themePrimary,
     themeBackground,
     themeSurface,
@@ -2198,7 +2200,7 @@ async function getStudentDashboardPayload(coachingId, branchId, studentId) {
   }
   const profile = await get(
     `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course,
-            u.contact_phone, u.guardian_phone, u.whatsapp_number, u.parent_whatsapp_number, u.email,
+            u.contact_phone, u.guardian_phone, u.parent_name, u.whatsapp_number, u.parent_whatsapp_number, u.email,
             b.name AS batch_name
      FROM users u
      LEFT JOIN batches b ON b.id = u.batch_id AND b.branch_id = u.branch_id
@@ -3778,10 +3780,7 @@ app.get('/cron/whatsapp/fee-reminders', async (req, res) => {
     return res.status(401).json({ ok: false, error: 'Unauthorized' });
   }
 
-  const daysBefore = Number.parseInt(String(process.env.WHATSAPP_FEE_REMINDER_DAYS_BEFORE || DEFAULT_FEE_REMINDER_DAYS_BEFORE), 10);
-  const summary = await sendScheduledFeeReminders({
-    daysBefore: Number.isInteger(daysBefore) && daysBefore >= 0 ? daysBefore : DEFAULT_FEE_REMINDER_DAYS_BEFORE,
-  });
+  const summary = await sendScheduledFeeReminders();
   return res.json({ ok: true, summary });
 });
 
@@ -4247,6 +4246,7 @@ app.post('/admin/whatsapp/broadcast', requireCoachingAdmin, async (req, res) => 
 
 app.post('/admin/fees/:id/send-reminder', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const feeId = Number.parseInt(req.params.id, 10);
   if (!Number.isInteger(feeId) || feeId <= 0) {
     req.session.flash = { type: 'error', text: 'Invalid fee record selected.' };
@@ -4254,8 +4254,10 @@ app.post('/admin/fees/:id/send-reminder', requireCoachingAdmin, async (req, res)
   }
 
   try {
-    const result = await sendFeeReminderByFeeId({ coachingId, feeId });
-    if (result?.skipped) {
+    const result = await sendFeeReminderByFeeId({ coachingId, branchId, feeId });
+    if (result?.ok === false && !result?.skipped) {
+      req.session.flash = { type: 'error', text: result.reason || 'Fee reminder failed.' };
+    } else if (result?.skipped) {
       req.session.flash = { type: 'warning', text: result.reason || 'Fee reminder skipped.' };
     } else {
       req.session.flash = { type: 'success', text: 'Fee reminder sent on WhatsApp.' };
@@ -4267,12 +4269,46 @@ app.post('/admin/fees/:id/send-reminder', requireCoachingAdmin, async (req, res)
   return res.redirect('/admin/dashboard?section=fees');
 });
 
+app.get('/admin/fees/:id/receipt', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
+  const feeId = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(feeId) || feeId <= 0) {
+    return res.sendStatus(404);
+  }
+
+  const fee = await get(
+    `SELECT id
+     FROM fees
+     WHERE id = ? AND coaching_id = ? AND branch_id = ? AND status = 'paid'
+     LIMIT 1`,
+    [feeId, coachingId, branchId]
+  );
+  if (!fee) {
+    return res.sendStatus(404);
+  }
+
+  try {
+    const receipt = await generateFeeReceiptPdf(fee.id, {
+      branchId,
+      publicBaseUrl: getRequestBaseUrl(req),
+    });
+    const separator = receipt.fileUrl.includes('?') ? '&' : '?';
+    const disposition = req.query.disposition === 'inline' ? 'inline' : 'attachment';
+    return res.redirect(`${receipt.fileUrl}${separator}disposition=${disposition}`);
+  } catch (error) {
+    console.error('Admin fee receipt generation failed', { feeId, branchId, error: error.message });
+    req.session.flash = { type: 'error', text: `Receipt generation failed: ${error.message}` };
+    return res.redirect('/admin/dashboard?section=fees');
+  }
+});
+
 app.post('/admin/whatsapp/fee-reminders/due', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
-  const daysBefore = Number.parseInt(String(req.body.daysBefore || DEFAULT_FEE_REMINDER_DAYS_BEFORE), 10);
+  const branchId = getCurrentBranchId(req);
   const summary = await sendScheduledFeeReminders({
     coachingId,
-    daysBefore: Number.isInteger(daysBefore) && daysBefore >= 0 ? daysBefore : DEFAULT_FEE_REMINDER_DAYS_BEFORE,
+    branchId,
   });
   req.session.flash = {
     type: summary.failed ? 'warning' : 'success',
@@ -5147,6 +5183,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const name = (req.body.name || '').trim() || rollNo;
   const contactPhone = (req.body.contactPhone || '').trim();
   const guardianPhone = (req.body.guardianPhone || '').trim();
+  const parentName = (req.body.parentName || '').trim();
   const whatsappNumber = (req.body.whatsappNumber || contactPhone).trim();
   const parentWhatsappNumber = (req.body.parentWhatsappNumber || guardianPhone).trim();
   const email = (req.body.email || '').trim().toLowerCase();
@@ -5202,8 +5239,8 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const passwordHash = await bcrypt.hash(password, 10);
   const createdStudentResult = await run(
     `INSERT INTO users (
-      coaching_id, branch_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number, email, password_hash
-    ) VALUES (?, ?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      coaching_id, branch_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, guardian_phone, parent_name, whatsapp_number, parent_whatsapp_number, email, password_hash
+    ) VALUES (?, ?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
       branchId,
@@ -5214,6 +5251,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
       batch.course || null,
       contactPhone || null,
       guardianPhone || null,
+      parentName || null,
       whatsappNumber || null,
       parentWhatsappNumber || null,
       email || null,
@@ -5759,18 +5797,20 @@ app.post('/admin/students/:id/update', requireCoachingAdmin, async (req, res) =>
   const name = String(req.body.name || '').trim();
   const contactPhone = String(req.body.contactPhone || '').trim();
   const guardianPhone = String(req.body.guardianPhone || '').trim();
+  const parentName = String(req.body.parentName || '').trim();
   const whatsappNumber = String(req.body.whatsappNumber || contactPhone).trim();
   const parentWhatsappNumber = String(req.body.parentWhatsappNumber || guardianPhone).trim();
   const email = String(req.body.email || '').trim().toLowerCase();
 
   await run(
     `UPDATE users
-     SET name = ?, contact_phone = ?, guardian_phone = ?, whatsapp_number = ?, parent_whatsapp_number = ?, email = ?
+     SET name = ?, contact_phone = ?, guardian_phone = ?, parent_name = ?, whatsapp_number = ?, parent_whatsapp_number = ?, email = ?
      WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'student'`,
     [
       name || null,
       contactPhone || null,
       guardianPhone || null,
+      parentName || null,
       whatsappNumber || null,
       parentWhatsappNumber || null,
       email || null,
@@ -6341,6 +6381,7 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
   const dueDate = req.body.dueDate || null;
   const paymentDate = req.body.paymentDate || null;
   const status = req.body.status;
+  const paymentMode = String(req.body.paymentMode || '').trim();
   const notes = (req.body.notes || '').trim();
 
   const { student, error: studentResolveError } = await resolveStudentForAdminEntry(coachingId, branchId, {
@@ -6358,9 +6399,9 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
   }
 
   const feeResult = await run(
-    `INSERT INTO fees (coaching_id, branch_id, student_id, amount, due_date, payment_date, status, notes, added_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [coachingId, branchId, student.id, amount, dueDate, paymentDate, status, notes, req.session.user.id]
+    `INSERT INTO fees (coaching_id, branch_id, student_id, amount, due_date, payment_date, status, notes, payment_mode, added_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [coachingId, branchId, student.id, amount, dueDate, paymentDate, status, notes, paymentMode || null, req.session.user.id]
   );
 
   const fee = {
@@ -6370,6 +6411,7 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
     payment_date: paymentDate,
     status,
     notes,
+    payment_mode: paymentMode || null,
   };
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   try {
@@ -6404,7 +6446,10 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
         console.log('WhatsApp API response', paymentMessageResult);
 
         try {
-          let receipt = await generateFeeReceiptPdf(fee.id, { publicBaseUrl: getRequestBaseUrl(req) });
+          let receipt = await generateFeeReceiptPdf(fee.id, {
+            branchId,
+            publicBaseUrl: getRequestBaseUrl(req),
+          });
           console.log('Generated receipt URL', receipt.fileUrl);
           console.log('Receipt storage type', receipt.storageType);
           let validation = await validatePublicUrl(receipt.fileUrl);
@@ -6417,6 +6462,7 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
               validation,
             });
             receipt = await generateFeeReceiptPdf(fee.id, {
+              branchId,
               forceRegenerate: true,
               publicBaseUrl: getRequestBaseUrl(req),
             });
@@ -6464,13 +6510,6 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
     } else if (status === 'pending') {
       const feeSummary = await setStudentTotalFee({ coachingId, branchId, studentId: student.id, totalFee: amount });
       fee.feeSummary = feeSummary;
-      if (dueDate) {
-        const dueMs = new Date(dueDate).getTime() - Date.now();
-        const dueDays = Math.ceil(dueMs / (1000 * 60 * 60 * 24));
-        if (Number.isFinite(dueDays) && dueDays >= 0 && dueDays <= 7) {
-          await sendDueFeeReminder({ coachingId, student, fee, coaching });
-        }
-      }
     }
   } catch (error) {
     console.error('WhatsApp fee notification failed', {
