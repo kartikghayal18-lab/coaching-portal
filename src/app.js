@@ -3633,7 +3633,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
         const statuses = Array.isArray(change?.value?.statuses) ? change.value.statuses : [];
         for (const statusEvent of statuses) {
           try {
-            await updateWhatsAppLogStatus(statusEvent.id, statusEvent.status);
+            await updateWhatsAppLogStatus(statusEvent.id, statusEvent.status, statusEvent.errors);
           } catch (error) {
             console.error('[WHATSAPP BOT ERROR]', error);
           }
@@ -5258,6 +5258,8 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
         type: 'admission_confirmed',
         message: admissionMessage,
         eventKey: `admission_confirmed:${createdStudentId}`,
+        templateName: String(process.env.WHATSAPP_REGISTRATION_TEMPLATE_NAME || 'hello_world').trim(),
+        templateLanguage: String(process.env.WHATSAPP_REGISTRATION_TEMPLATE_LANGUAGE || 'en_US').trim(),
       });
       console.log('[WHATSAPP] Admission confirmation result:', admissionNotificationResult);
     } catch (error) {

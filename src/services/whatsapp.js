@@ -176,13 +176,22 @@ async function logWhatsAppMessage({
   return result.lastID;
 }
 
-async function updateWhatsAppLogStatus(metaMessageId, status) {
+async function updateWhatsAppLogStatus(metaMessageId, status, errors = []) {
   if (!metaMessageId || !status) return;
+  const errorText = Array.isArray(errors) && errors.length
+    ? `\n\nDelivery error: ${errors.map((error) => (
+      error?.message || error?.title || error?.code || JSON.stringify(error)
+    )).join('; ')}`
+    : '';
   await run(
     `UPDATE whatsapp_logs
-     SET status = ?
+     SET status = ?,
+         message_content = CASE
+           WHEN ? = '' THEN message_content
+           ELSE LEFT(COALESCE(message_content, '') || ?, 4000)
+         END
      WHERE meta_message_id = ?`,
-    [normalizeStatus(status), metaMessageId]
+    [normalizeStatus(status), errorText, errorText, metaMessageId]
   );
 }
 
@@ -425,7 +434,7 @@ async function sendTemplateMessage({
   settings = null,
 }) {
   const phoneNumber = cleanPhoneNumber(to);
-  const messageContent = `template:${templateName}`;
+  const messageContent = `template:${templateName};language:${languageCode}`;
   const logId = await logWhatsAppMessage({
     coachingId,
     branchId,
@@ -438,6 +447,15 @@ async function sendTemplateMessage({
 
   try {
     const activeSettings = settings || await getWhatsAppSettings(coachingId, branchId);
+    console.log('[WHATSAPP] Template payload:', {
+      coachingId,
+      branchId,
+      studentId,
+      phone: phoneNumber,
+      templateName,
+      languageCode,
+      componentCount: components.length,
+    });
     const response = await sendMetaMessage({
       settings: activeSettings,
       payload: {
@@ -457,7 +475,17 @@ async function sendTemplateMessage({
     );
     return { ok: true, metaMessageId, response };
   } catch (error) {
-    console.error('sendTemplateMessage failed', error);
+    console.error('[WHATSAPP] Template send failed:', {
+      coachingId,
+      branchId,
+      studentId,
+      phone: phoneNumber,
+      templateName,
+      languageCode,
+      status: error.status || null,
+      response: error.response || null,
+      message: error.message,
+    });
     await run(
       `UPDATE whatsapp_logs SET status = ?, message_content = ? WHERE id = ?`,
       ['failed', truncateMessage(`${messageContent}\n\nError: ${error.message}`), logId]

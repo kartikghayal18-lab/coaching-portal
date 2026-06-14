@@ -1,6 +1,11 @@
 const crypto = require('crypto');
 const { run, get, all } = require('../db');
-const { getWhatsAppSettings, sendTextMessage, sendDocumentMessage } = require('./whatsapp');
+const {
+  getWhatsAppSettings,
+  sendTextMessage,
+  sendDocumentMessage,
+  sendTemplateMessage,
+} = require('./whatsapp');
 
 function cleanPhoneNumber(value) {
   return String(value || '').replace(/[^\d]/g, '');
@@ -97,6 +102,9 @@ async function sendWhatsAppNotification({
   type,
   message,
   eventKey = null,
+  templateName = null,
+  templateLanguage = 'en_US',
+  templateComponents = [],
 }) {
   console.log('[WHATSAPP] sendWhatsAppNotification input:', {
     studentId,
@@ -198,20 +206,34 @@ async function sendWhatsAppNotification({
   }
 
   try {
-    console.log('[WHATSAPP] Sending text notification', {
+    console.log(`[WHATSAPP] Sending ${templateName ? 'template' : 'text'} notification`, {
       logId,
       studentId: student.id,
       phone: resolvedPhone,
       type: notificationType,
+      templateName,
+      templateLanguage,
     });
-    const result = await sendTextMessage({
-      coachingId: student.coaching_id,
-      studentId: student.id,
-      to: resolvedPhone,
-      message: notificationMessage,
-      settings,
-    });
-    console.log('[WHATSAPP] Text notification response:', result);
+    const result = templateName
+      ? await sendTemplateMessage({
+        coachingId: student.coaching_id,
+        branchId: student.branch_id,
+        studentId: student.id,
+        to: resolvedPhone,
+        templateName,
+        languageCode: templateLanguage,
+        components: templateComponents,
+        settings,
+      })
+      : await sendTextMessage({
+        coachingId: student.coaching_id,
+        branchId: student.branch_id,
+        studentId: student.id,
+        to: resolvedPhone,
+        message: notificationMessage,
+        settings,
+      });
+    console.log('[WHATSAPP] Notification response:', result);
     if (result?.failed) {
       await run(
         `UPDATE notification_logs
@@ -229,10 +251,12 @@ async function sendWhatsAppNotification({
     );
     return { ok: true, logId, metaMessageId: result.metaMessageId };
   } catch (error) {
-    console.error('WhatsApp text notification failed', {
+    console.error('[WHATSAPP] Notification failed', {
       studentId: student.id,
       type: notificationType,
       phone: resolvedPhone,
+      templateName,
+      templateLanguage: templateName ? templateLanguage : null,
       error: error.message,
     });
     await run(
