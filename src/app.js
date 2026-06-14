@@ -5291,6 +5291,20 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
 
     for (const recipient of admissionRecipients) {
       try {
+        const admissionTemplateComponents = [{
+          type: 'body',
+          parameters: [
+            { type: 'text', text: recipient.key === 'parent' ? parentName || 'Parent' : name },
+            { type: 'text', text: name },
+            { type: 'text', text: rollNo },
+            { type: 'text', text: req.currentBranch?.name || 'SCC' },
+          ],
+        }];
+        console.log('[WHATSAPP] Admission template parameter count:', {
+          recipient: recipient.key,
+          templateName: admissionTemplateName,
+          count: admissionTemplateComponents[0].parameters.length,
+        });
         const admissionNotificationResult = await sendWhatsAppNotification({
           studentId: createdStudentId,
           phone: recipient.phone,
@@ -5299,16 +5313,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
           eventKey: `admission_confirmed:${recipient.key}:${createdStudentId}`,
           templateName: admissionTemplateName,
           templateLanguage: 'en',
-          templateComponents: [{
-            type: 'body',
-            parameters: [
-              { type: 'text', text: name },
-              { type: 'text', text: rollNo },
-              { type: 'text', text: batch.name || 'Assigned batch' },
-              { type: 'text', text: formatWhatsAppAmount(createdFeeSummary?.totalFee || 0) },
-              { type: 'text', text: formatWhatsAppAmount(createdFeeSummary?.pendingFee || 0) },
-            ],
-          }],
+          templateComponents: admissionTemplateComponents,
         });
         if (admissionNotificationResult?.failed) {
           console.error('[WHATSAPP] Admission confirmation API failure', {
