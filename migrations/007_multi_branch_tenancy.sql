@@ -339,11 +339,51 @@ BEGIN
 END $$;
 
 DO $$
+DECLARE
+  index_record RECORD;
+BEGIN
+  FOR index_record IN
+    SELECT
+      namespace.nspname AS schema_name,
+      index_relation.relname AS index_name,
+      ARRAY_AGG(attribute.attname::TEXT ORDER BY key_column.ordinality) AS columns
+    FROM pg_index index_row
+    JOIN pg_class table_relation ON table_relation.oid = index_row.indrelid
+    JOIN pg_class index_relation ON index_relation.oid = index_row.indexrelid
+    JOIN pg_namespace namespace ON namespace.oid = table_relation.relnamespace
+    JOIN LATERAL unnest(index_row.indkey) WITH ORDINALITY
+      AS key_column(attnum, ordinality) ON key_column.attnum > 0
+    JOIN pg_attribute attribute
+      ON attribute.attrelid = table_relation.oid
+     AND attribute.attnum = key_column.attnum
+    WHERE index_row.indisunique
+      AND namespace.nspname = current_schema()
+      AND table_relation.relname = 'users'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint constraint_row
+        WHERE constraint_row.conindid = index_row.indexrelid
+      )
+    GROUP BY namespace.nspname, index_relation.relname
+  LOOP
+    IF index_record.columns = ARRAY['coaching_id', 'roll_no']::TEXT[]
+       OR index_record.columns = ARRAY['branch_id', 'roll_no']::TEXT[]
+    THEN
+      EXECUTE format(
+        'DROP INDEX %I.%I',
+        index_record.schema_name,
+        index_record.index_name
+      );
+    END IF;
+  END LOOP;
+END $$;
+
+DO $$
 BEGIN
   IF to_regclass(format('%I.users', current_schema())) IS NOT NULL THEN
     CREATE INDEX IF NOT EXISTS users_branch_role_idx ON users (branch_id, role);
-    CREATE UNIQUE INDEX IF NOT EXISTS users_branch_roll_unique_idx
-      ON users (branch_id, roll_no)
+    CREATE UNIQUE INDEX IF NOT EXISTS users_coaching_branch_roll_unique_idx
+      ON users (coaching_id, branch_id, roll_no)
       WHERE role = 'student' AND roll_no IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS users_branch_admin_username_unique_idx
       ON users (branch_id, username)

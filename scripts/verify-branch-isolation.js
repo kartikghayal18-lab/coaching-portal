@@ -101,6 +101,30 @@ async function main() {
     throw new Error('Expected both SCC branches. Run npm run migrate:branches and npm run seed:branches first.');
   }
 
+  const rollIndex = await runWithBranchContext({ isSuperAdmin: true }, () => get(
+    `SELECT indexname, indexdef
+     FROM pg_indexes
+     WHERE schemaname = current_schema()
+       AND tablename = 'users'
+       AND indexname = 'users_coaching_branch_roll_unique_idx'
+     LIMIT 1`
+  ));
+  if (!rollIndex || !rollIndex.indexdef.includes('(coaching_id, branch_id, roll_no)')) {
+    throw new Error('Missing unique student roll index on (coaching_id, branch_id, roll_no)');
+  }
+
+  const duplicateRoll = await runWithBranchContext({ isSuperAdmin: true }, () => get(
+    `SELECT coaching_id, branch_id, roll_no, COUNT(*) AS total
+     FROM users
+     WHERE role = 'student' AND roll_no IS NOT NULL
+     GROUP BY coaching_id, branch_id, roll_no
+     HAVING COUNT(*) > 1
+     LIMIT 1`
+  ));
+  if (duplicateRoll) {
+    throw new Error(`Duplicate roll number exists inside branch ${duplicateRoll.branch_id}: ${duplicateRoll.roll_no}`);
+  }
+
   for (const branch of branches) {
     const otherBranch = branches.find((candidate) => candidate.id !== branch.id);
     const counts = await verifyBranch(branch, otherBranch);
