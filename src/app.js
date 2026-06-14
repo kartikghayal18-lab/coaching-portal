@@ -5258,13 +5258,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const admissionRecipients = [
     { key: 'student', phone: whatsappNumber || contactPhone },
     { key: 'parent', phone: parentWhatsappNumber || guardianPhone },
-  ].filter((recipient, index, recipients) => {
-    if (!recipient.phone) return false;
-    const phoneKey = String(recipient.phone).replace(/[^\d]/g, '').slice(-10);
-    return recipients.findIndex((item) => (
-      String(item.phone || '').replace(/[^\d]/g, '').slice(-10) === phoneKey
-    )) === index;
-  });
+  ].filter((recipient) => recipient.phone);
 
   if (admissionRecipients.length) {
     const admissionMessageLines = [
@@ -5294,7 +5288,16 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
           message: admissionMessage,
           eventKey: `admission_confirmed:${recipient.key}:${createdStudentId}`,
           templateName: admissionTemplateName,
-          templateLanguage: String(process.env.WHATSAPP_REGISTRATION_TEMPLATE_LANGUAGE || 'en_US').trim(),
+          templateLanguage: 'en',
+          templateComponents: [{
+            type: 'body',
+            parameters: [
+              { type: 'text', text: recipient.key === 'parent' ? parentName || 'Parent' : name },
+              { type: 'text', text: name },
+              { type: 'text', text: rollNo },
+              { type: 'text', text: req.currentBranch?.name || 'SCC' },
+            ],
+          }],
         });
         if (admissionNotificationResult?.failed) {
           console.error('[WHATSAPP] Admission confirmation API failure', {
