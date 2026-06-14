@@ -16,7 +16,18 @@ function getBranchContext() {
   };
 }
 
+function getCurrentBranchId(req) {
+  const branchId = Number(req?.session?.user?.branchId);
+  if (!Number.isInteger(branchId) || branchId <= 0) {
+    const error = new Error('A valid branch session is required');
+    error.status = 403;
+    throw error;
+  }
+  return branchId;
+}
+
 module.exports = {
   getBranchContext,
+  getCurrentBranchId,
   runWithBranchContext,
 };

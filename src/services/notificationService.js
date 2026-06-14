@@ -79,15 +79,15 @@ function getToggleKeyForType(type) {
   return null;
 }
 
-async function getRecentNotificationLogs(coachingId, limit = 50) {
+async function getRecentNotificationLogs(coachingId, branchId, limit = 50) {
   return all(
     `SELECT nl.*, u.roll_no, u.name
      FROM notification_logs nl
-     LEFT JOIN users u ON u.id = nl.student_id
-     WHERE nl.coaching_id = ?
+     LEFT JOIN users u ON u.id = nl.student_id AND u.branch_id = nl.branch_id
+     WHERE nl.coaching_id = ? AND nl.branch_id = ?
      ORDER BY COALESCE(nl.sent_at, nl.created_at) DESC
      LIMIT ?`,
-    [coachingId, limit]
+    [coachingId, branchId, limit]
   );
 }
 
@@ -133,7 +133,7 @@ async function sendWhatsAppNotification({
     message: notificationMessage,
     eventKey,
   });
-  const settings = await getWhatsAppSettings(student.coaching_id);
+  const settings = await getWhatsAppSettings(student.coaching_id, student.branch_id);
   console.log('[WHATSAPP] Notification payload:', {
     coachingId: student.coaching_id,
     studentId: student.id,
@@ -157,9 +157,9 @@ async function sendWhatsAppNotification({
   const existing = await get(
     `SELECT id, status
      FROM notification_logs
-     WHERE event_key = ?
+     WHERE event_key = ? AND branch_id = ?
      LIMIT 1`,
-    [notificationEventKey]
+    [notificationEventKey, student.branch_id]
   );
   if (existing) {
     console.log('[WHATSAPP] Notification skipped: duplicate event key', {
@@ -190,8 +190,8 @@ async function sendWhatsAppNotification({
 
   if (!resolvedPhone) {
     await run(
-      `UPDATE notification_logs SET status = ?, error_message = ? WHERE id = ?`,
-      ['skipped', 'WhatsApp number missing', logId]
+      `UPDATE notification_logs SET status = ?, error_message = ? WHERE id = ? AND branch_id = ?`,
+      ['skipped', 'WhatsApp number missing', logId, student.branch_id]
     );
     console.error('[WHATSAPP] Notification skipped: phone missing', { logId, studentId: student.id });
     return { ok: false, skipped: true, reason: 'WhatsApp number missing', logId };
@@ -216,16 +216,16 @@ async function sendWhatsAppNotification({
       await run(
         `UPDATE notification_logs
          SET status = ?, error_message = ?
-         WHERE id = ?`,
-        ['failed', result.error || 'WhatsApp send failed', logId]
+         WHERE id = ? AND branch_id = ?`,
+        ['failed', result.error || 'WhatsApp send failed', logId, student.branch_id]
       );
       return { ok: false, failed: true, error: result.error || 'WhatsApp send failed', logId };
     }
     await run(
       `UPDATE notification_logs
        SET status = ?, sent_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-      ['sent', logId]
+       WHERE id = ? AND branch_id = ?`,
+      ['sent', logId, student.branch_id]
     );
     return { ok: true, logId, metaMessageId: result.metaMessageId };
   } catch (error) {
@@ -238,8 +238,8 @@ async function sendWhatsAppNotification({
     await run(
       `UPDATE notification_logs
        SET status = ?, error_message = ?
-       WHERE id = ?`,
-      ['failed', error.message, logId]
+       WHERE id = ? AND branch_id = ?`,
+      ['failed', error.message, logId, student.branch_id]
     );
     return { ok: false, failed: true, error: error.message, logId };
   }
@@ -274,7 +274,7 @@ async function sendDocumentNotification(
     message: `${notificationMessage}:${fileUrl}:${fileName}`,
     eventKey: options.eventKey || null,
   });
-  const settings = await getWhatsAppSettings(student.coaching_id);
+  const settings = await getWhatsAppSettings(student.coaching_id, student.branch_id);
   const toggleKey = getToggleKeyForType(notificationType);
   if (toggleKey && settings[toggleKey] === false) {
     return { ok: false, skipped: true, reason: 'Notification type disabled' };
@@ -283,9 +283,9 @@ async function sendDocumentNotification(
   const existing = await get(
     `SELECT id, status
      FROM notification_logs
-     WHERE event_key = ?
+     WHERE event_key = ? AND branch_id = ?
      LIMIT 1`,
-    [notificationEventKey]
+    [notificationEventKey, student.branch_id]
   );
   let logId = null;
   if (existing) {
@@ -296,13 +296,14 @@ async function sendDocumentNotification(
     await run(
       `UPDATE notification_logs
        SET message = ?, attachment_url = ?, status = ?, phone_number = ?, error_message = NULL
-       WHERE id = ?`,
+       WHERE id = ? AND branch_id = ?`,
       [
         notificationMessage || fileName || fileUrl,
         fileUrl || null,
         'pending',
         resolvedPhone || null,
         existing.id,
+        student.branch_id,
       ]
     );
     logId = existing.id;
@@ -328,12 +329,12 @@ async function sendDocumentNotification(
   }
 
   if (!resolvedPhone) {
-    await run(`UPDATE notification_logs SET status = ?, error_message = ? WHERE id = ?`, ['skipped', 'WhatsApp number missing', logId]);
+    await run(`UPDATE notification_logs SET status = ?, error_message = ? WHERE id = ? AND branch_id = ?`, ['skipped', 'WhatsApp number missing', logId, student.branch_id]);
     return { ok: false, skipped: true, reason: 'WhatsApp number missing', logId };
   }
 
   if (!fileUrl) {
-    await run(`UPDATE notification_logs SET status = ?, error_message = ? WHERE id = ?`, ['failed', 'Document URL missing', logId]);
+    await run(`UPDATE notification_logs SET status = ?, error_message = ? WHERE id = ? AND branch_id = ?`, ['failed', 'Document URL missing', logId, student.branch_id]);
     return { ok: false, skipped: true, reason: 'Document URL missing', logId };
   }
 
@@ -351,16 +352,16 @@ async function sendDocumentNotification(
       await run(
         `UPDATE notification_logs
          SET status = ?, error_message = ?
-         WHERE id = ?`,
-        ['failed', result.error || 'WhatsApp document send failed', logId]
+         WHERE id = ? AND branch_id = ?`,
+        ['failed', result.error || 'WhatsApp document send failed', logId, student.branch_id]
       );
       return { ok: false, failed: true, error: result.error || 'WhatsApp document send failed', logId };
     }
     await run(
       `UPDATE notification_logs
        SET status = ?, sent_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-      ['sent', logId]
+       WHERE id = ? AND branch_id = ?`,
+      ['sent', logId, student.branch_id]
     );
     return { ok: true, logId, metaMessageId: result.metaMessageId };
   } catch (error) {
@@ -374,8 +375,8 @@ async function sendDocumentNotification(
     await run(
       `UPDATE notification_logs
        SET status = ?, error_message = ?
-       WHERE id = ?`,
-      ['failed', error.message, logId]
+       WHERE id = ? AND branch_id = ?`,
+      ['failed', error.message, logId, student.branch_id]
     );
     return { ok: false, failed: true, error: error.message, logId };
   }

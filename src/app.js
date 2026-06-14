@@ -58,7 +58,7 @@ const {
   recordPerfOperation,
   runWithPerfTrace,
 } = require('./performance');
-const { runWithBranchContext } = require('./branch-context');
+const { getBranchContext, getCurrentBranchId, runWithBranchContext } = require('./branch-context');
 
 console.log('[BOOT] Starting app');
 console.log('[BOOT] DATABASE_URL present:', Boolean(process.env.DATABASE_URL));
@@ -1310,19 +1310,24 @@ function getMonthDateRange(monthValue) {
   };
 }
 
-async function getAttendanceReportRows(coachingId, {
+async function getAttendanceReportRows(coachingId, branchId, options = {}) {
+  if (typeof branchId === 'object') {
+    options = branchId;
+    branchId = getBranchContext().branchId;
+  }
+  const {
   attendanceDate = '',
   attendanceMonth = '',
   limit = 300,
-} = {}) {
+  } = options;
   let attendanceSql = `
     SELECT a.id, CAST(a.attendance_date AS TEXT) AS attendance_date, a.status, a.notes, u.roll_no, u.name, u.batch_id, u.standard, u.course, b.name AS batch_name
     FROM attendance a
-    JOIN users u ON u.id = a.student_id
-    LEFT JOIN batches b ON b.id = u.batch_id
-    WHERE a.coaching_id = ?
+    JOIN users u ON u.id = a.student_id AND u.branch_id = a.branch_id
+    LEFT JOIN batches b ON b.id = u.batch_id AND b.branch_id = a.branch_id
+    WHERE a.coaching_id = ? AND a.branch_id = ?
   `;
-  const attendanceParams = [coachingId];
+  const attendanceParams = [coachingId, branchId];
   if (attendanceDate) {
     attendanceSql += ` AND a.attendance_date = ? `;
     attendanceParams.push(attendanceDate);
@@ -1338,21 +1343,26 @@ async function getAttendanceReportRows(coachingId, {
   return all(attendanceSql, attendanceParams);
 }
 
-async function getFeeReportRows(coachingId, {
+async function getFeeReportRows(coachingId, branchId, options = {}) {
+  if (typeof branchId === 'object') {
+    options = branchId;
+    branchId = getBranchContext().branchId;
+  }
+  const {
   feesDate = '',
   feesMonth = '',
   limit = 150,
-} = {}) {
+  } = options;
   let feesSql = `
     SELECT f.id, f.amount, CAST(f.due_date AS TEXT) AS due_date, CAST(f.payment_date AS TEXT) AS payment_date, f.status, f.notes,
             u.id AS student_id, u.roll_no, u.name, u.guardian_phone, u.parent_whatsapp_number, u.batch_id, u.standard, u.course,
             b.name AS batch_name
      FROM fees f
-     JOIN users u ON u.id = f.student_id
-     LEFT JOIN batches b ON b.id = u.batch_id
-     WHERE f.coaching_id = ?
+     JOIN users u ON u.id = f.student_id AND u.branch_id = f.branch_id
+     LEFT JOIN batches b ON b.id = u.batch_id AND b.branch_id = f.branch_id
+     WHERE f.coaching_id = ? AND f.branch_id = ?
   `;
-  const feesParams = [coachingId];
+  const feesParams = [coachingId, branchId];
   if (feesDate) {
     feesSql += ` AND (f.payment_date = ? OR f.due_date = ?) `;
     feesParams.push(feesDate, feesDate);
@@ -1444,43 +1454,51 @@ function slugify(input) {
     .slice(0, 60);
 }
 
-async function getBatchesForCoaching(coachingId) {
+async function getBatchesForCoaching(coachingId, branchId) {
   return all(
     `SELECT id, name, normalized_name, standard, course, status, completed_at, is_retention_batch, created_at
      FROM batches
-     WHERE coaching_id = ?
+     WHERE coaching_id = ? AND branch_id = ?
      ORDER BY is_retention_batch DESC, CASE WHEN status = 'active' THEN 0 ELSE 1 END, LOWER(name) ASC, id ASC`,
-    [coachingId]
+    [coachingId, branchId]
   );
 }
 
-async function getBatchForCoaching(coachingId, batchId) {
+async function getBatchForCoaching(coachingId, branchId, batchId) {
+  if (batchId === undefined) {
+    batchId = branchId;
+    branchId = getBranchContext().branchId;
+  }
   return get(
     `SELECT id, coaching_id, name, normalized_name, standard, course, status, completed_at, is_retention_batch, created_at
      FROM batches
-     WHERE coaching_id = ? AND id = ?
+     WHERE coaching_id = ? AND branch_id = ? AND id = ?
      LIMIT 1`,
-    [coachingId, batchId]
+    [coachingId, branchId, batchId]
   );
 }
 
-async function ensureRetentionBatch(coachingId, createdBy = null) {
+async function ensureRetentionBatch(coachingId, branchId, createdBy = null) {
+  if (createdBy === null && branchId !== getBranchContext().branchId) {
+    createdBy = branchId;
+    branchId = getBranchContext().branchId;
+  }
   const existing = await get(
     `SELECT id, coaching_id, name, normalized_name, standard, course, status, completed_at, is_retention_batch, created_at
      FROM batches
-     WHERE coaching_id = ? AND is_retention_batch = 1
+     WHERE coaching_id = ? AND branch_id = ? AND is_retention_batch = 1
      LIMIT 1`,
-    [coachingId]
+    [coachingId, branchId]
   );
   if (existing) return existing;
 
   const normalizedName = RETENTION_BATCH_NAME.toLowerCase();
   const result = await run(
-    `INSERT INTO batches (coaching_id, name, normalized_name, standard, course, status, is_retention_batch, created_by)
-     VALUES (?, ?, ?, NULL, NULL, 'active', 1, ?)`,
-    [coachingId, RETENTION_BATCH_NAME, normalizedName, createdBy]
+    `INSERT INTO batches (coaching_id, branch_id, name, normalized_name, standard, course, status, is_retention_batch, created_by)
+     VALUES (?, ?, ?, ?, NULL, NULL, 'active', 1, ?)`,
+    [coachingId, branchId, RETENTION_BATCH_NAME, normalizedName, createdBy]
   );
-  return getBatchForCoaching(coachingId, result.lastID);
+  return getBatchForCoaching(coachingId, branchId, result.lastID);
 }
 
 function buildPortalUrl(req, slug) {
@@ -1782,7 +1800,12 @@ function getStudentSearchResults(students, rawQuery) {
   };
 }
 
-async function resolveStudentForAdminEntry(coachingId, { rollNo, studentLookup }) {
+async function resolveStudentForAdminEntry(coachingId, branchId, options) {
+  if (options === undefined) {
+    options = branchId;
+    branchId = getBranchContext().branchId;
+  }
+  const { rollNo, studentLookup } = options;
   const selectedRollNo = String(rollNo || '').trim();
   const lookup = String(studentLookup || '').trim();
   const lookupLower = normalizeSearchValue(lookup);
@@ -1791,9 +1814,9 @@ async function resolveStudentForAdminEntry(coachingId, { rollNo, studentLookup }
     const student = await get(
       `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
        FROM users
-       WHERE coaching_id = ? AND role = 'student' AND roll_no = ?
+       WHERE coaching_id = ? AND branch_id = ? AND role = 'student' AND roll_no = ?
        LIMIT 1`,
-      [coachingId, selectedRollNo]
+      [coachingId, branchId, selectedRollNo]
     );
     if (student) return { student, error: null };
   }
@@ -1809,7 +1832,7 @@ async function resolveStudentForAdminEntry(coachingId, { rollNo, studentLookup }
   const matches = await all(
     `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
      FROM users
-     WHERE coaching_id = ? AND role = 'student'
+     WHERE coaching_id = ? AND branch_id = ? AND role = 'student'
        AND (
          LOWER(roll_no) = LOWER(?)
          OR LOWER(name) = LOWER(?)
@@ -1826,6 +1849,7 @@ async function resolveStudentForAdminEntry(coachingId, { rollNo, studentLookup }
      LIMIT 2`,
     [
       coachingId,
+      branchId,
       rollFromLookup,
       lookup,
       `${lookup}%`,
@@ -1872,17 +1896,17 @@ function getAnswerRequestState(request) {
   };
 }
 
-async function buildAnswerRequestSummaries(coachingId, requests) {
+async function buildAnswerRequestSummaries(coachingId, branchId, requests) {
   if (!requests.length) return [];
 
   const requestIds = requests.map((request) => Number(request.id)).filter(Number.isInteger);
   const targetStudents = await all(
     `SELECT u.id, u.roll_no, u.name, u.contact_phone, u.email, u.batch_id, u.standard, u.course, b.name AS batch_name
      FROM users u
-     LEFT JOIN batches b ON b.id = u.batch_id
-     WHERE u.coaching_id = ? AND u.role = 'student'
+     LEFT JOIN batches b ON b.id = u.batch_id AND b.branch_id = u.branch_id
+     WHERE u.coaching_id = ? AND u.branch_id = ? AND u.role = 'student'
      ORDER BY u.roll_no ASC`,
-    [coachingId]
+    [coachingId, branchId]
   );
 
   const submissions = requestIds.length
@@ -1892,9 +1916,9 @@ async function buildAnswerRequestSummaries(coachingId, requests) {
               uploader.name AS uploaded_by_name, uploader.role AS uploaded_by_role
        FROM test_papers tp
        LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
-       WHERE tp.coaching_id = ? AND tp.answer_request_id = ANY(?::int[])
+       WHERE tp.coaching_id = ? AND tp.branch_id = ? AND tp.answer_request_id = ANY(?::int[])
        ORDER BY tp.upload_date DESC`,
-      [coachingId, requestIds]
+      [coachingId, branchId, requestIds]
     )
     : [];
 
@@ -1953,6 +1977,7 @@ async function buildAnswerRequestSummaries(coachingId, requests) {
 
 async function findRecentDuplicatePaper({
   coachingId,
+  branchId,
   studentId,
   originalName,
   testLabel,
@@ -1965,7 +1990,7 @@ async function findRecentDuplicatePaper({
     return get(
       `SELECT id
        FROM test_papers
-       WHERE coaching_id = ?
+       WHERE coaching_id = ? AND branch_id = ?
          AND student_id = ?
          AND uploaded_by = ?
          AND answer_request_id IS NULL
@@ -1976,14 +2001,14 @@ async function findRecentDuplicatePaper({
         AND upload_date >= CURRENT_TIMESTAMP - INTERVAL '20 seconds'
        ORDER BY upload_date DESC, id DESC
        LIMIT 1`,
-      [coachingId, studentId, uploadedBy, originalName, testLabel || null, marksObtained, maxMarks]
+      [coachingId, branchId, studentId, uploadedBy, originalName, testLabel || null, marksObtained, maxMarks]
     );
   }
 
   return get(
     `SELECT id
      FROM test_papers
-     WHERE coaching_id = ?
+     WHERE coaching_id = ? AND branch_id = ?
        AND student_id = ?
        AND uploaded_by = ?
        AND answer_request_id = ?
@@ -1994,12 +2019,12 @@ async function findRecentDuplicatePaper({
        AND upload_date >= CURRENT_TIMESTAMP - INTERVAL '20 seconds'
      ORDER BY upload_date DESC, id DESC
      LIMIT 1`,
-    [coachingId, studentId, uploadedBy, answerRequestId, originalName, testLabel || null, marksObtained, maxMarks]
+    [coachingId, branchId, studentId, uploadedBy, answerRequestId, originalName, testLabel || null, marksObtained, maxMarks]
   );
 }
 
 async function deletePaperRecord(paper) {
-  await run(`DELETE FROM test_papers WHERE id = ?`, [paper.id]);
+  await run(`DELETE FROM test_papers WHERE id = ? AND branch_id = ?`, [paper.id, paper.branch_id]);
   try {
     await deleteStoredPaper(paper);
   } catch (error) {
@@ -2009,6 +2034,7 @@ async function deletePaperRecord(paper) {
 
 async function savePaperUpload({
   coachingId,
+  branchId = getBranchContext().branchId,
   studentId,
   file,
   uploadedBy,
@@ -2019,6 +2045,7 @@ async function savePaperUpload({
 }) {
   const duplicate = await findRecentDuplicatePaper({
     coachingId,
+    branchId,
     studentId,
     originalName: file.originalname,
     testLabel,
@@ -2038,10 +2065,10 @@ async function savePaperUpload({
     const existing = await get(
       `SELECT id, stored_name, storage_type, storage_key, public_url, content_type
        FROM test_papers
-       WHERE coaching_id = ? AND student_id = ? AND answer_request_id = ?
+       WHERE coaching_id = ? AND branch_id = ? AND student_id = ? AND answer_request_id = ?
        ORDER BY upload_date DESC, id DESC
        LIMIT 1`,
-      [coachingId, studentId, answerRequestId]
+      [coachingId, branchId, studentId, answerRequestId]
     );
 
     if (existing) {
@@ -2051,7 +2078,7 @@ async function savePaperUpload({
              storage_type = ?, storage_key = ?, public_url = ?, content_type = ?, size_bytes = ?,
              marks_obtained = ?, max_marks = ?, test_label = ?, paper_type = 'answer_submission',
              upload_date = CURRENT_TIMESTAMP
-         WHERE id = ?`,
+         WHERE id = ? AND branch_id = ?`,
         [
           file.originalname,
           stored.storedName,
@@ -2065,6 +2092,7 @@ async function savePaperUpload({
           maxMarks,
           testLabel || file.originalname,
           existing.id,
+          branchId,
         ]
       );
 
@@ -2082,12 +2110,13 @@ async function savePaperUpload({
 
   const result = await run(
     `INSERT INTO test_papers (
-      coaching_id, student_id, original_name, stored_name, uploaded_by,
+      coaching_id, branch_id, student_id, original_name, stored_name, uploaded_by,
       storage_type, storage_key, public_url, content_type, size_bytes,
       marks_obtained, max_marks, test_label, paper_type, answer_request_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
+      branchId,
       studentId,
       file.originalname,
       stored.storedName,
@@ -2113,14 +2142,14 @@ async function getPaperForDelete(id, sessionUser) {
     `SELECT tp.*, u.coaching_id AS student_coaching_id
      FROM test_papers tp
      JOIN users u ON u.id = tp.student_id
-     WHERE tp.id = ?`,
-    [id]
+     WHERE tp.id = ? AND tp.branch_id = ?`,
+    [id, sessionUser.branchId]
   );
 
   if (!paper) return null;
   if (sessionUser.isOwner) return null;
 
-  if (sessionUser.role === 'admin' && paper.coaching_id === sessionUser.coachingId) {
+  if (sessionUser.role === 'admin' && paper.coaching_id === sessionUser.coachingId && paper.branch_id === sessionUser.branchId) {
     return paper;
   }
 
@@ -2128,6 +2157,7 @@ async function getPaperForDelete(id, sessionUser) {
     sessionUser.role === 'student' &&
     paper.student_id === sessionUser.id &&
     paper.coaching_id === sessionUser.coachingId &&
+    paper.branch_id === sessionUser.branchId &&
     paper.uploaded_by === sessionUser.id
   ) {
     return paper;
@@ -2138,20 +2168,20 @@ async function getPaperForDelete(id, sessionUser) {
 
 async function cleanupDuplicateAnswerSubmissions() {
   const duplicateGroups = await all(
-    `SELECT coaching_id, student_id, answer_request_id, COUNT(*) AS duplicate_count
+    `SELECT coaching_id, branch_id, student_id, answer_request_id, COUNT(*) AS duplicate_count
      FROM test_papers
      WHERE answer_request_id IS NOT NULL
-     GROUP BY coaching_id, student_id, answer_request_id
+     GROUP BY coaching_id, branch_id, student_id, answer_request_id
      HAVING COUNT(*) > 1`
   );
 
   for (const group of duplicateGroups) {
     const rows = await all(
-      `SELECT id, stored_name, storage_type, storage_key, public_url, content_type
+      `SELECT id, branch_id, stored_name, storage_type, storage_key, public_url, content_type
        FROM test_papers
-       WHERE coaching_id = ? AND student_id = ? AND answer_request_id = ?
+       WHERE coaching_id = ? AND branch_id = ? AND student_id = ? AND answer_request_id = ?
        ORDER BY upload_date DESC, id DESC`,
-      [group.coaching_id, group.student_id, group.answer_request_id]
+      [group.coaching_id, group.branch_id, group.student_id, group.answer_request_id]
     );
 
     const [, ...duplicates] = rows;
@@ -2161,15 +2191,19 @@ async function cleanupDuplicateAnswerSubmissions() {
   }
 }
 
-async function getStudentDashboardPayload(coachingId, studentId) {
+async function getStudentDashboardPayload(coachingId, branchId, studentId) {
+  if (studentId === undefined) {
+    studentId = branchId;
+    branchId = getBranchContext().branchId;
+  }
   const profile = await get(
     `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course,
             u.contact_phone, u.guardian_phone, u.whatsapp_number, u.parent_whatsapp_number, u.email,
             b.name AS batch_name
      FROM users u
-     LEFT JOIN batches b ON b.id = u.batch_id
-     WHERE u.id = ? AND u.coaching_id = ? AND u.role = 'student'`,
-    [studentId, coachingId]
+     LEFT JOIN batches b ON b.id = u.batch_id AND b.branch_id = u.branch_id
+     WHERE u.id = ? AND u.coaching_id = ? AND u.branch_id = ? AND u.role = 'student'`,
+    [studentId, coachingId, branchId]
   );
 
   const papers = await all(`
@@ -2180,26 +2214,26 @@ tp.answer_request_id, tp.uploaded_by AS uploaded_by_id,
 uploader.name AS uploaded_by_name, uploader.role AS uploaded_by_role
 FROM test_papers tp
 	LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
-	WHERE tp.coaching_id = ? AND tp.student_id = ?
+	WHERE tp.coaching_id = ? AND tp.branch_id = ? AND tp.student_id = ?
 	ORDER BY tp.upload_date DESC
 	LIMIT 20
-	`, [coachingId, studentId]);
+	`, [coachingId, branchId, studentId]);
 
 	  const attendance = await all(
 	    `SELECT attendance_date, status, notes
 	     FROM attendance
-	     WHERE coaching_id = ? AND student_id = ?
+	     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
 	     ORDER BY attendance_date DESC, id DESC
 	     LIMIT 30`,
-	    [coachingId, studentId]
+	    [coachingId, branchId, studentId]
 	  );
 
   const fees = await all(
     `SELECT amount, due_date, payment_date, status, notes
      FROM fees
-     WHERE coaching_id = ? AND student_id = ?
+     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
      ORDER BY created_at DESC`,
-    [coachingId, studentId]
+    [coachingId, branchId, studentId]
   );
 
   const notes = profile?.batch_id
@@ -2207,19 +2241,19 @@ FROM test_papers tp
       `SELECT bn.title, bn.resource_url, bn.description, bn.created_at, bn.batch_id, b.name AS batch_name
        FROM batch_notes bn
        LEFT JOIN batches b ON b.id = bn.batch_id
-       WHERE bn.coaching_id = ? AND bn.batch_id = ?
+       WHERE bn.coaching_id = ? AND bn.branch_id = ? AND bn.batch_id = ?
        ORDER BY bn.created_at DESC`,
-      [coachingId, profile.batch_id]
+      [coachingId, branchId, profile.batch_id]
     )
     : profile?.standard || profile?.course
       ? await all(
         `SELECT title, resource_url, description, created_at, batch_id
          FROM batch_notes
-         WHERE coaching_id = ?
+         WHERE coaching_id = ? AND branch_id = ?
            AND COALESCE(standard, '') = COALESCE(?, '')
            AND COALESCE(course, '') = COALESCE(?, '')
          ORDER BY created_at DESC`,
-        [coachingId, profile.standard || null, profile.course || null]
+        [coachingId, branchId, profile.standard || null, profile.course || null]
       )
       : [];
 
@@ -2230,11 +2264,11 @@ FROM test_papers tp
        SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) AS absent_count,
        SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) AS late_count
      FROM attendance
-     WHERE coaching_id = ? AND student_id = ?`,
-    [coachingId, studentId]
+     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?`,
+    [coachingId, branchId, studentId]
   );
 
-  const feeSummary = await getStudentFeeSummary(coachingId, studentId);
+  const feeSummary = await getStudentFeeSummary(coachingId, branchId, studentId);
 
   const totalAttendance = Number(attendanceSummary?.total || 0);
   const presentCount = Number(attendanceSummary?.present_count || 0);
@@ -2628,14 +2662,14 @@ async function getPaperForUser(id, sessionUser) {
     `SELECT tp.*, u.roll_no, u.coaching_id AS student_coaching_id
      FROM test_papers tp
      JOIN users u ON u.id = tp.student_id
-     WHERE tp.id = ?`,
-    [id]
+     WHERE tp.id = ? AND tp.branch_id = ?`,
+    [id, sessionUser.branchId]
   );
 
   if (!paper) return null;
   if (sessionUser.isOwner) return null;
-  if (sessionUser.role === 'admin' && paper.coaching_id === sessionUser.coachingId) return paper;
-  if (sessionUser.role === 'student' && paper.student_id === sessionUser.id && paper.coaching_id === sessionUser.coachingId) return paper;
+  if (sessionUser.role === 'admin' && paper.coaching_id === sessionUser.coachingId && paper.branch_id === sessionUser.branchId) return paper;
+  if (sessionUser.role === 'student' && paper.student_id === sessionUser.id && paper.coaching_id === sessionUser.coachingId && paper.branch_id === sessionUser.branchId) return paper;
   return null;
 }
 
@@ -4035,9 +4069,10 @@ app.post('/admin/settings/profile', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/settings/whatsapp-notifications', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
-  const existing = await getWhatsAppSettings(coachingId);
+  const branchId = getCurrentBranchId(req);
+  const existing = await getWhatsAppSettings(coachingId, branchId);
 
-  await saveWhatsAppSettings(coachingId, {
+  await saveWhatsAppSettings(coachingId, branchId, {
     ...existing,
     attendanceAlertsEnabled: req.body.attendanceAlertsEnabled === 'on',
     feeAlertsEnabled: req.body.feeAlertsEnabled === 'on',
@@ -4063,7 +4098,8 @@ app.post('/admin/settings/whatsapp-notifications', requireCoachingAdmin, async (
 
 app.post('/admin/whatsapp/settings', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
-  const existing = await getWhatsAppSettings(coachingId);
+  const branchId = getCurrentBranchId(req);
+  const existing = await getWhatsAppSettings(coachingId, branchId);
   const accessToken = String(req.body.accessToken || '').trim() || existing.accessToken;
   const phoneNumberId = String(req.body.phoneNumberId || '').trim();
   const businessAccountId = String(req.body.businessAccountId || '').trim();
@@ -4074,7 +4110,7 @@ app.post('/admin/whatsapp/settings', requireCoachingAdmin, async (req, res) => {
     return res.redirect('/admin/dashboard?section=whatsapp');
   }
 
-  await saveWhatsAppSettings(coachingId, {
+  await saveWhatsAppSettings(coachingId, branchId, {
     accessToken,
     phoneNumberId,
     businessAccountId,
@@ -4097,6 +4133,7 @@ app.post('/admin/whatsapp/settings', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/whatsapp/test', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const testPhone = String(req.body.testPhone || '').trim();
   if (!testPhone) {
     req.session.flash = { type: 'error', text: 'Enter a phone number to test WhatsApp connection.' };
@@ -4106,6 +4143,7 @@ app.post('/admin/whatsapp/test', requireCoachingAdmin, async (req, res) => {
   try {
     const result = await sendTextMessage({
       coachingId,
+      branchId,
       to: testPhone,
       message: `WhatsApp connection test from ${req.session.user.coachingName || 'your coaching portal'} was successful.`,
     });
@@ -4123,6 +4161,7 @@ app.post('/admin/whatsapp/test', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/whatsapp/broadcast', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const targetMode = String(req.body.targetMode || 'all').trim();
   const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
   const selectedStudentIds = String(req.body.studentIds || '')
@@ -4136,11 +4175,11 @@ app.post('/admin/whatsapp/broadcast', requireCoachingAdmin, async (req, res) => 
     return res.redirect('/admin/dashboard?section=whatsapp');
   }
 
-  const params = [coachingId];
+  const params = [coachingId, branchId];
   let recipientSql = `
     SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
     FROM users
-    WHERE coaching_id = ? AND role = 'student'
+    WHERE coaching_id = ? AND branch_id = ? AND role = 'student'
       AND COALESCE(whatsapp_number, contact_phone, parent_whatsapp_number, guardian_phone) IS NOT NULL
       AND TRIM(COALESCE(whatsapp_number, contact_phone, parent_whatsapp_number, guardian_phone, '')) <> ''
   `;
@@ -4834,6 +4873,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const feesMonthFilter = normalizeMonthOnlyFilter(req.query.feesMonth, currentMonth);
   const studentSearchQuery = (req.query.studentSearch || '').trim();
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const isOverviewSection = activeSection === 'overview';
   const needsStudents = ['overview', 'students', 'attendance', 'fees', 'notes', 'whatsapp'].includes(activeSection);
@@ -4850,31 +4890,31 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const studentCountRow = await get(
     `SELECT COUNT(*) AS total_students
      FROM users
-     WHERE coaching_id = ? AND role = 'student'`,
-    [coachingId]
+     WHERE coaching_id = ? AND branch_id = ? AND role = 'student'`,
+    [coachingId, branchId]
   );
   const totalStudentCount = Number(studentCountRow?.total_students || 0);
   const adminProfile = needsAdminProfile ? await get(
     `SELECT contact_phone, email
      FROM users
-     WHERE id = ? AND coaching_id = ? AND role = 'admin'
+     WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'admin'
      LIMIT 1`,
-    [req.session.user.id, coachingId]
+    [req.session.user.id, coachingId, branchId]
   ) : null;
-  const batches = await getBatchesForCoaching(coachingId);
-  const whatsappSettings = buildWhatsAppSettingsView(needsWhatsAppSettings ? await getWhatsAppSettings(coachingId) : null);
-  const whatsappLogs = needsWhatsAppLogs ? await getRecentWhatsAppLogs(coachingId, 25) : [];
-  const notificationLogs = needsNotificationLogs ? await getRecentNotificationLogs(coachingId, 100) : [];
+  const batches = await getBatchesForCoaching(coachingId, branchId);
+  const whatsappSettings = buildWhatsAppSettingsView(needsWhatsAppSettings ? await getWhatsAppSettings(coachingId, branchId) : null);
+  const whatsappLogs = needsWhatsAppLogs ? await getRecentWhatsAppLogs(coachingId, branchId, 25) : [];
+  const notificationLogs = needsNotificationLogs ? await getRecentNotificationLogs(coachingId, branchId, 100) : [];
 
   const students = needsStudents ? await all(
     `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course, u.contact_phone, u.guardian_phone, u.whatsapp_number, u.parent_whatsapp_number, u.email, u.created_at,
             u.is_retained_record, u.retention_source_batch_id,
             b.name AS batch_name, b.status AS batch_status, b.completed_at AS batch_completed_at, b.is_retention_batch
      FROM users u
-     LEFT JOIN batches b ON b.id = u.batch_id
-     WHERE u.role = 'student' AND u.coaching_id = ?
+     LEFT JOIN batches b ON b.id = u.batch_id AND b.branch_id = u.branch_id
+     WHERE u.role = 'student' AND u.coaching_id = ? AND u.branch_id = ?
      ORDER BY COALESCE(b.name, ''), u.roll_no ASC`,
-    [coachingId]
+    [coachingId, branchId]
   ) : [];
 
   const papersMonthRange = getMonthDateRange(papersMonthFilter);
@@ -4901,20 +4941,20 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
        uploader.name AS uploaded_by_name,
        uploader.role AS uploaded_by_role
      FROM test_papers tp
-     JOIN users u ON u.id = tp.student_id
-     LEFT JOIN batches b ON b.id = u.batch_id
-     LEFT JOIN users uploader ON uploader.id = tp.uploaded_by
-     WHERE tp.coaching_id = ?
+     JOIN users u ON u.id = tp.student_id AND u.branch_id = tp.branch_id
+     LEFT JOIN batches b ON b.id = u.batch_id AND b.branch_id = tp.branch_id
+     LEFT JOIN users uploader ON uploader.id = tp.uploaded_by AND uploader.branch_id = tp.branch_id
+     WHERE tp.coaching_id = ? AND tp.branch_id = ?
        AND tp.upload_date >= ?
        AND tp.upload_date < ?
      ORDER BY tp.upload_date DESC
      LIMIT 250`,
-    [coachingId, papersMonthRange.start, papersMonthRange.end]
+    [coachingId, branchId, papersMonthRange.start, papersMonthRange.end]
   ) : [];
 
   const shouldLoadAttendanceRecords = needsAttendance && (activeSection !== 'attendance' || Boolean(attendanceDateFilter));
   const attendance = shouldLoadAttendanceRecords
-    ? await getAttendanceReportRows(coachingId, {
+    ? await getAttendanceReportRows(coachingId, branchId, {
       attendanceDate: attendanceDateFilter,
       attendanceMonth: attendanceDateFilter ? '' : attendanceMonthFilter,
       limit: 300,
@@ -4924,13 +4964,13 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const attendanceDates = activeSection === 'attendance' ? await all(
     `SELECT DISTINCT CAST(attendance_date AS TEXT) AS attendance_date
      FROM attendance
-     WHERE coaching_id = ?
+     WHERE coaching_id = ? AND branch_id = ?
      ORDER BY attendance_date DESC
      LIMIT 90`,
-    [coachingId]
+    [coachingId, branchId]
   ) : [];
 
-  const fees = needsFees ? await getFeeReportRows(coachingId, {
+  const fees = needsFees ? await getFeeReportRows(coachingId, branchId, {
     feesDate: feesDateFilter,
     feesMonth: feesDateFilter ? '' : feesMonthFilter,
     limit: 150,
@@ -4940,25 +4980,25 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     `SELECT bn.id, bn.batch_id, bn.standard, bn.course, bn.title, bn.resource_url, bn.description, bn.created_at,
             b.name AS batch_name
      FROM batch_notes bn
-     LEFT JOIN batches b ON b.id = bn.batch_id
-     WHERE bn.coaching_id = ?
+     LEFT JOIN batches b ON b.id = bn.batch_id AND b.branch_id = bn.branch_id
+     WHERE bn.coaching_id = ? AND bn.branch_id = ?
      ORDER BY bn.created_at DESC
      LIMIT 150`,
-    [coachingId]
+    [coachingId, branchId]
   ) : [];
 
   const answerRequests = needsAnswerRequests ? await all(
     `SELECT ar.id, ar.batch_id, ar.standard, ar.course, ar.title, ar.description, ar.starts_at, ar.ends_at, ar.created_at,
             b.name AS batch_name
      FROM answer_upload_requests ar
-     LEFT JOIN batches b ON b.id = ar.batch_id
-     WHERE ar.coaching_id = ?
+     LEFT JOIN batches b ON b.id = ar.batch_id AND b.branch_id = ar.branch_id
+     WHERE ar.coaching_id = ? AND ar.branch_id = ?
      ORDER BY ar.created_at DESC
      LIMIT 20`,
-    [coachingId]
+    [coachingId, branchId]
   ) : [];
 
-  const answerRequestSummaries = needsAnswerRequests ? await buildAnswerRequestSummaries(coachingId, answerRequests) : [];
+  const answerRequestSummaries = needsAnswerRequests ? await buildAnswerRequestSummaries(coachingId, branchId, answerRequests) : [];
 
   const paperStats = isOverviewSection ? await all(
     `SELECT
@@ -4967,17 +5007,17 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
        MAX(upload_date) AS last_upload,
        MAX(CASE WHEN marks_obtained IS NOT NULL AND max_marks IS NOT NULL AND max_marks > 0 THEN upload_date END) AS latest_marked_upload
      FROM test_papers
-     WHERE coaching_id = ?
+     WHERE coaching_id = ? AND branch_id = ?
      GROUP BY student_id`,
-    [coachingId]
+    [coachingId, branchId]
   ) : [];
 
   const latestMarkedPapers = isOverviewSection ? await all(
     `SELECT student_id, marks_obtained, max_marks, upload_date, test_label, original_name
      FROM test_papers
-     WHERE coaching_id = ? AND marks_obtained IS NOT NULL AND max_marks IS NOT NULL AND max_marks > 0
+     WHERE coaching_id = ? AND branch_id = ? AND marks_obtained IS NOT NULL AND max_marks IS NOT NULL AND max_marks > 0
      ORDER BY upload_date DESC`,
-    [coachingId]
+    [coachingId, branchId]
   ) : [];
 
   const paperStatsByStudent = new Map();
@@ -5101,6 +5141,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const rollNo = (req.body.rollNo || '').trim();
   const name = (req.body.name || '').trim() || rollNo;
@@ -5130,15 +5171,15 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
     return res.redirect('/admin/dashboard?section=students');
   }
 
-  const batch = await getBatchForCoaching(coachingId, batchId);
+  const batch = await getBatchForCoaching(coachingId, branchId, batchId);
   if (!batch) {
     req.session.flash = { type: 'error', text: 'Selected batch was not found' };
     return res.redirect('/admin/dashboard?section=students');
   }
 
   const existing = await get(
-    `SELECT id FROM users WHERE coaching_id = ? AND roll_no = ? LIMIT 1`,
-    [coachingId, rollNo]
+    `SELECT id FROM users WHERE coaching_id = ? AND branch_id = ? AND roll_no = ? LIMIT 1`,
+    [coachingId, branchId, rollNo]
   );
   if (existing) {
     req.session.flash = { type: 'error', text: 'Roll number already exists in this coaching' };
@@ -5146,8 +5187,8 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   }
 
   const currentStudents = await get(
-    `SELECT COUNT(*) AS total_students FROM users WHERE coaching_id = ? AND role = 'student'`,
-    [coachingId]
+    `SELECT COUNT(*) AS total_students FROM users WHERE coaching_id = ? AND branch_id = ? AND role = 'student'`,
+    [coachingId, branchId]
   );
   const studentUsage = getStudentUsage(Number(currentStudents?.total_students || 0), coaching);
   if (studentUsage.atLimit) {
@@ -5161,10 +5202,11 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const passwordHash = await bcrypt.hash(password, 10);
   const createdStudentResult = await run(
     `INSERT INTO users (
-      coaching_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number, email, password_hash
-    ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      coaching_id, branch_id, role, is_owner, username, roll_no, name, batch_id, standard, course, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number, email, password_hash
+    ) VALUES (?, ?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
+      branchId,
       rollNo,
       name,
       batch.id,
@@ -5184,6 +5226,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   if (totalFee > 0) {
     createdFeeSummary = await setStudentTotalFee({
       coachingId,
+      branchId,
       studentId: createdStudentId,
       totalFee,
     });
@@ -5241,6 +5284,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/students/import', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
   const csv = String(req.body.studentsCsv || '').trim();
@@ -5250,7 +5294,7 @@ app.post('/admin/students/import', requireCoachingAdmin, async (req, res) => {
     return res.redirect('/admin/dashboard?section=students');
   }
 
-  const batch = await getBatchForCoaching(coachingId, batchId);
+  const batch = await getBatchForCoaching(coachingId, branchId, batchId);
   if (!batch) {
     req.session.flash = { type: 'error', text: 'Selected batch was not found' };
     return res.redirect('/admin/dashboard?section=students');
@@ -5267,8 +5311,8 @@ app.post('/admin/students/import', requireCoachingAdmin, async (req, res) => {
   }
 
   const currentStudents = await get(
-    `SELECT COUNT(*) AS total_students FROM users WHERE coaching_id = ? AND role = 'student'`,
-    [coachingId]
+    `SELECT COUNT(*) AS total_students FROM users WHERE coaching_id = ? AND branch_id = ? AND role = 'student'`,
+    [coachingId, branchId]
   );
   const studentUsage = getStudentUsage(Number(currentStudents?.total_students || 0), coaching);
   if (studentUsage.limit !== null && rows.length > studentUsage.remaining) {
@@ -5286,8 +5330,8 @@ app.post('/admin/students/import', requireCoachingAdmin, async (req, res) => {
     }
 
     const existing = await get(
-      `SELECT id FROM users WHERE coaching_id = ? AND roll_no = ? LIMIT 1`,
-      [coachingId, rollNo]
+      `SELECT id FROM users WHERE coaching_id = ? AND branch_id = ? AND roll_no = ? LIMIT 1`,
+      [coachingId, branchId, rollNo]
     );
     if (existing) {
       summary.skipped += 1;
@@ -5302,11 +5346,12 @@ app.post('/admin/students/import', requireCoachingAdmin, async (req, res) => {
 
     await run(
       `INSERT INTO users (
-        coaching_id, role, is_owner, username, roll_no, name, batch_id, standard, course,
+        coaching_id, branch_id, role, is_owner, username, roll_no, name, batch_id, standard, course,
         contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number, email, password_hash
-      ) VALUES (?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, 'student', 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         coachingId,
+        branchId,
         rollNo,
         name,
         batch.id,
@@ -5334,6 +5379,7 @@ app.post('/admin/students/import', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/batches', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const batchName = normalizeBatchName(req.body.batchName);
 
   if (!batchName) {
@@ -5344,8 +5390,8 @@ app.post('/admin/batches', requireCoachingAdmin, async (req, res) => {
   const normalizedName = batchName.toLowerCase();
   const meta = extractBatchMeta(batchName);
   const existing = await get(
-    `SELECT id FROM batches WHERE coaching_id = ? AND normalized_name = ? LIMIT 1`,
-    [coachingId, normalizedName]
+    `SELECT id FROM batches WHERE coaching_id = ? AND branch_id = ? AND normalized_name = ? LIMIT 1`,
+    [coachingId, branchId, normalizedName]
   );
 
   if (existing) {
@@ -5354,9 +5400,9 @@ app.post('/admin/batches', requireCoachingAdmin, async (req, res) => {
   }
 
   await run(
-    `INSERT INTO batches (coaching_id, name, normalized_name, standard, course, created_by)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [coachingId, batchName, normalizedName, meta.standard, meta.course, req.session.user.id]
+    `INSERT INTO batches (coaching_id, branch_id, name, normalized_name, standard, course, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [coachingId, branchId, batchName, normalizedName, meta.standard, meta.course, req.session.user.id]
   );
 
   await auditActor(req, 'batch_created', {
@@ -5369,6 +5415,7 @@ app.post('/admin/batches', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/batches/rename', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
   const newBatchName = normalizeBatchName(req.body.newBatchName);
 
@@ -5382,7 +5429,7 @@ app.post('/admin/batches/rename', requireCoachingAdmin, async (req, res) => {
     return res.redirect('/admin/dashboard?section=students');
   }
 
-  const batch = await getBatchForCoaching(coachingId, batchId);
+  const batch = await getBatchForCoaching(coachingId, branchId, batchId);
   if (!batch) {
     req.session.flash = { type: 'error', text: 'Batch not found' };
     return res.redirect('/admin/dashboard?section=students');
@@ -5397,9 +5444,9 @@ app.post('/admin/batches/rename', requireCoachingAdmin, async (req, res) => {
   const targetBatch = await get(
     `SELECT id, name
      FROM batches
-     WHERE coaching_id = ? AND normalized_name = ? AND id <> ?
+     WHERE coaching_id = ? AND branch_id = ? AND normalized_name = ? AND id <> ?
      LIMIT 1`,
-    [coachingId, normalizedName, batchId]
+    [coachingId, branchId, normalizedName, batchId]
   );
 
   if (targetBatch) {
@@ -5407,22 +5454,22 @@ app.post('/admin/batches/rename', requireCoachingAdmin, async (req, res) => {
       await tx.run(
         `UPDATE users
          SET batch_id = ?, standard = ?, course = ?
-         WHERE coaching_id = ? AND role = 'student' AND batch_id = ?`,
-        [targetBatch.id, meta.standard, meta.course, coachingId, batchId]
+         WHERE coaching_id = ? AND branch_id = ? AND role = 'student' AND batch_id = ?`,
+        [targetBatch.id, meta.standard, meta.course, coachingId, branchId, batchId]
       );
       await tx.run(
         `UPDATE batch_notes
          SET batch_id = ?, standard = ?, course = ?
-         WHERE coaching_id = ? AND batch_id = ?`,
-        [targetBatch.id, meta.standard, meta.course, coachingId, batchId]
+         WHERE coaching_id = ? AND branch_id = ? AND batch_id = ?`,
+        [targetBatch.id, meta.standard, meta.course, coachingId, branchId, batchId]
       );
       await tx.run(
         `UPDATE answer_upload_requests
          SET batch_id = ?, standard = ?, course = ?
-         WHERE coaching_id = ? AND batch_id = ?`,
-        [targetBatch.id, meta.standard, meta.course, coachingId, batchId]
+         WHERE coaching_id = ? AND branch_id = ? AND batch_id = ?`,
+        [targetBatch.id, meta.standard, meta.course, coachingId, branchId, batchId]
       );
-      await tx.run(`DELETE FROM batches WHERE coaching_id = ? AND id = ?`, [coachingId, batchId]);
+      await tx.run(`DELETE FROM batches WHERE coaching_id = ? AND branch_id = ? AND id = ?`, [coachingId, branchId, batchId]);
     });
 
     req.session.flash = {
@@ -5440,27 +5487,27 @@ app.post('/admin/batches/rename', requireCoachingAdmin, async (req, res) => {
   await run(
     `UPDATE batches
      SET name = ?, normalized_name = ?, standard = ?, course = ?
-     WHERE coaching_id = ? AND id = ?`,
-    [newBatchName, normalizedName, meta.standard, meta.course, coachingId, batchId]
+     WHERE coaching_id = ? AND branch_id = ? AND id = ?`,
+    [newBatchName, normalizedName, meta.standard, meta.course, coachingId, branchId, batchId]
   );
 
   await run(
     `UPDATE users
      SET standard = ?, course = ?
-     WHERE coaching_id = ? AND role = 'student' AND batch_id = ?`,
-    [meta.standard, meta.course, coachingId, batchId]
+     WHERE coaching_id = ? AND branch_id = ? AND role = 'student' AND batch_id = ?`,
+    [meta.standard, meta.course, coachingId, branchId, batchId]
   );
   await run(
     `UPDATE batch_notes
      SET standard = ?, course = ?
-     WHERE coaching_id = ? AND batch_id = ?`,
-    [meta.standard, meta.course, coachingId, batchId]
+     WHERE coaching_id = ? AND branch_id = ? AND batch_id = ?`,
+    [meta.standard, meta.course, coachingId, branchId, batchId]
   );
   await run(
     `UPDATE answer_upload_requests
      SET standard = ?, course = ?
-     WHERE coaching_id = ? AND batch_id = ?`,
-    [meta.standard, meta.course, coachingId, batchId]
+     WHERE coaching_id = ? AND branch_id = ? AND batch_id = ?`,
+    [meta.standard, meta.course, coachingId, branchId, batchId]
   );
 
   req.session.flash = {
@@ -5477,6 +5524,7 @@ app.post('/admin/batches/rename', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/batches/:id/delete', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const batchId = Number.parseInt(req.params.id, 10);
 
   if (!Number.isInteger(batchId) || batchId <= 0) {
@@ -5484,7 +5532,7 @@ app.post('/admin/batches/:id/delete', requireCoachingAdmin, async (req, res) => 
     return res.redirect('/admin/dashboard?section=students');
   }
 
-  const batch = await getBatchForCoaching(coachingId, batchId);
+  const batch = await getBatchForCoaching(coachingId, branchId, batchId);
   if (!batch) {
     req.session.flash = { type: 'error', text: 'Batch not found' };
     return res.redirect('/admin/dashboard?section=students');
@@ -5497,8 +5545,8 @@ app.post('/admin/batches/:id/delete', requireCoachingAdmin, async (req, res) => 
   const linkedStudents = await get(
     `SELECT COUNT(*) AS total_students
      FROM users
-     WHERE coaching_id = ? AND role = 'student' AND batch_id = ?`,
-    [coachingId, batchId]
+     WHERE coaching_id = ? AND branch_id = ? AND role = 'student' AND batch_id = ?`,
+    [coachingId, branchId, batchId]
   );
 
   if (Number(linkedStudents?.total_students || 0) > 0) {
@@ -5513,22 +5561,22 @@ app.post('/admin/batches/:id/delete', requireCoachingAdmin, async (req, res) => 
     const answerRequests = await tx.all(
       `SELECT id
        FROM answer_upload_requests
-       WHERE coaching_id = ? AND batch_id = ?`,
-      [coachingId, batchId]
+       WHERE coaching_id = ? AND branch_id = ? AND batch_id = ?`,
+      [coachingId, branchId, batchId]
     );
 
     for (const request of answerRequests) {
       await tx.run(
         `UPDATE test_papers
          SET answer_request_id = NULL
-         WHERE coaching_id = ? AND answer_request_id = ?`,
-        [coachingId, request.id]
+         WHERE coaching_id = ? AND branch_id = ? AND answer_request_id = ?`,
+        [coachingId, branchId, request.id]
       );
     }
 
-    await tx.run(`DELETE FROM batch_notes WHERE coaching_id = ? AND batch_id = ?`, [coachingId, batchId]);
-    await tx.run(`DELETE FROM answer_upload_requests WHERE coaching_id = ? AND batch_id = ?`, [coachingId, batchId]);
-    await tx.run(`DELETE FROM batches WHERE coaching_id = ? AND id = ?`, [coachingId, batchId]);
+    await tx.run(`DELETE FROM batch_notes WHERE coaching_id = ? AND branch_id = ? AND batch_id = ?`, [coachingId, branchId, batchId]);
+    await tx.run(`DELETE FROM answer_upload_requests WHERE coaching_id = ? AND branch_id = ? AND batch_id = ?`, [coachingId, branchId, batchId]);
+    await tx.run(`DELETE FROM batches WHERE coaching_id = ? AND branch_id = ? AND id = ?`, [coachingId, branchId, batchId]);
   });
 
   await auditActor(req, 'batch_deleted', {
@@ -5542,8 +5590,9 @@ app.post('/admin/batches/:id/delete', requireCoachingAdmin, async (req, res) => 
 
 app.post('/admin/batches/:id/complete', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const batchId = Number.parseInt(req.params.id, 10);
-  const batch = await getBatchForCoaching(coachingId, batchId);
+  const batch = await getBatchForCoaching(coachingId, branchId, batchId);
 
   if (!batch || batch.is_retention_batch) {
     req.session.flash = { type: 'error', text: 'Batch not found' };
@@ -5553,8 +5602,8 @@ app.post('/admin/batches/:id/complete', requireCoachingAdmin, async (req, res) =
   await run(
     `UPDATE batches
      SET status = 'completed', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
-     WHERE coaching_id = ? AND id = ?`,
-    [coachingId, batchId]
+     WHERE coaching_id = ? AND branch_id = ? AND id = ?`,
+    [coachingId, branchId, batchId]
   );
 
   await auditActor(req, 'batch_completed', {
@@ -5568,8 +5617,9 @@ app.post('/admin/batches/:id/complete', requireCoachingAdmin, async (req, res) =
 
 app.post('/admin/batches/:id/activate', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const batchId = Number.parseInt(req.params.id, 10);
-  const batch = await getBatchForCoaching(coachingId, batchId);
+  const batch = await getBatchForCoaching(coachingId, branchId, batchId);
 
   if (!batch || batch.is_retention_batch) {
     req.session.flash = { type: 'error', text: 'Batch not found' };
@@ -5579,8 +5629,8 @@ app.post('/admin/batches/:id/activate', requireCoachingAdmin, async (req, res) =
   await run(
     `UPDATE batches
      SET status = 'active', completed_at = NULL
-     WHERE coaching_id = ? AND id = ?`,
-    [coachingId, batchId]
+     WHERE coaching_id = ? AND branch_id = ? AND id = ?`,
+    [coachingId, branchId, batchId]
   );
 
   await auditActor(req, 'batch_reactivated', {
@@ -5594,9 +5644,10 @@ app.post('/admin/batches/:id/activate', requireCoachingAdmin, async (req, res) =
 
 app.post('/admin/batches/:id/retain-student', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const batchId = Number.parseInt(req.params.id, 10);
   const studentId = Number.parseInt(String(req.body.studentId || '').trim(), 10);
-  const batch = await getBatchForCoaching(coachingId, batchId);
+  const batch = await getBatchForCoaching(coachingId, branchId, batchId);
 
   if (!batch || batch.is_retention_batch || batch.status !== 'completed') {
     req.session.flash = { type: 'error', text: 'Only completed batches can move retained students.' };
@@ -5606,9 +5657,9 @@ app.post('/admin/batches/:id/retain-student', requireCoachingAdmin, async (req, 
   const student = await get(
     `SELECT id, roll_no, name, batch_id, is_retained_record
      FROM users
-     WHERE id = ? AND coaching_id = ? AND role = 'student'
+     WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'student'
      LIMIT 1`,
-    [studentId, coachingId]
+    [studentId, coachingId, branchId]
   );
 
   if (!student || Number(student.batch_id || 0) !== batchId || student.is_retained_record) {
@@ -5619,8 +5670,8 @@ app.post('/admin/batches/:id/retain-student', requireCoachingAdmin, async (req, 
   const retainedCount = await get(
     `SELECT COUNT(*) AS total
      FROM users
-     WHERE coaching_id = ? AND role = 'student' AND is_retained_record = 1 AND retention_source_batch_id = ?`,
-    [coachingId, batchId]
+     WHERE coaching_id = ? AND branch_id = ? AND role = 'student' AND is_retained_record = 1 AND retention_source_batch_id = ?`,
+    [coachingId, branchId, batchId]
   );
 
   if (Number(retainedCount?.total || 0) >= RETENTION_MAX_STUDENTS_PER_SOURCE_BATCH) {
@@ -5628,12 +5679,12 @@ app.post('/admin/batches/:id/retain-student', requireCoachingAdmin, async (req, 
     return res.redirect('/admin/dashboard?section=students');
   }
 
-  const retentionBatch = await ensureRetentionBatch(coachingId, req.session.user.id);
+  const retentionBatch = await ensureRetentionBatch(coachingId, branchId, req.session.user.id);
   await run(
     `UPDATE users
      SET batch_id = ?, standard = NULL, course = NULL, is_retained_record = 1, retention_source_batch_id = ?
-     WHERE id = ? AND coaching_id = ?`,
-    [retentionBatch.id, batchId, studentId, coachingId]
+     WHERE id = ? AND coaching_id = ? AND branch_id = ?`,
+    [retentionBatch.id, batchId, studentId, coachingId, branchId]
   );
 
   await auditActor(req, 'student_moved_to_retention', {
@@ -5657,9 +5708,10 @@ app.get('/admin/search-student', requireCoachingAdmin, async (req, res) => {
 
 app.get('/admin/students/:id/overview', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const studentId = Number(req.params.id);
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
-  const dashboard = await getStudentDashboardPayload(coachingId, studentId);
+  const dashboard = await getStudentDashboardPayload(coachingId, branchId, studentId);
 
   if (!dashboard.profile) {
     req.session.flash = { type: 'error', text: 'Student not found' };
@@ -5687,13 +5739,14 @@ app.get('/admin/students/:id/overview', requireCoachingAdmin, async (req, res) =
 
 app.post('/admin/students/:id/update', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const studentId = Number(req.params.id);
   const student = await get(
     `SELECT id
      FROM users
-     WHERE id = ? AND coaching_id = ? AND role = 'student'
+     WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'student'
      LIMIT 1`,
-    [studentId, coachingId]
+    [studentId, coachingId, branchId]
   );
 
   if (!student) {
@@ -5711,7 +5764,7 @@ app.post('/admin/students/:id/update', requireCoachingAdmin, async (req, res) =>
   await run(
     `UPDATE users
      SET name = ?, contact_phone = ?, guardian_phone = ?, whatsapp_number = ?, parent_whatsapp_number = ?, email = ?
-     WHERE id = ? AND coaching_id = ? AND role = 'student'`,
+     WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'student'`,
     [
       name || null,
       contactPhone || null,
@@ -5721,6 +5774,7 @@ app.post('/admin/students/:id/update', requireCoachingAdmin, async (req, res) =>
       email || null,
       studentId,
       coachingId,
+      branchId,
     ]
   );
 
@@ -5735,12 +5789,13 @@ app.post('/admin/students/:id/update', requireCoachingAdmin, async (req, res) =>
 
 app.post('/admin/students/:id/reset-password', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const studentId = Number(req.params.id);
   const student = await get(
     `SELECT id, roll_no
      FROM users
-     WHERE id = ? AND coaching_id = ? AND role = 'student'`,
-    [studentId, coachingId]
+     WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'student'`,
+    [studentId, coachingId, branchId]
   );
 
   if (!student) {
@@ -5749,7 +5804,7 @@ app.post('/admin/students/:id/reset-password', requireCoachingAdmin, async (req,
   }
 
   const passwordHash = await bcrypt.hash(student.roll_no, 10);
-  await run(`UPDATE users SET password_hash = ? WHERE id = ?`, [passwordHash, studentId]);
+  await run(`UPDATE users SET password_hash = ? WHERE id = ? AND branch_id = ?`, [passwordHash, studentId, branchId]);
 
   req.session.flash = {
     type: 'success',
@@ -5765,11 +5820,12 @@ app.post('/admin/students/:id/reset-password', requireCoachingAdmin, async (req,
 
 app.post('/admin/students/:id/delete', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const studentId = Number(req.params.id);
 
   const student = await get(
-    `SELECT id, roll_no FROM users WHERE id = ? AND coaching_id = ? AND role = 'student'`,
-    [studentId, coachingId]
+    `SELECT id, roll_no FROM users WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'student'`,
+    [studentId, coachingId, branchId]
   );
   if (!student) {
     req.session.flash = { type: 'error', text: 'Student not found' };
@@ -5779,16 +5835,16 @@ app.post('/admin/students/:id/delete', requireCoachingAdmin, async (req, res) =>
   const files = await all(
     `SELECT stored_name, storage_type, storage_key, public_url, content_type
      FROM test_papers
-     WHERE coaching_id = ? AND student_id = ?`,
-    [coachingId, studentId]
+     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?`,
+    [coachingId, branchId, studentId]
   );
 
-  await run(`DELETE FROM attendance WHERE coaching_id = ? AND student_id = ?`, [coachingId, studentId]);
-  await run(`DELETE FROM fees WHERE coaching_id = ? AND student_id = ?`, [coachingId, studentId]);
-  await run(`DELETE FROM notification_logs WHERE coaching_id = ? AND student_id = ?`, [coachingId, studentId]);
-  await run(`DELETE FROM whatsapp_logs WHERE coaching_id = ? AND student_id = ?`, [coachingId, studentId]);
-  await run(`DELETE FROM test_papers WHERE coaching_id = ? AND student_id = ?`, [coachingId, studentId]);
-  await run(`DELETE FROM users WHERE id = ? AND coaching_id = ?`, [studentId, coachingId]);
+  await run(`DELETE FROM attendance WHERE coaching_id = ? AND branch_id = ? AND student_id = ?`, [coachingId, branchId, studentId]);
+  await run(`DELETE FROM fees WHERE coaching_id = ? AND branch_id = ? AND student_id = ?`, [coachingId, branchId, studentId]);
+  await run(`DELETE FROM notification_logs WHERE coaching_id = ? AND branch_id = ? AND student_id = ?`, [coachingId, branchId, studentId]);
+  await run(`DELETE FROM whatsapp_logs WHERE coaching_id = ? AND branch_id = ? AND student_id = ?`, [coachingId, branchId, studentId]);
+  await run(`DELETE FROM test_papers WHERE coaching_id = ? AND branch_id = ? AND student_id = ?`, [coachingId, branchId, studentId]);
+  await run(`DELETE FROM users WHERE id = ? AND coaching_id = ? AND branch_id = ?`, [studentId, coachingId, branchId]);
 
   for (const file of files) {
     try {
@@ -5809,6 +5865,7 @@ app.post('/admin/students/:id/delete', requireCoachingAdmin, async (req, res) =>
 
 app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('paper'), async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const file = req.file;
   const rollNo = (req.body.rollNo || '').trim();
@@ -5825,8 +5882,8 @@ app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('pape
   const student = await get(
     `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number, batch_id, standard, course
      FROM users
-     WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
-    [coachingId, rollNo]
+     WHERE coaching_id = ? AND branch_id = ? AND role = 'student' AND roll_no = ?`,
+    [coachingId, branchId, rollNo]
   );
 
   if (!student) {
@@ -5844,8 +5901,8 @@ app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('pape
     linkedAnswerRequest = await get(
       `SELECT id, batch_id, standard, course, title
        FROM answer_upload_requests
-       WHERE id = ? AND coaching_id = ?`,
-      [answerRequestId, coachingId]
+       WHERE id = ? AND coaching_id = ? AND branch_id = ?`,
+      [answerRequestId, coachingId, branchId]
     );
     if (!linkedAnswerRequest) {
       req.session.flash = { type: 'error', text: 'Selected answer upload request was not found' };
@@ -5864,6 +5921,7 @@ app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('pape
 
   const result = await savePaperUpload({
     coachingId,
+    branchId,
     studentId: student.id,
     file,
     uploadedBy: req.session.user.id,
@@ -5898,6 +5956,7 @@ app.post('/admin/upload-paper-single', requireCoachingAdmin, upload.single('pape
 
 app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 100), async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const files = req.files || [];
 
@@ -5917,8 +5976,8 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
     }
 
     const student = await get(
-      `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number FROM users WHERE coaching_id = ? AND role = 'student' AND roll_no = ?`,
-      [coachingId, paperMeta.rollNo]
+      `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number FROM users WHERE coaching_id = ? AND branch_id = ? AND role = 'student' AND roll_no = ?`,
+      [coachingId, branchId, paperMeta.rollNo]
     );
 
     if (!student) {
@@ -5930,6 +5989,7 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
     try {
       const result = await savePaperUpload({
         coachingId,
+        branchId,
         studentId: student.id,
         file,
         uploadedBy: req.session.user.id,
@@ -6015,6 +6075,7 @@ app.get('/admin/papers/:id/debug', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/answer-requests', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
   const title = (req.body.title || '').trim();
   const description = (req.body.description || '').trim();
@@ -6025,7 +6086,7 @@ app.post('/admin/answer-requests', requireCoachingAdmin, async (req, res) => {
     return res.redirect('/admin/dashboard?section=overview');
   }
 
-  const batch = await getBatchForCoaching(coachingId, batchId);
+  const batch = await getBatchForCoaching(coachingId, branchId, batchId);
   if (!batch) {
     req.session.flash = { type: 'error', text: 'Selected batch was not found' };
     return res.redirect('/admin/dashboard?section=overview');
@@ -6046,10 +6107,11 @@ app.post('/admin/answer-requests', requireCoachingAdmin, async (req, res) => {
 
   await run(
     `INSERT INTO answer_upload_requests (
-      coaching_id, batch_id, standard, course, title, description, starts_at, ends_at, created_by
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      coaching_id, branch_id, batch_id, standard, course, title, description, starts_at, ends_at, created_by
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
+      branchId,
       batch.id,
       batch.standard || null,
       batch.course || null,
@@ -6075,6 +6137,7 @@ app.post('/admin/answer-requests', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/answer-requests/:id/delete', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const requestId = Number.parseInt(req.params.id, 10);
 
   if (!Number.isInteger(requestId) || requestId <= 0) {
@@ -6085,9 +6148,9 @@ app.post('/admin/answer-requests/:id/delete', requireCoachingAdmin, async (req, 
   const answerRequest = await get(
     `SELECT id, title, batch_id, standard, course, starts_at, ends_at
      FROM answer_upload_requests
-     WHERE coaching_id = ? AND id = ?
+     WHERE coaching_id = ? AND branch_id = ? AND id = ?
      LIMIT 1`,
-    [coachingId, requestId]
+    [coachingId, branchId, requestId]
   );
 
   if (!answerRequest) {
@@ -6105,13 +6168,13 @@ app.post('/admin/answer-requests/:id/delete', requireCoachingAdmin, async (req, 
     await tx.run(
       `UPDATE test_papers
        SET answer_request_id = NULL
-       WHERE coaching_id = ? AND answer_request_id = ?`,
-      [coachingId, requestId]
+       WHERE coaching_id = ? AND branch_id = ? AND answer_request_id = ?`,
+      [coachingId, branchId, requestId]
     );
     await tx.run(
       `DELETE FROM answer_upload_requests
-       WHERE coaching_id = ? AND id = ?`,
-      [coachingId, requestId]
+       WHERE coaching_id = ? AND branch_id = ? AND id = ?`,
+      [coachingId, branchId, requestId]
     );
   });
 
@@ -6131,6 +6194,7 @@ app.post('/admin/answer-requests/:id/delete', requireCoachingAdmin, async (req, 
 
 app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const rollNo = (req.body.rollNo || '').trim();
   const studentLookup = (req.body.studentLookup || '').trim();
@@ -6138,7 +6202,7 @@ app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
   const status = req.body.status;
   const notes = (req.body.notes || '').trim();
 
-  const { student, error: studentResolveError } = await resolveStudentForAdminEntry(coachingId, {
+  const { student, error: studentResolveError } = await resolveStudentForAdminEntry(coachingId, branchId, {
     rollNo,
     studentLookup,
   });
@@ -6148,20 +6212,20 @@ app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
   }
 
   const existing = await get(
-    `SELECT id FROM attendance WHERE coaching_id = ? AND student_id = ? AND attendance_date = ? LIMIT 1`,
-    [coachingId, student.id, attendanceDate]
+    `SELECT id FROM attendance WHERE coaching_id = ? AND branch_id = ? AND student_id = ? AND attendance_date = ? LIMIT 1`,
+    [coachingId, branchId, student.id, attendanceDate]
   );
 
   if (existing) {
     await run(
-      `UPDATE attendance SET status = ?, notes = ?, marked_by = ? WHERE id = ?`,
-      [status, notes, req.session.user.id, existing.id]
+      `UPDATE attendance SET status = ?, notes = ?, marked_by = ? WHERE id = ? AND branch_id = ?`,
+      [status, notes, req.session.user.id, existing.id, branchId]
     );
   } else {
     await run(
-      `INSERT INTO attendance (coaching_id, student_id, attendance_date, status, notes, marked_by)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [coachingId, student.id, attendanceDate, status, notes, req.session.user.id]
+      `INSERT INTO attendance (coaching_id, branch_id, student_id, attendance_date, status, notes, marked_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [coachingId, branchId, student.id, attendanceDate, status, notes, req.session.user.id]
     );
   }
 
@@ -6180,6 +6244,7 @@ app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
   const attendanceDate = req.body.attendanceDate;
@@ -6190,7 +6255,7 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
     return res.redirect('/admin/dashboard?section=attendance');
   }
 
-  const batch = await getBatchForCoaching(coachingId, batchId);
+  const batch = await getBatchForCoaching(coachingId, branchId, batchId);
   if (!batch) {
     req.session.flash = { type: 'error', text: 'Selected batch was not found' };
     return res.redirect('/admin/dashboard?section=attendance');
@@ -6204,9 +6269,9 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
   const students = await all(
     `SELECT id, roll_no, name, guardian_phone, parent_whatsapp_number
      FROM users
-     WHERE coaching_id = ? AND role = 'student' AND batch_id = ?
+     WHERE coaching_id = ? AND branch_id = ? AND role = 'student' AND batch_id = ?
      ORDER BY roll_no ASC`,
-    [coachingId, batch.id]
+    [coachingId, branchId, batch.id]
   );
 
   if (!students.length) {
@@ -6222,8 +6287,8 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
     ? await all(
       `SELECT id, student_id
        FROM attendance
-       WHERE coaching_id = ? AND attendance_date = ? AND student_id = ANY(?::int[])`,
-      [coachingId, attendanceDate, studentIds]
+       WHERE coaching_id = ? AND branch_id = ? AND attendance_date = ? AND student_id = ANY(?::int[])`,
+      [coachingId, branchId, attendanceDate, studentIds]
     )
     : [];
   const existingByStudentId = new Map(existingRows.map((row) => [Number(row.student_id), row]));
@@ -6237,14 +6302,14 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
 
     if (existing) {
       await run(
-        `UPDATE attendance SET status = ?, notes = ?, marked_by = ? WHERE id = ?`,
-        [nextStatus, notes, req.session.user.id, existing.id]
+        `UPDATE attendance SET status = ?, notes = ?, marked_by = ? WHERE id = ? AND branch_id = ?`,
+        [nextStatus, notes, req.session.user.id, existing.id, branchId]
       );
     } else {
       await run(
-        `INSERT INTO attendance (coaching_id, student_id, attendance_date, status, notes, marked_by)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [coachingId, student.id, attendanceDate, nextStatus, notes, req.session.user.id]
+        `INSERT INTO attendance (coaching_id, branch_id, student_id, attendance_date, status, notes, marked_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [coachingId, branchId, student.id, attendanceDate, nextStatus, notes, req.session.user.id]
       );
     }
 
@@ -6267,6 +6332,7 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const rollNo = (req.body.rollNo || '').trim();
   const studentLookup = (req.body.studentLookup || '').trim();
   const amount = Number(req.body.amount);
@@ -6275,7 +6341,7 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
   const status = req.body.status;
   const notes = (req.body.notes || '').trim();
 
-  const { student, error: studentResolveError } = await resolveStudentForAdminEntry(coachingId, {
+  const { student, error: studentResolveError } = await resolveStudentForAdminEntry(coachingId, branchId, {
     rollNo,
     studentLookup,
   });
@@ -6290,9 +6356,9 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
   }
 
   const feeResult = await run(
-    `INSERT INTO fees (coaching_id, student_id, amount, due_date, payment_date, status, notes, added_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [coachingId, student.id, amount, dueDate, paymentDate, status, notes, req.session.user.id]
+    `INSERT INTO fees (coaching_id, branch_id, student_id, amount, due_date, payment_date, status, notes, added_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [coachingId, branchId, student.id, amount, dueDate, paymentDate, status, notes, req.session.user.id]
   );
 
   const fee = {
@@ -6306,7 +6372,7 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   try {
     if (status === 'paid') {
-      const feeSummary = await applyStudentPayment({ coachingId, studentId: student.id, amount });
+      const feeSummary = await applyStudentPayment({ coachingId, branchId, studentId: student.id, amount });
       const feePaidMessage = [
         `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
         '✅ Payment Received',
@@ -6390,11 +6456,11 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
         }
       }
     } else if (status === 'overdue') {
-      const feeSummary = await setStudentTotalFee({ coachingId, studentId: student.id, totalFee: amount });
+      const feeSummary = await setStudentTotalFee({ coachingId, branchId, studentId: student.id, totalFee: amount });
       fee.feeSummary = feeSummary;
       await sendOverdueReminder({ coachingId, student, fee, coaching });
     } else if (status === 'pending') {
-      const feeSummary = await setStudentTotalFee({ coachingId, studentId: student.id, totalFee: amount });
+      const feeSummary = await setStudentTotalFee({ coachingId, branchId, studentId: student.id, totalFee: amount });
       fee.feeSummary = feeSummary;
       if (dueDate) {
         const dueMs = new Date(dueDate).getTime() - Date.now();
@@ -6424,6 +6490,7 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/notes', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const noticeTarget = String(req.body.noticeTarget || 'batch').trim();
   const batchId = Number.parseInt(String(req.body.batchId || '').trim(), 10);
   const selectedStudentIds = Array.isArray(req.body.studentIds)
@@ -6444,7 +6511,7 @@ app.post('/admin/notes', requireCoachingAdmin, async (req, res) => {
   }
 
   if (noticeTarget === 'batch') {
-    batch = await getBatchForCoaching(coachingId, batchId);
+    batch = await getBatchForCoaching(coachingId, branchId, batchId);
     if (!batch) {
       req.session.flash = { type: 'error', text: 'Selected batch was not found' };
       return res.redirect('/admin/dashboard?section=notes');
@@ -6472,10 +6539,11 @@ app.post('/admin/notes', requireCoachingAdmin, async (req, res) => {
   }
 
   const noteResult = await run(
-    `INSERT INTO batch_notes (coaching_id, batch_id, standard, course, title, resource_url, description, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO batch_notes (coaching_id, branch_id, batch_id, standard, course, title, resource_url, description, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       coachingId,
+      branchId,
       batch?.id || null,
       batch?.standard || null,
       batch?.course || null,
@@ -6486,11 +6554,11 @@ app.post('/admin/notes', requireCoachingAdmin, async (req, res) => {
     ]
   );
 
-  const recipientParams = [coachingId];
+  const recipientParams = [coachingId, branchId];
   let recipientSql = `
     SELECT id, roll_no, name, contact_phone, whatsapp_number
     FROM users
-    WHERE coaching_id = ? AND role = 'student'
+    WHERE coaching_id = ? AND branch_id = ? AND role = 'student'
   `;
   if (noticeTarget === 'batch') {
     recipientParams.push(batch.id);
@@ -6545,6 +6613,7 @@ app.post('/admin/notes', requireCoachingAdmin, async (req, res) => {
 
 app.post('/student/upload-paper', requireStudent, upload.single('paper'), async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const studentId = req.session.user.id;
   const file = req.file;
   const testLabel = (req.body.testLabel || '').trim();
@@ -6563,6 +6632,7 @@ app.post('/student/upload-paper', requireStudent, upload.single('paper'), async 
 
   const result = await savePaperUpload({
     coachingId,
+    branchId,
     studentId,
     file,
     uploadedBy: studentId,
@@ -6588,6 +6658,7 @@ app.post('/student/upload-paper', requireStudent, upload.single('paper'), async 
 
 app.post('/student/answer-requests/:id/upload', requireStudent, upload.single('paper'), async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const studentId = req.session.user.id;
   const requestId = Number(req.params.id);
   const file = req.file;
@@ -6605,8 +6676,8 @@ app.post('/student/answer-requests/:id/upload', requireStudent, upload.single('p
   }
 
   const student = await get(
-    `SELECT id, batch_id, standard, course FROM users WHERE id = ? AND coaching_id = ? AND role = 'student'`,
-    [studentId, coachingId]
+    `SELECT id, batch_id, standard, course FROM users WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'student'`,
+    [studentId, coachingId, branchId]
   );
   if (!student) {
     req.session.flash = { type: 'error', text: 'Student account not found' };
@@ -6616,8 +6687,8 @@ app.post('/student/answer-requests/:id/upload', requireStudent, upload.single('p
   const answerRequest = await get(
     `SELECT id, title, batch_id, standard, course, starts_at, ends_at
      FROM answer_upload_requests
-     WHERE id = ? AND coaching_id = ?`,
-    [requestId, coachingId]
+     WHERE id = ? AND coaching_id = ? AND branch_id = ?`,
+    [requestId, coachingId, branchId]
   );
   if (!answerRequest) {
     req.session.flash = { type: 'error', text: 'Answer upload request not found' };
@@ -6641,6 +6712,7 @@ app.post('/student/answer-requests/:id/upload', requireStudent, upload.single('p
 
   const result = await savePaperUpload({
     coachingId,
+    branchId,
     studentId,
     file,
     uploadedBy: studentId,
@@ -6693,40 +6765,41 @@ app.post('/papers/:id/delete', requireAuth, async (req, res) => {
 
 app.get('/student/dashboard', requireStudent, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const subscriptionState = req.subscriptionState || getSubscriptionState(coaching);
-  const dashboard = await getStudentDashboardPayload(coachingId, req.session.user.id);
+  const dashboard = await getStudentDashboardPayload(coachingId, branchId, req.session.user.id);
   const profile = dashboard.profile;
 
   const answerRequests = profile?.batch_id
     ? await all(
       `SELECT ar.id, ar.title, ar.description, ar.starts_at, ar.ends_at, ar.created_at, ar.batch_id, b.name AS batch_name
        FROM answer_upload_requests ar
-       LEFT JOIN batches b ON b.id = ar.batch_id
-       WHERE ar.coaching_id = ? AND ar.batch_id = ?
+       LEFT JOIN batches b ON b.id = ar.batch_id AND b.branch_id = ar.branch_id
+       WHERE ar.coaching_id = ? AND ar.branch_id = ? AND ar.batch_id = ?
        ORDER BY ar.created_at DESC
        LIMIT 12`,
-      [coachingId, profile.batch_id]
+      [coachingId, branchId, profile.batch_id]
     )
     : profile?.standard || profile?.course
       ? await all(
         `SELECT id, title, description, starts_at, ends_at, created_at, batch_id
          FROM answer_upload_requests
-         WHERE coaching_id = ?
+         WHERE coaching_id = ? AND branch_id = ?
            AND COALESCE(standard, '') = COALESCE(?, '')
            AND COALESCE(course, '') = COALESCE(?, '')
          ORDER BY created_at DESC
          LIMIT 12`,
-        [coachingId, profile.standard || null, profile.course || null]
+        [coachingId, branchId, profile.standard || null, profile.course || null]
       )
       : [];
 
   const submissions = await all(
     `SELECT id, answer_request_id, upload_date, original_name
      FROM test_papers
-     WHERE coaching_id = ? AND student_id = ? AND answer_request_id IS NOT NULL
+     WHERE coaching_id = ? AND branch_id = ? AND student_id = ? AND answer_request_id IS NOT NULL
      ORDER BY upload_date DESC`,
-    [coachingId, req.session.user.id]
+    [coachingId, branchId, req.session.user.id]
   );
 
   const latestSubmissionByRequest = new Map();

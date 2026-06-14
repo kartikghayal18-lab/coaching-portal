@@ -474,10 +474,10 @@ async function findStudentByParentSession(coachingId, phone, branchId = null) {
     `SELECT u.id, u.coaching_id, u.roll_no, u.name, u.contact_phone, u.guardian_phone,
             u.whatsapp_number, u.parent_whatsapp_number, b.name AS batch_name
      FROM users u
-     LEFT JOIN batches b ON b.id = u.batch_id
-     WHERE u.coaching_id = ? AND u.role = 'student' AND u.id = ?
+     LEFT JOIN batches b ON b.id = u.batch_id AND b.branch_id = u.branch_id
+     WHERE u.coaching_id = ? AND u.branch_id = ? AND u.role = 'student' AND u.id = ?
      LIMIT 1`,
-    [coachingId, session.student_id]
+    [coachingId, session.branch_id, session.student_id]
   );
 }
 
@@ -550,14 +550,14 @@ function normalizeParentOption(text) {
   return command.toUpperCase();
 }
 
-async function buildStudentPerformance(coachingId, studentId) {
+async function buildStudentPerformance(coachingId, branchId, studentId) {
   const papers = await all(
     `SELECT id, original_name, upload_date, marks_obtained, max_marks, test_label,
             stored_name, storage_type, storage_key, public_url, content_type
      FROM test_papers
-     WHERE coaching_id = ? AND student_id = ?
+     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
      ORDER BY upload_date DESC`,
-    [coachingId, studentId]
+    [coachingId, branchId, studentId]
   );
   const { markedPapers, progressSeries, marksSummary } = buildProgressSummaryFromPapers(papers);
   return {
@@ -575,11 +575,11 @@ async function sendLatestPaper(student, phone) {
   const paper = await get(
     `SELECT id, original_name, stored_name, storage_type, storage_key, public_url, content_type
      FROM test_papers
-     WHERE coaching_id = ? AND student_id = ?
+     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
        AND (marks_obtained IS NULL OR max_marks IS NULL)
      ORDER BY upload_date DESC, id DESC
      LIMIT 1`,
-    [student.coaching_id, student.id]
+    [student.coaching_id, student.branch_id, student.id]
   );
   const document = await getPaperDocument(paper);
   if (!document?.fileUrl) return false;
@@ -595,11 +595,11 @@ async function sendLatestResult(student, phone) {
     `SELECT id, original_name, stored_name, storage_type, storage_key, public_url, content_type,
             upload_date, marks_obtained, max_marks, test_label
      FROM test_papers
-     WHERE coaching_id = ? AND student_id = ?
+     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
        AND marks_obtained IS NOT NULL AND max_marks IS NOT NULL
      ORDER BY upload_date DESC, id DESC
      LIMIT 1`,
-    [student.coaching_id, student.id]
+    [student.coaching_id, student.branch_id, student.id]
   );
   if (!paper) return false;
   const percentage = Number(paper.max_marks) > 0
@@ -878,17 +878,17 @@ async function createMonthlyReportAndSend({ student, coaching, phone, monthKey }
     `SELECT COUNT(*) AS total,
             SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) AS present_count
      FROM attendance
-     WHERE coaching_id = ? AND student_id = ?
+     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
        AND CAST(attendance_date AS TEXT) LIKE ?`,
-    [student.coaching_id, student.id, `${monthKey}%`]
+    [student.coaching_id, student.branch_id, student.id, `${monthKey}%`]
   );
   const pending = await get(
     `SELECT COALESCE(SUM(amount), 0) AS pending_amount
      FROM fees
-     WHERE coaching_id = ? AND student_id = ? AND status IN ('pending', 'overdue')`,
-    [student.coaching_id, student.id]
+     WHERE coaching_id = ? AND branch_id = ? AND student_id = ? AND status IN ('pending', 'overdue')`,
+    [student.coaching_id, student.branch_id, student.id]
   );
-  const performance = await buildStudentPerformance(student.coaching_id, student.id);
+  const performance = await buildStudentPerformance(student.coaching_id, student.branch_id, student.id);
   const totalAttendance = Number(attendanceSummary?.total || 0);
   const present = Number(attendanceSummary?.present_count || 0);
   const attendancePercent = totalAttendance ? Number(((present / totalAttendance) * 100).toFixed(1)) : 0;
@@ -952,8 +952,8 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
     } else if (normalizedOption === 'FEES') {
       console.log('Before FEES block');
       console.log('[HANDLER] Enter FEES');
-      const feeSummary = await getStudentFeeSummary(student.coaching_id, student.id);
-      const nextDueDate = await getNextDueDate(student.coaching_id, student.id);
+      const feeSummary = await getStudentFeeSummary(student.coaching_id, student.branch_id, student.id);
+      const nextDueDate = await getNextDueDate(student.coaching_id, student.branch_id, student.id);
       const notificationResult = await sendWhatsAppNotification({
         studentId: student.id,
         phone,
@@ -991,8 +991,8 @@ async function handleParentAssistantMessage({ coaching, student, from, text }) {
                 SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) AS absent_count,
                 SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) AS late_count
          FROM attendance
-         WHERE coaching_id = ? AND student_id = ?`,
-        [student.coaching_id, student.id]
+         WHERE coaching_id = ? AND branch_id = ? AND student_id = ?`,
+        [student.coaching_id, student.branch_id, student.id]
       );
       const total = Number(summary?.total || 0);
       const present = Number(summary?.present_count || 0);

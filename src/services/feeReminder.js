@@ -24,7 +24,11 @@ function formatWhatsAppAmount(value) {
 }
 
 async function buildFeeReminderMessage({ student, fee, coaching, reminderType }) {
-  const feeSummary = fee.feeSummary || await getStudentFeeSummary(student.coaching_id || coaching?.coaching_id || coaching?.id, student.id);
+  const feeSummary = fee.feeSummary || await getStudentFeeSummary(
+    student.coaching_id || coaching?.coaching_id || coaching?.id,
+    student.branch_id,
+    student.id
+  );
   return compactWhatsAppMessage([
     `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
     '',

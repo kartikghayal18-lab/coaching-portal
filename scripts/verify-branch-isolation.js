@@ -1,7 +1,7 @@
 require('../config/env');
 
 const { all, get, closePool } = require('../config/database');
-const { runWithBranchContext } = require('../src/branch-context');
+const { getCurrentBranchId, runWithBranchContext } = require('../src/branch-context');
 
 const ISOLATED_TABLES = [
   'users',
@@ -18,36 +18,79 @@ const ISOLATED_TABLES = [
   'student_fee_structure',
 ];
 
-async function verifyBranch(branch, otherBranch) {
-  return runWithBranchContext({ branchId: branch.id, isSuperAdmin: false }, async () => {
-    const visibleBranch = await get(`SELECT id, name FROM branches WHERE id = ?`, [branch.id]);
-    const hiddenBranch = await get(`SELECT id FROM branches WHERE id = ?`, [otherBranch.id]);
-    if (!visibleBranch || hiddenBranch) {
-      throw new Error(`Branch table isolation failed for ${branch.name}`);
-    }
+function verifySessionHelper(branch) {
+  const resolved = getCurrentBranchId({
+    session: {
+      user: {
+        branchId: branch.id,
+      },
+    },
+  });
+  if (resolved !== Number(branch.id)) {
+    throw new Error(`Session branch helper failed for ${branch.name}`);
+  }
+}
 
-    for (const tableName of ISOLATED_TABLES) {
-      const leaked = await get(
-        `SELECT COUNT(*) AS total FROM ${tableName} WHERE branch_id <> ?`,
-        [branch.id]
-      );
-      if (Number(leaked?.total || 0) !== 0) {
-        throw new Error(`${tableName} leaked cross-branch rows for ${branch.name}`);
-      }
+async function verifyBranch(branch, otherBranch) {
+  verifySessionHelper(branch);
+
+  return runWithBranchContext({ branchId: branch.id, isSuperAdmin: false }, async () => {
+    const visibleBranch = await get(
+      `SELECT id, name FROM branches WHERE id = ? AND coaching_id = ?`,
+      [branch.id, branch.coaching_id]
+    );
+    const hiddenBranch = await get(
+      `SELECT id FROM branches WHERE id = ? AND id = ?`,
+      [otherBranch.id, branch.id]
+    );
+    if (!visibleBranch || hiddenBranch) {
+      throw new Error(`Branch identity check failed for ${branch.name}`);
     }
 
     const counts = {};
     for (const tableName of ISOLATED_TABLES) {
-      const row = await get(`SELECT COUNT(*) AS total FROM ${tableName}`, []);
-      counts[tableName] = Number(row?.total || 0);
+      const rows = await all(
+        `SELECT id, branch_id FROM ${tableName} WHERE branch_id = ?`,
+        [branch.id]
+      );
+      const leaked = rows.find((row) => Number(row.branch_id) !== Number(branch.id));
+      if (leaked) {
+        throw new Error(`${tableName} returned a cross-branch row for ${branch.name}`);
+      }
+
+      const otherRecord = await get(
+        `SELECT id FROM ${tableName} WHERE branch_id = ? ORDER BY id LIMIT 1`,
+        [otherBranch.id]
+      );
+      if (otherRecord) {
+        const manipulatedLookup = await get(
+          `SELECT id FROM ${tableName} WHERE id = ? AND branch_id = ?`,
+          [otherRecord.id, branch.id]
+        );
+        if (manipulatedLookup) {
+          throw new Error(`${tableName} allowed a cross-branch ID lookup for ${branch.name}`);
+        }
+      }
+
+      counts[tableName] = rows.length;
     }
     return counts;
   });
 }
 
 async function main() {
+  let rejectedMissingBranch = false;
+  try {
+    getCurrentBranchId({ session: { user: {} } });
+  } catch (error) {
+    rejectedMissingBranch = error.status === 403;
+  }
+  if (!rejectedMissingBranch) {
+    throw new Error('getCurrentBranchId must reject a missing branch session');
+  }
+
   const branches = await runWithBranchContext({ isSuperAdmin: true }, () => all(
-    `SELECT b.id, b.code, b.name
+    `SELECT b.id, b.coaching_id, b.code, b.name
      FROM branches b
      JOIN coaching_classes cc ON cc.id = b.coaching_id
      WHERE cc.slug = 'scc' AND b.code IN ('satpur', 'meri')
@@ -61,7 +104,7 @@ async function main() {
   for (const branch of branches) {
     const otherBranch = branches.find((candidate) => candidate.id !== branch.id);
     const counts = await verifyBranch(branch, otherBranch);
-    console.log(`${branch.name}: isolation passed`, counts);
+    console.log(`${branch.name}: explicit branch isolation passed`, counts);
   }
 }
 

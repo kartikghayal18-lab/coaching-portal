@@ -95,20 +95,20 @@ async function ensureWhatsAppSchema() {
   `);
 }
 
-async function getWhatsAppSettings(coachingId) {
-  const row = coachingId
-    ? await get(`SELECT * FROM whatsapp_settings WHERE coaching_id = ? LIMIT 1`, [coachingId])
+async function getWhatsAppSettings(coachingId, branchId) {
+  const row = coachingId && branchId
+    ? await get(`SELECT * FROM whatsapp_settings WHERE coaching_id = ? AND branch_id = ? LIMIT 1`, [coachingId, branchId])
     : null;
   return normalizeSettings(row);
 }
 
-async function saveWhatsAppSettings(coachingId, settings, updatedBy = null) {
+async function saveWhatsAppSettings(coachingId, branchId, settings, updatedBy = null) {
   await run(
     `INSERT INTO whatsapp_settings (
       coaching_id, branch_id, access_token, phone_number_id, business_account_id, verify_token,
       attendance_alerts_enabled, fee_alerts_enabled, result_alerts_enabled, test_paper_alerts_enabled, notice_alerts_enabled,
       updated_by, updated_at
-    ) VALUES (?, app_current_branch_id(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT (branch_id)
     DO UPDATE SET
       access_token = EXCLUDED.access_token,
@@ -124,6 +124,7 @@ async function saveWhatsAppSettings(coachingId, settings, updatedBy = null) {
       updated_at = CURRENT_TIMESTAMP`,
     [
       coachingId,
+      branchId,
       String(settings.accessToken || '').trim(),
       String(settings.phoneNumberId || '').trim(),
       String(settings.businessAccountId || '').trim(),
@@ -239,11 +240,12 @@ async function sendMetaMessage({ settings, payload }) {
   }
 }
 
-async function sendTextMessage({ coachingId, studentId = null, to, message, settings = null }) {
+async function sendTextMessage({ coachingId, branchId = null, studentId = null, to, message, settings = null }) {
   const phoneNumber = cleanPhoneNumber(to);
   const messageContent = String(message || '').trim();
   const logId = await logWhatsAppMessage({
     coachingId,
+    branchId,
     studentId,
     phoneNumber,
     messageType: 'text',
@@ -252,7 +254,7 @@ async function sendTextMessage({ coachingId, studentId = null, to, message, sett
   });
 
   try {
-    const activeSettings = settings || await getWhatsAppSettings(coachingId);
+    const activeSettings = settings || await getWhatsAppSettings(coachingId, branchId);
     console.log('[WHATSAPP] Text payload:', {
       coachingId,
       studentId,
@@ -297,6 +299,7 @@ async function sendTextMessage({ coachingId, studentId = null, to, message, sett
 
 async function sendDocumentMessage({
   coachingId,
+  branchId = null,
   studentId = null,
   to,
   documentUrl,
@@ -308,6 +311,7 @@ async function sendDocumentMessage({
   const messageContent = caption || documentUrl;
   const logId = await logWhatsAppMessage({
     coachingId,
+    branchId,
     studentId,
     phoneNumber,
     messageType: 'document',
@@ -316,7 +320,7 @@ async function sendDocumentMessage({
   });
 
   try {
-    const activeSettings = settings || await getWhatsAppSettings(coachingId);
+    const activeSettings = settings || await getWhatsAppSettings(coachingId, branchId);
     console.log('WHATSAPP DOCUMENT SEND', {
       phone: phoneNumber,
       filename,
@@ -362,6 +366,7 @@ async function sendDocumentMessage({
 
 async function sendImageMessage({
   coachingId,
+  branchId = null,
   studentId = null,
   to,
   imageUrl,
@@ -372,6 +377,7 @@ async function sendImageMessage({
   const messageContent = caption || imageUrl;
   const logId = await logWhatsAppMessage({
     coachingId,
+    branchId,
     studentId,
     phoneNumber,
     messageType: 'image',
@@ -380,7 +386,7 @@ async function sendImageMessage({
   });
 
   try {
-    const activeSettings = settings || await getWhatsAppSettings(coachingId);
+    const activeSettings = settings || await getWhatsAppSettings(coachingId, branchId);
     const response = await sendMetaMessage({
       settings: activeSettings,
       payload: {
@@ -410,6 +416,7 @@ async function sendImageMessage({
 
 async function sendTemplateMessage({
   coachingId,
+  branchId = null,
   studentId = null,
   to,
   templateName,
@@ -421,6 +428,7 @@ async function sendTemplateMessage({
   const messageContent = `template:${templateName}`;
   const logId = await logWhatsAppMessage({
     coachingId,
+    branchId,
     studentId,
     phoneNumber,
     messageType: 'template',
@@ -429,7 +437,7 @@ async function sendTemplateMessage({
   });
 
   try {
-    const activeSettings = settings || await getWhatsAppSettings(coachingId);
+    const activeSettings = settings || await getWhatsAppSettings(coachingId, branchId);
     const response = await sendMetaMessage({
       settings: activeSettings,
       payload: {
@@ -458,14 +466,15 @@ async function sendTemplateMessage({
   }
 }
 
-async function sendBulkMessages({ coachingId, recipients, message, settings = null }) {
-  const activeSettings = settings || await getWhatsAppSettings(coachingId);
+async function sendBulkMessages({ coachingId, branchId, recipients, message, settings = null }) {
+  const activeSettings = settings || await getWhatsAppSettings(coachingId, branchId);
   const summary = { sent: 0, failed: 0, results: [] };
 
   for (const recipient of recipients) {
     try {
       const result = await sendTextMessage({
         coachingId,
+        branchId,
         studentId: recipient.studentId || recipient.id || null,
         to: recipient.phoneNumber || recipient.guardian_phone || recipient.contact_phone,
         message,
@@ -487,15 +496,15 @@ async function sendBulkMessages({ coachingId, recipients, message, settings = nu
   return summary;
 }
 
-async function getRecentWhatsAppLogs(coachingId, limit = 25) {
+async function getRecentWhatsAppLogs(coachingId, branchId, limit = 25) {
   return all(
     `SELECT wl.*, u.roll_no, u.name
      FROM whatsapp_logs wl
-     LEFT JOIN users u ON u.id = wl.student_id
-     WHERE wl.coaching_id = ?
+     LEFT JOIN users u ON u.id = wl.student_id AND u.branch_id = wl.branch_id
+     WHERE wl.coaching_id = ? AND wl.branch_id = ?
      ORDER BY wl.created_at DESC
      LIMIT ?`,
-    [coachingId, limit]
+    [coachingId, branchId, limit]
   );
 }
 
