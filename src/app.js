@@ -5267,15 +5267,11 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
       `Student: ${name}`,
       `Roll No: ${rollNo}`,
       `Batch: ${batch.name || 'Assigned batch'}`,
-    ];
-    if (createdFeeSummary) {
-      admissionMessageLines.push(`Total Fees: ₹${formatWhatsAppAmount(createdFeeSummary.totalFee)}`);
-      admissionMessageLines.push(`Pending Fees: ₹${formatWhatsAppAmount(createdFeeSummary.pendingFee)}`);
-    }
-    admissionMessageLines.push(
+      `Total Fees: ₹${formatWhatsAppAmount(createdFeeSummary?.totalFee || 0)}`,
+      `Pending Fees: ₹${formatWhatsAppAmount(createdFeeSummary?.pendingFee || 0)}`,
       'Your child is now registered successfully.',
       'Welcome to our coaching family.',
-    );
+    ];
     const admissionMessage = compactWhatsAppMessage(admissionMessageLines);
     const admissionTemplateName = 'admission_confirmed';
 
@@ -5292,10 +5288,11 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
           templateComponents: [{
             type: 'body',
             parameters: [
-              { type: 'text', text: recipient.key === 'parent' ? parentName || 'Parent' : name },
               { type: 'text', text: name },
               { type: 'text', text: rollNo },
-              { type: 'text', text: req.currentBranch?.name || 'SCC' },
+              { type: 'text', text: batch.name || 'Assigned batch' },
+              { type: 'text', text: formatWhatsAppAmount(createdFeeSummary?.totalFee || 0) },
+              { type: 'text', text: formatWhatsAppAmount(createdFeeSummary?.pendingFee || 0) },
             ],
           }],
         });
