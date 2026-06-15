@@ -680,25 +680,38 @@ async function buildStudentPerformance(coachingId, branchId, studentId) {
   const attendancePercent = totalClasses
     ? Math.round((Number(attendance?.present_classes || 0) / totalClasses) * 100)
     : null;
-  const latestMarkedPaper = markedPapers[markedPapers.length - 1] || null;
   let currentRank = null;
-  if (latestMarkedPaper && studentDetails?.batch_id && Number(latestMarkedPaper.max_marks) > 0) {
-    const latestPercentage = (Number(latestMarkedPaper.marks_obtained || 0) / Number(latestMarkedPaper.max_marks)) * 100;
+  if (markedPapers.length && studentDetails?.batch_id && marksSummary.totalMaxMarks > 0) {
+    const overallPercentage = (
+      Number(marksSummary.totalMarksObtained || 0)
+      / Number(marksSummary.totalMaxMarks)
+    ) * 100;
     const rankRow = await get(
-      `SELECT COUNT(DISTINCT tp.student_id) + 1 AS current_rank
-       FROM test_papers tp
-       JOIN users peer ON peer.id = tp.student_id AND peer.branch_id = tp.branch_id
-       WHERE tp.coaching_id = ? AND tp.branch_id = ? AND peer.batch_id = ?
-         AND COALESCE(tp.test_label, tp.original_name) = COALESCE(?, ?)
-         AND tp.max_marks > 0
-         AND (tp.marks_obtained / tp.max_marks::numeric) * 100 > ?`,
+      `SELECT COUNT(*) + 1 AS current_rank
+       FROM (
+         SELECT tp.student_id
+         FROM test_papers tp
+         JOIN users peer
+           ON peer.id = tp.student_id
+          AND peer.coaching_id = tp.coaching_id
+          AND peer.branch_id = tp.branch_id
+         WHERE tp.coaching_id = ?
+           AND tp.branch_id = ?
+           AND peer.batch_id = ?
+           AND tp.marks_obtained IS NOT NULL
+           AND tp.max_marks IS NOT NULL
+           AND tp.max_marks > 0
+         GROUP BY tp.student_id
+         HAVING (
+           SUM(tp.marks_obtained)::numeric
+           / NULLIF(SUM(tp.max_marks), 0)
+         ) * 100 > ?
+       ) higher_performing_students`,
       [
         coachingId,
         branchId,
         studentDetails.batch_id,
-        latestMarkedPaper.test_label,
-        latestMarkedPaper.original_name,
-        latestPercentage,
+        overallPercentage,
       ]
     );
     currentRank = Number(rankRow?.current_rank || 0) || null;
