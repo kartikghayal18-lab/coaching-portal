@@ -5221,6 +5221,18 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
 });
 
 app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
+  const registrationStartedAt = performance.now();
+  const registrationTimings = {
+    studentDatabaseInsertMs: 0,
+    parentCreationMs: 0,
+    parentCreationExecuted: false,
+    feeCreationMs: 0,
+    feeCreationExecuted: false,
+    receiptGenerationMs: 0,
+    receiptGenerationExecuted: false,
+    whatsappNotificationMs: 0,
+    totalRequestMs: 0,
+  };
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
@@ -5283,6 +5295,7 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
 
   const passwordHash = await bcrypt.hash(password, 10);
   let createdStudentResult;
+  const studentInsertStartedAt = performance.now();
   try {
     createdStudentResult = await run(
       `INSERT INTO users (
@@ -5305,7 +5318,13 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
         passwordHash,
       ]
     );
+    registrationTimings.studentDatabaseInsertMs = Number(
+      (performance.now() - studentInsertStartedAt).toFixed(2)
+    );
   } catch (error) {
+    registrationTimings.studentDatabaseInsertMs = Number(
+      (performance.now() - studentInsertStartedAt).toFixed(2)
+    );
     const duplicateBranchRoll = error.code === '23505'
       && (
         error.constraint === 'idx_users_coaching_branch_roll'
@@ -5320,20 +5339,29 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   const createdStudentId = createdStudentResult.lastID;
 
   if (totalFee > 0) {
+    const feeCreationStartedAt = performance.now();
     await setStudentTotalFee({
       coachingId,
       branchId,
       studentId: createdStudentId,
       totalFee,
     });
+    registrationTimings.feeCreationMs = Number(
+      (performance.now() - feeCreationStartedAt).toFixed(2)
+    );
+    registrationTimings.feeCreationExecuted = true;
   }
 
+  const whatsappStartedAt = performance.now();
   await sendStudentOnboarding(createdStudentId, { coachingId, branchId })
     .catch((error) => console.error('[WHATSAPP ONBOARDING] Immediate send failed', {
       studentId: createdStudentId,
       branchId,
       error: error.message,
     }));
+  registrationTimings.whatsappNotificationMs = Number(
+    (performance.now() - whatsappStartedAt).toFixed(2)
+  );
 
   req.session.flash = {
     type: 'success',
@@ -5344,6 +5372,15 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
   await auditActor(req, 'student_created', {
     targetType: 'student',
     details: { rollNo, batchId: batch.id, batchName: batch.name },
+  });
+  registrationTimings.totalRequestMs = Number(
+    (performance.now() - registrationStartedAt).toFixed(2)
+  );
+  console.log('[STUDENT REGISTRATION TIMINGS]', {
+    studentId: createdStudentId,
+    rollNo,
+    branchId,
+    ...registrationTimings,
   });
   return res.redirect('/admin/dashboard?section=students');
 });
