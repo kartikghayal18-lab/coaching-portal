@@ -4927,26 +4927,30 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const needsNotificationLogs = activeSection === 'notifications';
   const needsAdminProfile = activeSection === 'settings';
 
-  const studentCountRow = await get(
+  const studentCountPromise = get(
     `SELECT COUNT(*) AS total_students
      FROM users
      WHERE coaching_id = ? AND branch_id = ? AND role = 'student'`,
     [coachingId, branchId]
   );
-  const totalStudentCount = Number(studentCountRow?.total_students || 0);
-  const adminProfile = needsAdminProfile ? await get(
+  const adminProfilePromise = needsAdminProfile ? get(
     `SELECT contact_phone, email
      FROM users
      WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'admin'
      LIMIT 1`,
     [req.session.user.id, coachingId, branchId]
-  ) : null;
-  const batches = await getBatchesForCoaching(coachingId, branchId);
-  const whatsappSettings = buildWhatsAppSettingsView(needsWhatsAppSettings ? await getWhatsAppSettings(coachingId, branchId) : null);
-  const whatsappLogs = needsWhatsAppLogs ? await getRecentWhatsAppLogs(coachingId, branchId, 25) : [];
-  const notificationLogs = needsNotificationLogs ? await getRecentNotificationLogs(coachingId, branchId, 100) : [];
-
-  const students = needsStudents ? await all(
+  ) : Promise.resolve(null);
+  const batchesPromise = getBatchesForCoaching(coachingId, branchId);
+  const whatsappSettingsPromise = needsWhatsAppSettings
+    ? getWhatsAppSettings(coachingId, branchId)
+    : Promise.resolve(null);
+  const whatsappLogsPromise = needsWhatsAppLogs
+    ? getRecentWhatsAppLogs(coachingId, branchId, 25)
+    : Promise.resolve([]);
+  const notificationLogsPromise = needsNotificationLogs
+    ? getRecentNotificationLogs(coachingId, branchId, 100)
+    : Promise.resolve([]);
+  const studentsPromise = needsStudents ? all(
     `SELECT u.id, u.roll_no, u.name, u.batch_id, u.standard, u.course, u.contact_phone, u.guardian_phone, u.whatsapp_number, u.parent_whatsapp_number, u.email, u.created_at,
             u.is_retained_record, u.retention_source_batch_id,
             b.name AS batch_name, b.status AS batch_status, b.completed_at AS batch_completed_at, b.is_retention_batch
@@ -4955,10 +4959,10 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      WHERE u.role = 'student' AND u.coaching_id = ? AND u.branch_id = ?
      ORDER BY COALESCE(b.name, ''), u.roll_no ASC`,
     [coachingId, branchId]
-  ) : [];
+  ) : Promise.resolve([]);
 
   const papersMonthRange = getMonthDateRange(papersMonthFilter);
-  const papers = needsPapers ? await all(
+  const papersPromise = needsPapers ? all(
     `SELECT
        tp.id,
        tp.original_name,
@@ -4990,33 +4994,33 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      ORDER BY tp.upload_date DESC
      LIMIT 250`,
     [coachingId, branchId, papersMonthRange.start, papersMonthRange.end]
-  ) : [];
+  ) : Promise.resolve([]);
 
   const shouldLoadAttendanceRecords = needsAttendance && (activeSection !== 'attendance' || Boolean(attendanceDateFilter));
-  const attendance = shouldLoadAttendanceRecords
-    ? await getAttendanceReportRows(coachingId, branchId, {
+  const attendancePromise = shouldLoadAttendanceRecords
+    ? getAttendanceReportRows(coachingId, branchId, {
       attendanceDate: attendanceDateFilter,
       attendanceMonth: attendanceDateFilter ? '' : attendanceMonthFilter,
       limit: 300,
     })
-    : [];
+    : Promise.resolve([]);
 
-  const attendanceDates = activeSection === 'attendance' ? await all(
+  const attendanceDatesPromise = activeSection === 'attendance' ? all(
     `SELECT DISTINCT CAST(attendance_date AS TEXT) AS attendance_date
      FROM attendance
      WHERE coaching_id = ? AND branch_id = ?
      ORDER BY attendance_date DESC
      LIMIT 90`,
     [coachingId, branchId]
-  ) : [];
+  ) : Promise.resolve([]);
 
-  const fees = needsFees ? await getFeeReportRows(coachingId, branchId, {
+  const feesPromise = needsFees ? getFeeReportRows(coachingId, branchId, {
     feesDate: feesDateFilter,
     feesMonth: feesDateFilter ? '' : feesMonthFilter,
     limit: 150,
-  }) : [];
+  }) : Promise.resolve([]);
 
-  const notes = needsNotes ? await all(
+  const notesPromise = needsNotes ? all(
     `SELECT bn.id, bn.batch_id, bn.standard, bn.course, bn.title, bn.resource_url, bn.description, bn.created_at,
             b.name AS batch_name
      FROM batch_notes bn
@@ -5025,9 +5029,9 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      ORDER BY bn.created_at DESC
      LIMIT 150`,
     [coachingId, branchId]
-  ) : [];
+  ) : Promise.resolve([]);
 
-  const answerRequests = needsAnswerRequests ? await all(
+  const answerRequestsPromise = needsAnswerRequests ? all(
     `SELECT ar.id, ar.batch_id, ar.standard, ar.course, ar.title, ar.description, ar.starts_at, ar.ends_at, ar.created_at,
             b.name AS batch_name
      FROM answer_upload_requests ar
@@ -5036,11 +5040,9 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      ORDER BY ar.created_at DESC
      LIMIT 20`,
     [coachingId, branchId]
-  ) : [];
+  ) : Promise.resolve([]);
 
-  const answerRequestSummaries = needsAnswerRequests ? await buildAnswerRequestSummaries(coachingId, branchId, answerRequests) : [];
-
-  const paperStats = isOverviewSection ? await all(
+  const paperStatsPromise = isOverviewSection ? all(
     `SELECT
        student_id,
        COUNT(*) AS paper_count,
@@ -5050,15 +5052,54 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      WHERE coaching_id = ? AND branch_id = ?
      GROUP BY student_id`,
     [coachingId, branchId]
-  ) : [];
+  ) : Promise.resolve([]);
 
-  const latestMarkedPapers = isOverviewSection ? await all(
+  const latestMarkedPapersPromise = isOverviewSection ? all(
     `SELECT student_id, marks_obtained, max_marks, upload_date, test_label, original_name
      FROM test_papers
      WHERE coaching_id = ? AND branch_id = ? AND marks_obtained IS NOT NULL AND max_marks IS NOT NULL AND max_marks > 0
      ORDER BY upload_date DESC`,
     [coachingId, branchId]
-  ) : [];
+  ) : Promise.resolve([]);
+
+  const [
+    studentCountRow,
+    adminProfile,
+    batches,
+    rawWhatsappSettings,
+    whatsappLogs,
+    notificationLogs,
+    students,
+    papers,
+    attendance,
+    attendanceDates,
+    fees,
+    notes,
+    answerRequests,
+    paperStats,
+    latestMarkedPapers,
+  ] = await Promise.all([
+    studentCountPromise,
+    adminProfilePromise,
+    batchesPromise,
+    whatsappSettingsPromise,
+    whatsappLogsPromise,
+    notificationLogsPromise,
+    studentsPromise,
+    papersPromise,
+    attendancePromise,
+    attendanceDatesPromise,
+    feesPromise,
+    notesPromise,
+    answerRequestsPromise,
+    paperStatsPromise,
+    latestMarkedPapersPromise,
+  ]);
+  const totalStudentCount = Number(studentCountRow?.total_students || 0);
+  const whatsappSettings = buildWhatsAppSettingsView(rawWhatsappSettings);
+  const answerRequestSummaries = needsAnswerRequests
+    ? await buildAnswerRequestSummaries(coachingId, branchId, answerRequests)
+    : [];
 
   const paperStatsByStudent = new Map();
   paperStats.forEach((row) => paperStatsByStudent.set(row.student_id, row));
@@ -6286,7 +6327,13 @@ app.post('/admin/attendance', requireCoachingAdmin, async (req, res) => {
   }
 
   if (status === 'absent') {
-    await notifyAttendanceAbsence({ req, coachingId, student, attendanceDate, coaching });
+    setImmediate(() => {
+      notifyAttendanceAbsence({ req, coachingId, student, attendanceDate, coaching })
+        .catch((error) => console.error('Background attendance notification failed', {
+          studentId: student.id,
+          error: error.message,
+        }));
+    });
   }
 
   req.session.flash = { type: 'success', text: 'Attendance saved' };
@@ -6349,6 +6396,8 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
     : [];
   const existingByStudentId = new Map(existingRows.map((row) => [Number(row.student_id), row]));
 
+  const absentStudents = [];
+  const attendanceWrites = [];
   for (const student of students) {
     const nextStatus = absentees.has(student.roll_no) ? 'absent' : 'present';
     if (nextStatus === 'absent') absentCount += 1;
@@ -6357,22 +6406,31 @@ app.post('/admin/attendance-bulk', requireCoachingAdmin, async (req, res) => {
     const existing = existingByStudentId.get(Number(student.id));
 
     if (existing) {
-      await run(
+      attendanceWrites.push(run(
         `UPDATE attendance SET status = ?, notes = ?, marked_by = ? WHERE id = ? AND branch_id = ?`,
         [nextStatus, notes, req.session.user.id, existing.id, branchId]
-      );
+      ));
     } else {
-      await run(
+      attendanceWrites.push(run(
         `INSERT INTO attendance (coaching_id, branch_id, student_id, attendance_date, status, notes, marked_by)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [coachingId, branchId, student.id, attendanceDate, nextStatus, notes, req.session.user.id]
-      );
+      ));
     }
 
     if (nextStatus === 'absent') {
-      await notifyAttendanceAbsence({ req, coachingId, student, attendanceDate, coaching });
+      absentStudents.push(student);
     }
   }
+  await Promise.all(attendanceWrites);
+  setImmediate(() => {
+    Promise.allSettled(absentStudents.map((student) => (
+      notifyAttendanceAbsence({ req, coachingId, student, attendanceDate, coaching })
+    ))).then((results) => {
+      const failed = results.filter((result) => result.status === 'rejected').length;
+      if (failed) console.error('Background bulk attendance notifications failed', { failed });
+    });
+  });
 
   req.session.flash = {
     type: 'success',
@@ -6428,110 +6486,111 @@ app.post('/admin/fees', requireCoachingAdmin, async (req, res) => {
     payment_mode: paymentMode || null,
   };
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
-  try {
-    if (status === 'paid') {
-      const feeSummary = await applyStudentPayment({ coachingId, branchId, studentId: student.id, amount });
-      const feePaidMessage = [
-        `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
-        '✅ Payment Received',
-        `Student: ${student.name || student.roll_no}`,
-        `Amount Paid: ₹${formatWhatsAppAmount(amount)}`,
-        `Remaining Fees: ₹${formatWhatsAppAmount(feeSummary.pendingFee)}`,
-        'Payment recorded successfully.',
-        'Receipt attached.',
-      ];
-      const compactFeePaidMessage = compactWhatsAppMessage(feePaidMessage);
-      const feeRecipients = [
-        { key: 'student', phone: student.whatsapp_number || student.contact_phone },
-        { key: 'parent', phone: student.parent_whatsapp_number || student.guardian_phone },
-      ].filter((recipient, index, recipients) => (
-        recipient.phone
-        && recipients.findIndex((item) => item.phone === recipient.phone) === index
-      ));
+  if (status === 'paid') {
+    const feeSummary = await applyStudentPayment({ coachingId, branchId, studentId: student.id, amount });
+    const publicBaseUrl = getRequestBaseUrl(req);
+    setImmediate(async () => {
+      try {
+        const feePaidMessage = [
+          `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
+          '✅ Payment Received',
+          `Student: ${student.name || student.roll_no}`,
+          `Amount Paid: ₹${formatWhatsAppAmount(amount)}`,
+          `Remaining Fees: ₹${formatWhatsAppAmount(feeSummary.pendingFee)}`,
+          'Payment recorded successfully.',
+          'Receipt attached.',
+        ];
+        const compactFeePaidMessage = compactWhatsAppMessage(feePaidMessage);
+        const feeRecipients = [
+          { key: 'student', phone: student.whatsapp_number || student.contact_phone },
+          { key: 'parent', phone: student.parent_whatsapp_number || student.guardian_phone },
+        ].filter((recipient, index, recipients) => (
+          recipient.phone
+          && recipients.findIndex((item) => item.phone === recipient.phone) === index
+        ));
 
-      for (const recipient of feeRecipients) {
-        const paymentMessageResult = await sendWhatsAppNotification({
-          studentId: student.id,
-          phone: recipient.phone,
-          type: 'fee_payment_confirmation',
-          message: compactFeePaidMessage,
-          eventKey: `fee_payment_confirmation:${recipient.key}:${student.id}:${fee.id}`,
-        });
-        console.log('WhatsApp API response', paymentMessageResult);
-
+        let receipt = null;
         try {
-          let receipt = await generateFeeReceiptPdf(fee.id, {
-            branchId,
-            publicBaseUrl: getRequestBaseUrl(req),
-          });
-          console.log('Generated receipt URL', receipt.fileUrl);
-          console.log('Receipt storage type', receipt.storageType);
+          receipt = await generateFeeReceiptPdf(fee.id, { branchId, publicBaseUrl });
           let validation = await validatePublicUrl(receipt.fileUrl);
-          console.log('RECEIPT VALIDATION', validation);
           if (!validation.ok) {
-            console.error('Receipt URL validation failed, regenerating receipt', {
-              feeId: fee.id,
-              receiptUrl: receipt.fileUrl,
-              storageType: receipt.storageType,
-              validation,
-            });
             receipt = await generateFeeReceiptPdf(fee.id, {
               branchId,
               forceRegenerate: true,
-              publicBaseUrl: getRequestBaseUrl(req),
+              publicBaseUrl,
             });
-            console.log('Generated receipt URL', receipt.fileUrl);
-            console.log('Receipt storage type', receipt.storageType);
             validation = await validatePublicUrl(receipt.fileUrl);
-            console.log('RECEIPT VALIDATION', validation);
           }
-
           if (!validation.ok) {
-            throw new Error(`Receipt URL is not publicly accessible with HTTP 200. Status: ${validation.status || 'unknown'}${validation.error ? ` Error: ${validation.error}` : ''}`);
-          }
-
-          const receiptResult = await sendDocumentNotification(
-            student.id,
-            recipient.phone,
-            receipt.fileUrl,
-            receipt.fileName,
-            'Receipt attached below.',
-            {
-              type: 'fee_receipt',
-              eventKey: `fee_receipt:${recipient.key}:${student.id}:${fee.id}`,
-              retryFailed: true,
-            }
-          );
-          console.log('WhatsApp API response', receiptResult);
-          if (receiptResult?.failed) {
-            throw new Error(receiptResult.error || 'WhatsApp receipt attachment failed');
+            throw new Error(`Receipt URL is not publicly accessible with HTTP 200. Status: ${validation.status || 'unknown'}`);
           }
         } catch (error) {
-          console.error('WhatsApp fee receipt PDF failed', {
+          console.error('Background fee receipt generation failed', {
             feeId: fee.id,
             studentId: student.id,
-            recipient: recipient.key,
-            phone: recipient.phone,
             error: error.message,
-            stack: error.stack,
           });
         }
+
+        for (const recipient of feeRecipients) {
+          const paymentMessageResult = await sendWhatsAppNotification({
+            studentId: student.id,
+            phone: recipient.phone,
+            type: 'fee_payment_confirmation',
+            message: compactFeePaidMessage,
+            eventKey: `fee_payment_confirmation:${recipient.key}:${student.id}:${fee.id}`,
+          });
+          console.log('WhatsApp API response', paymentMessageResult);
+
+          if (receipt) {
+            try {
+              const receiptResult = await sendDocumentNotification(
+                student.id,
+                recipient.phone,
+                receipt.fileUrl,
+                receipt.fileName,
+                'Receipt attached below.',
+                {
+                  type: 'fee_receipt',
+                  eventKey: `fee_receipt:${recipient.key}:${student.id}:${fee.id}`,
+                  retryFailed: true,
+                }
+              );
+              console.log('WhatsApp API response', receiptResult);
+              if (receiptResult?.failed) {
+                throw new Error(receiptResult.error || 'WhatsApp receipt attachment failed');
+              }
+            } catch (error) {
+              console.error('WhatsApp fee receipt PDF failed', {
+                feeId: fee.id,
+                studentId: student.id,
+                recipient: recipient.key,
+                phone: recipient.phone,
+                error: error.message,
+              });
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Background fee notification failed', {
+          feeId: fee.id,
+          studentId: student.id,
+          error: error.message,
+        });
       }
-    } else if (status === 'overdue') {
-      const feeSummary = await setStudentTotalFee({ coachingId, branchId, studentId: student.id, totalFee: amount });
-      fee.feeSummary = feeSummary;
-      await sendOverdueReminder({ coachingId, student, fee, coaching });
-    } else if (status === 'pending') {
-      const feeSummary = await setStudentTotalFee({ coachingId, branchId, studentId: student.id, totalFee: amount });
-      fee.feeSummary = feeSummary;
-    }
-  } catch (error) {
-    console.error('WhatsApp fee notification failed', {
-      feeId: fee.id,
-      studentId: student.id,
-      status,
-      error: error.message,
     });
+  } else if (status === 'overdue') {
+    fee.feeSummary = await setStudentTotalFee({ coachingId, branchId, studentId: student.id, totalFee: amount });
+    setImmediate(() => {
+      sendOverdueReminder({ coachingId, student, fee, coaching })
+        .catch((error) => console.error('Background overdue reminder failed', {
+          feeId: fee.id,
+          studentId: student.id,
+          error: error.message,
+        }));
+    });
+  } else if (status === 'pending') {
+    fee.feeSummary = await setStudentTotalFee({ coachingId, branchId, studentId: student.id, totalFee: amount });
   }
 
   await auditActor(req, 'fee_record_added', {

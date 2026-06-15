@@ -22,7 +22,10 @@ function formatDate(value) {
 function formatAmount(value) {
   const amount = Number(value || 0);
   if (!Number.isFinite(amount)) return '0';
-  return amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+  return new Intl.NumberFormat('en-IN', {
+    maximumFractionDigits: 2,
+    minimumFractionDigits: Number.isInteger(amount) ? 0 : 2,
+  }).format(amount);
 }
 
 function formatPercent(value) {
@@ -152,6 +155,50 @@ function drawSccPdfHeader(doc, title) {
   doc.moveDown(1.1);
 }
 
+function drawSccBrandedHeader(doc, title) {
+  const logoPath = path.join(__dirname, '..', '..', 'public', 'scc-icon.png');
+  const left = 48;
+  const right = doc.page.width - 48;
+  const headerTop = 38;
+
+  if (fs.existsSync(logoPath)) {
+    doc.image(logoPath, left, headerTop, { fit: [72, 72] });
+  }
+  doc.fillColor('#223b82').font('Helvetica-Bold').fontSize(17)
+    .text('SHIV CHHATRAPATI', 132, headerTop + 4, { width: 330 });
+  doc.text('COACHING CLASSES', 132, headerTop + 25, { width: 330 });
+  doc.fillColor('#223b82').font('Helvetica-Bold').fontSize(10)
+    .text('Your Success Is Our Aim!', 132, headerTop + 52, { width: 330 });
+  doc.strokeColor('#f5b800').lineWidth(3).moveTo(left, 122).lineTo(right, 122).stroke();
+  doc.fillColor('#111827').font('Helvetica-Bold').fontSize(19)
+    .text(title, left, 139, { width: right - left });
+  doc.y = 174;
+}
+
+function drawSectionTitle(doc, title, y) {
+  doc.roundedRect(48, y, 499, 22, 4).fill('#eef2ff');
+  doc.fillColor('#223b82').font('Helvetica-Bold').fontSize(9)
+    .text(String(title).toUpperCase(), 58, y + 7, { width: 479 });
+  return y + 30;
+}
+
+function drawDetailGrid(doc, rows, y) {
+  const left = 48;
+  const columnWidth = 249.5;
+  const rowHeight = 28;
+  rows.forEach((row, index) => {
+    const x = left + (index % 2) * columnWidth;
+    const rowY = y + Math.floor(index / 2) * rowHeight;
+    doc.roundedRect(x, rowY, columnWidth - 6, rowHeight - 5, 3)
+      .fillAndStroke('#f8fafc', '#e2e8f0');
+    doc.fillColor('#64748b').font('Helvetica-Bold').fontSize(7)
+      .text(String(row[0]).toUpperCase(), x + 9, rowY + 5, { width: 88 });
+    doc.fillColor('#111827').font('Helvetica').fontSize(9)
+      .text(String(row[1] ?? '-'), x + 98, rowY + 5, { width: columnWidth - 112 });
+  });
+  return y + Math.ceil(rows.length / 2) * rowHeight;
+}
+
 function createSimplePdfBuffer(title, lines) {
   return createPdfKitBuffer((doc) => {
     drawSccPdfHeader(doc, title);
@@ -167,17 +214,42 @@ function createSimplePdfBuffer(title, lines) {
   });
 }
 
-function createPerformancePdfBuffer(student, progressSeries) {
+function createPerformancePdfBuffer(student, progressSeries, report = {}) {
   return createPdfKitBuffer((doc) => {
+    drawSccBrandedHeader(doc, 'PERFORMANCE REPORT');
+    let sectionY = drawSectionTitle(doc, 'Student Details', 180);
+    sectionY = drawDetailGrid(doc, [
+      ['Student Name', student.name || '-'],
+      ['Roll No', student.roll_no || '-'],
+      ['Admission No', student.admission_no || student.roll_no || '-'],
+      ['Branch', report.branchName || student.branch_name || '-'],
+      ['Batch', student.batch_name || '-'],
+      ['Academic Year', report.academicYear || '-'],
+    ], sectionY);
+
+    sectionY = drawSectionTitle(doc, 'Performance Summary', sectionY + 4);
+    const cards = [
+      ['Highest Score', report.highestScore],
+      ['Average Score', report.averageScore],
+      ['Lowest Score', report.lowestScore],
+      ['Attendance', report.attendancePercent],
+      ['Current Rank', report.currentRank],
+    ];
+    const cardWidth = 95;
+    cards.forEach(([label, value], index) => {
+      const x = 48 + index * 100.8;
+      doc.roundedRect(x, sectionY, cardWidth, 42, 5).fillAndStroke('#ffffff', '#dbe4ef');
+      doc.fillColor('#64748b').font('Helvetica-Bold').fontSize(7)
+        .text(label, x + 5, sectionY + 7, { width: cardWidth - 10, align: 'center' });
+      doc.fillColor('#223b82').font('Helvetica-Bold').fontSize(12)
+        .text(String(value || '-'), x + 5, sectionY + 23, { width: cardWidth - 10, align: 'center' });
+    });
+
+    sectionY = drawSectionTitle(doc, 'Performance Graph', sectionY + 50);
     const left = 70;
-    const top = 170;
+    const top = sectionY + 4;
     const width = 460;
-    const height = 300;
-    drawSccPdfHeader(doc, 'PERFORMANCE GRAPH');
-    doc.fontSize(12).fillColor('#475569').text(
-      `${student.name || student.roll_no} (${student.roll_no})`,
-      { align: 'center' }
-    );
+    const height = 160;
 
     [0, 25, 50, 75, 100].forEach((value) => {
       const y = top + height - (value / 100) * height;
@@ -193,31 +265,70 @@ function createPerformancePdfBuffer(student, progressSeries) {
     }));
 
     if (!points.length) {
-      doc.fillColor('#64748b').fontSize(16).text('No performance data available', left, top + 130, {
+      doc.fillColor('#64748b').fontSize(16).text('No performance data available', left, top + 70, {
         width,
         align: 'center',
       });
-      return;
+    } else {
+      doc.strokeColor('#35438f').lineWidth(3);
+      points.forEach((point, index) => {
+        if (index === 0) doc.moveTo(point.x, point.y);
+        else doc.lineTo(point.x, point.y);
+      });
+      doc.stroke();
+
+      const labelStep = Math.max(1, Math.ceil(points.length / 6));
+      points.forEach((point, index) => {
+        doc.circle(point.x, point.y, 4).fill('#f4c400');
+        doc.fillColor('#334155').fontSize(8).text(`${point.percent.toFixed(0)}%`, point.x - 18, point.y - 20, {
+          width: 36,
+          align: 'center',
+        });
+        if (index % labelStep === 0) {
+          doc.text(point.label, point.x - 35, top + height + 12, { width: 70, align: 'center' });
+        }
+      });
     }
 
-    doc.strokeColor('#35438f').lineWidth(3);
-    points.forEach((point, index) => {
-      if (index === 0) doc.moveTo(point.x, point.y);
-      else doc.lineTo(point.x, point.y);
+    sectionY = drawSectionTitle(doc, 'Recent Tests', top + height + 40);
+    const columns = [
+      { label: 'Test Name', x: 48, width: 215 },
+      { label: 'Test Date', x: 263, width: 95 },
+      { label: 'Percentage', x: 358, width: 95 },
+      { label: 'Rank', x: 453, width: 94 },
+    ];
+    doc.rect(48, sectionY, 499, 20).fill('#223b82');
+    columns.forEach((column) => {
+      doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(8)
+        .text(column.label, column.x + 7, sectionY + 6, { width: column.width - 14 });
     });
-    doc.stroke();
+    let rowY = sectionY + 20;
+    (report.recentTests || []).slice(0, 3).forEach((test, index) => {
+      doc.rect(48, rowY, 499, 22).fill(index % 2 ? '#f8fafc' : '#ffffff');
+      [test.name, test.date, test.percentage, test.rank].forEach((value, columnIndex) => {
+        const column = columns[columnIndex];
+        doc.fillColor('#1f2937').font('Helvetica').fontSize(8)
+          .text(String(value || '-'), column.x + 7, rowY + 7, { width: column.width - 14, ellipsis: true });
+      });
+      rowY += 22;
+    });
+    if (!(report.recentTests || []).length) {
+      doc.fillColor('#64748b').font('Helvetica').fontSize(8)
+        .text('No recent test results available.', 55, rowY + 7);
+      rowY += 22;
+    }
 
-    const labelStep = Math.max(1, Math.ceil(points.length / 6));
-    points.forEach((point, index) => {
-      doc.circle(point.x, point.y, 4).fill('#f4c400');
-      doc.fillColor('#334155').fontSize(8).text(`${point.percent.toFixed(0)}%`, point.x - 18, point.y - 20, {
-        width: 36,
+    sectionY = drawSectionTitle(doc, 'Teacher Remark', rowY + 8);
+    doc.roundedRect(48, sectionY, 499, 42, 4).fillAndStroke('#fffdf5', '#f5d56b');
+    doc.fillColor('#374151').font('Helvetica').fontSize(9)
+      .text(report.teacherRemark || 'Keep practising consistently and attend classes regularly.', 58, sectionY + 10, {
+        width: 479,
+      });
+    doc.fillColor('#64748b').font('Helvetica-Oblique').fontSize(8)
+      .text('Keep up the good work. Regular practice and attendance lead to better results.', 48, 822, {
+        width: 499,
         align: 'center',
       });
-      if (index % labelStep === 0) {
-        doc.text(point.label, point.x - 35, top + height + 12, { width: 70, align: 'center' });
-      }
-    });
   });
 }
 
@@ -540,6 +651,15 @@ function normalizeParentOption(text) {
 }
 
 async function buildStudentPerformance(coachingId, branchId, studentId) {
+  const studentDetails = await get(
+    `SELECT u.name, u.roll_no, u.batch_id, b.name AS batch_name, br.name AS branch_name
+     FROM users u
+     LEFT JOIN batches b ON b.id = u.batch_id AND b.branch_id = u.branch_id
+     LEFT JOIN branches br ON br.id = u.branch_id AND br.coaching_id = u.coaching_id
+     WHERE u.id = ? AND u.coaching_id = ? AND u.branch_id = ? AND u.role = 'student'
+     LIMIT 1`,
+    [studentId, coachingId, branchId]
+  );
   const papers = await all(
     `SELECT id, original_name, upload_date, marks_obtained, max_marks, test_label,
             stored_name, storage_type, storage_key, public_url, content_type
@@ -549,6 +669,40 @@ async function buildStudentPerformance(coachingId, branchId, studentId) {
     [coachingId, branchId, studentId]
   );
   const { markedPapers, progressSeries, marksSummary } = buildProgressSummaryFromPapers(papers);
+  const attendance = await get(
+    `SELECT COUNT(*) AS total_classes,
+            COUNT(*) FILTER (WHERE status = 'present') AS present_classes
+     FROM attendance
+     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?`,
+    [coachingId, branchId, studentId]
+  );
+  const totalClasses = Number(attendance?.total_classes || 0);
+  const attendancePercent = totalClasses
+    ? Math.round((Number(attendance?.present_classes || 0) / totalClasses) * 100)
+    : null;
+  const latestMarkedPaper = markedPapers[markedPapers.length - 1] || null;
+  let currentRank = null;
+  if (latestMarkedPaper && studentDetails?.batch_id && Number(latestMarkedPaper.max_marks) > 0) {
+    const latestPercentage = (Number(latestMarkedPaper.marks_obtained || 0) / Number(latestMarkedPaper.max_marks)) * 100;
+    const rankRow = await get(
+      `SELECT COUNT(DISTINCT tp.student_id) + 1 AS current_rank
+       FROM test_papers tp
+       JOIN users peer ON peer.id = tp.student_id AND peer.branch_id = tp.branch_id
+       WHERE tp.coaching_id = ? AND tp.branch_id = ? AND peer.batch_id = ?
+         AND COALESCE(tp.test_label, tp.original_name) = COALESCE(?, ?)
+         AND tp.max_marks > 0
+         AND (tp.marks_obtained / tp.max_marks::numeric) * 100 > ?`,
+      [
+        coachingId,
+        branchId,
+        studentDetails.batch_id,
+        latestMarkedPaper.test_label,
+        latestMarkedPaper.original_name,
+        latestPercentage,
+      ]
+    );
+    currentRank = Number(rankRow?.current_rank || 0) || null;
+  }
   return {
     papers,
     marked: markedPapers,
@@ -557,6 +711,9 @@ async function buildStudentPerformance(coachingId, branchId, studentId) {
     percentage: marksSummary.marksPercent,
     progressSeries,
     marksSummary,
+    attendancePercent,
+    studentDetails,
+    currentRank,
   };
 }
 
@@ -655,7 +812,33 @@ async function sendPerformanceGraph(student, phone, coaching = null, options = {
 
   try {
     if (!hasPerformanceRows) return { graph: null, performance, coaching };
-    const graphBuffer = await createPerformancePdfBuffer(student, performance.progressSeries);
+    const reportStudent = { ...student, ...performance.studentDetails };
+    const percentages = performance.progressSeries
+      .map((item) => Number(item.percent))
+      .filter(Number.isFinite);
+    const academicYear = new Date().getMonth() >= 5
+      ? `${new Date().getFullYear()}-${String(new Date().getFullYear() + 1).slice(-2)}`
+      : `${new Date().getFullYear() - 1}-${String(new Date().getFullYear()).slice(-2)}`;
+    const graphBuffer = await createPerformancePdfBuffer(reportStudent, performance.progressSeries, {
+      branchName: reportStudent.branch_name || coaching?.branch_name || '-',
+      academicYear,
+      highestScore: percentages.length ? `${formatPercent(Math.max(...percentages))}%` : '-',
+      averageScore: percentages.length
+        ? `${formatPercent(percentages.reduce((sum, value) => sum + value, 0) / percentages.length)}%`
+        : '-',
+      lowestScore: percentages.length ? `${formatPercent(Math.min(...percentages))}%` : '-',
+      attendancePercent: performance.attendancePercent == null ? '-' : `${performance.attendancePercent}%`,
+      currentRank: performance.currentRank ? `#${performance.currentRank}` : '-',
+      recentTests: performance.marked.slice(-5).reverse().map((paper) => ({
+        name: paper.test_label || paper.original_name || '-',
+        date: formatDate(paper.upload_date),
+        percentage: Number(paper.max_marks) > 0
+          ? `${formatPercent((Number(paper.marks_obtained || 0) / Number(paper.max_marks)) * 100)}%`
+          : '-',
+        rank: paper.rank ? `#${paper.rank}` : '-',
+      })),
+      teacherRemark: student.teacher_remark || '',
+    });
     const graph = await uploadGeneratedFile({
       buffer: graphBuffer,
       fileName: `performance-${student.roll_no}.pdf`,
@@ -675,21 +858,32 @@ async function sendPerformanceGraph(student, phone, coaching = null, options = {
 
 async function sendPerformanceReport(student, phone, coaching = null) {
   const performance = await buildStudentPerformance(student.coaching_id, student.branch_id, student.id);
-  const report = await createSimplePdfBuffer('Performance Report', [
-    `Coaching: ${coaching?.name || 'Coaching Institute'}`,
-    `Student: ${student.name || student.roll_no}`,
-    `Roll No: ${student.roll_no}`,
-    `Total Tests: ${performance.marked.length}`,
-    `Total Marks: ${performance.totalMarks}/${performance.totalMax}`,
-    Number(performance.marksSummary.papersCount || 0) > 0
-      ? `Overall Performance: ${performance.marksSummary.marksPercent}%`
-      : 'No performance data available',
-    '',
-    'Recent Results:',
-    ...performance.marked.slice(-10).map((paper) => (
-      `${paper.test_label || paper.original_name}: ${paper.marks_obtained}/${paper.max_marks} (${formatDate(paper.upload_date)})`
-    )),
-  ]);
+  const reportStudent = { ...student, ...performance.studentDetails };
+  const percentages = performance.progressSeries.map((item) => Number(item.percent)).filter(Number.isFinite);
+  const now = new Date();
+  const academicYear = now.getMonth() >= 5
+    ? `${now.getFullYear()}-${String(now.getFullYear() + 1).slice(-2)}`
+    : `${now.getFullYear() - 1}-${String(now.getFullYear()).slice(-2)}`;
+  const report = await createPerformancePdfBuffer(reportStudent, performance.progressSeries, {
+    branchName: reportStudent.branch_name || coaching?.branch_name || '-',
+    academicYear,
+    highestScore: percentages.length ? `${formatPercent(Math.max(...percentages))}%` : '-',
+    averageScore: percentages.length
+      ? `${formatPercent(percentages.reduce((sum, value) => sum + value, 0) / percentages.length)}%`
+      : '-',
+    lowestScore: percentages.length ? `${formatPercent(Math.min(...percentages))}%` : '-',
+    attendancePercent: performance.attendancePercent == null ? '-' : `${performance.attendancePercent}%`,
+    currentRank: performance.currentRank ? `#${performance.currentRank}` : '-',
+    recentTests: performance.marked.slice(-5).reverse().map((paper) => ({
+      name: paper.test_label || paper.original_name || '-',
+      date: formatDate(paper.upload_date),
+      percentage: Number(paper.max_marks) > 0
+        ? `${formatPercent((Number(paper.marks_obtained || 0) / Number(paper.max_marks)) * 100)}%`
+        : '-',
+      rank: paper.rank ? `#${paper.rank}` : '-',
+    })),
+    teacherRemark: student.teacher_remark || '',
+  });
   const file = await uploadGeneratedFile({
     buffer: report,
     fileName: `performance-report-${student.roll_no}.pdf`,
@@ -715,6 +909,7 @@ async function generateFeeReceiptPdf(feeId, options = {}) {
             u.id AS student_id, u.roll_no, u.name AS student_name, u.parent_name, u.batch_id,
             COALESCE(u.parent_whatsapp_number, u.guardian_phone) AS parent_phone,
             b.name AS batch_name,
+            br.name AS branch_name,
             cc.name AS coaching_name, cc.contact_email,
             sfs.total_fee, sfs.paid_fee, sfs.pending_fee,
             f.receipt_storage_key, f.receipt_storage_type,
@@ -725,6 +920,7 @@ async function generateFeeReceiptPdf(feeId, options = {}) {
      FROM fees f
      JOIN users u ON u.id = f.student_id AND u.coaching_id = f.coaching_id AND u.branch_id = f.branch_id
      LEFT JOIN batches b ON b.id = u.batch_id AND b.coaching_id = f.coaching_id AND b.branch_id = f.branch_id
+     LEFT JOIN branches br ON br.id = f.branch_id AND br.coaching_id = f.coaching_id
      JOIN coaching_classes cc ON cc.id = f.coaching_id
      LEFT JOIN student_fee_structure sfs ON sfs.coaching_id = f.coaching_id AND sfs.branch_id = f.branch_id AND sfs.student_id = f.student_id
      LEFT JOIN users admin ON admin.coaching_id = cc.id AND admin.branch_id = f.branch_id AND admin.role = 'admin'
@@ -779,42 +975,63 @@ async function generateFeeReceiptPdf(feeId, options = {}) {
   }
 
   const receipt = await createPdfKitBuffer((doc) => {
-    const adminPhone = resolveAdminPhone(fee);
     const totalFees = fee.total_fee == null
       ? Number(fee.paid_fee || 0) + Number(fee.pending_fee || 0)
       : Number(fee.total_fee);
-    drawSccPdfHeader(doc, 'FEE PAYMENT RECEIPT');
-    doc.fillColor('#111827').fontSize(11);
-    const rows = [
+    drawSccBrandedHeader(doc, 'FEE RECEIPT');
+
+    let y = drawSectionTitle(doc, 'Receipt Details', 180);
+    y = drawDetailGrid(doc, [
       ['Receipt No', receiptNumber],
       ['Date', formatDate(fee.payment_date || new Date().toISOString())],
+      ['Branch', fee.branch_name || '-'],
+    ], y);
+
+    y = drawSectionTitle(doc, 'Student Details', y + 6);
+    y = drawDetailGrid(doc, [
       ['Student Name', fee.student_name || '-'],
-      ['Roll No', fee.roll_no || '-'],
+      ['Roll Number', fee.roll_no || '-'],
+      ['Admission Number', fee.roll_no || '-'],
       ['Batch', fee.batch_name || '-'],
-      ['Parent Name', fee.parent_name || '-'],
-      ['Phone', fee.parent_phone || '-'],
-      ['Total Fees', `Rs. ${formatAmount(totalFees || amount)}`],
-      ['Paid Amount', `Rs. ${formatAmount(amount)}`],
-      ['Balance Amount', `Rs. ${formatAmount(fee.pending_fee)}`],
+      ['Parent Mobile Number', fee.parent_phone || '-'],
+    ], y);
+
+    y = drawSectionTitle(doc, 'Fee Details', y + 6);
+    const feeRows = [
+      ['Total Course Fees', `Rs. ${formatAmount(totalFees || amount)}`],
+      ['Fees Received', `Rs. ${formatAmount(amount)}`],
+      ['Remaining Fees', `Rs. ${formatAmount(fee.pending_fee)}`],
+      ['Next Installment Date', fee.due_date ? formatDate(fee.due_date) : '-'],
       ['Payment Mode', fee.payment_mode || 'Not specified'],
-      ['Next Due Date', fee.due_date ? formatDate(fee.due_date) : '-'],
     ];
-    rows.forEach(([label, value]) => {
-      const y = doc.y;
-      doc.roundedRect(70, y, 455, 28, 4).fillAndStroke('#f8fafc', '#e2e8f0');
-      doc.fillColor('#334155').font('Helvetica-Bold').text(label, 84, y + 8, { width: 145 });
-      doc.fillColor('#111827').font('Helvetica').text(String(value), 235, y + 8, { width: 275 });
-      doc.y = y + 34;
+    feeRows.forEach(([label, value], index) => {
+      const rowY = y + index * 31;
+      doc.roundedRect(48, rowY, 499, 26, 3)
+        .fillAndStroke(index % 2 ? '#ffffff' : '#f8fafc', '#dbe4ef');
+      doc.fillColor('#334155').font('Helvetica-Bold').fontSize(9)
+        .text(label, 60, rowY + 8, { width: 205 });
+      doc.fillColor('#111827').font('Helvetica').fontSize(9)
+        .text(value, 280, rowY + 8, { width: 250 });
     });
-    doc.moveDown(1.2);
-    doc.strokeColor('#64748b').moveTo(385, doc.y + 34).lineTo(520, doc.y + 34).stroke();
-    doc.fillColor('#475569').fontSize(9).text('Admin Signature', 385, doc.y + 40, { width: 135, align: 'center' });
-    doc.fontSize(8).fillColor('#64748b').text(
-      `SCC | Contact: ${adminPhone || '-'} | ${fee.contact_email || ''}`,
-      48,
-      785,
-      { width: 499, align: 'center' }
-    );
+    y += feeRows.length * 31 + 12;
+
+    doc.roundedRect(48, y, 499, 36, 5).fillAndStroke('#e8f7ec', '#5aa66a');
+    doc.fillColor('#176b32').font('Helvetica-Bold').fontSize(11)
+      .text('✓  Fees Received Successfully', 62, y + 12, { width: 470 });
+
+    doc.fillColor('#475569').font('Helvetica').fontSize(9)
+      .text(
+        'Thank you for choosing Shiv Chhatrapati Coaching Classes. For any fee-related queries please contact office administration.',
+        70,
+        y + 68,
+        { width: 455, align: 'center', lineGap: 3 }
+      );
+    doc.strokeColor('#cbd5e1').lineWidth(1).moveTo(48, 784).lineTo(547, 784).stroke();
+    doc.fillColor('#64748b').font('Helvetica').fontSize(8)
+      .text('Computer-generated receipt | Valid for Satpur and Meri Branch', 48, 793, {
+        width: 499,
+        align: 'center',
+      });
   });
 
   const file = await uploadGeneratedFile({
