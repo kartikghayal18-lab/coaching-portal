@@ -38,6 +38,12 @@ const {
   sendWhatsAppNotification,
 } = require('./services/notificationService');
 const {
+  ensureOnboardingWhatsAppSchema,
+  getStudentOnboardingStatus,
+  retryPendingOnboarding,
+  sendStudentOnboarding,
+} = require('./services/onboardingWhatsApp');
+const {
   findStudentByParentPhone,
   findStudentByParentPhoneAnyCoaching,
   findStudentByParentSession,
@@ -3769,6 +3775,19 @@ app.get('/cron/whatsapp/fee-reminders', async (req, res) => {
   return res.json({ ok: true, summary });
 });
 
+app.get('/cron/whatsapp/onboarding-retries', async (req, res) => {
+  const cronSecret = String(process.env.CRON_SECRET || '').trim();
+  if (!cronSecret) {
+    return res.status(503).json({ ok: false, error: 'CRON_SECRET is required for onboarding retries' });
+  }
+  if (String(req.headers.authorization || '').trim() !== `Bearer ${cronSecret}`) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+
+  const summary = await retryPendingOnboarding();
+  return res.json({ ok: true, summary });
+});
+
 app.get('/cron/whatsapp/monthly-parent-reports', async (req, res) => {
   const cronSecret = String(process.env.CRON_SECRET || '').trim();
   if (!cronSecret) {
@@ -5258,10 +5277,9 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
     throw error;
   }
   const createdStudentId = createdStudentResult.lastID;
-  let createdFeeSummary = null;
 
   if (totalFee > 0) {
-    createdFeeSummary = await setStudentTotalFee({
+    await setStudentTotalFee({
       coachingId,
       branchId,
       studentId: createdStudentId,
@@ -5269,75 +5287,12 @@ app.post('/admin/students', requireCoachingAdmin, async (req, res) => {
     });
   }
 
-  const admissionRecipients = [
-    { key: 'student', phone: whatsappNumber || contactPhone },
-    { key: 'parent', phone: parentWhatsappNumber || guardianPhone },
-  ].filter((recipient) => recipient.phone);
-
-  if (admissionRecipients.length) {
-    const admissionMessageLines = [
-      `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
-      '🎉 Admission Confirmed',
-      `Student: ${name}`,
-      `Roll No: ${rollNo}`,
-      `Batch: ${batch.name || 'Assigned batch'}`,
-      `Total Fees: ₹${formatWhatsAppAmount(createdFeeSummary?.totalFee || 0)}`,
-      `Pending Fees: ₹${formatWhatsAppAmount(createdFeeSummary?.pendingFee || 0)}`,
-      'Your child is now registered successfully.',
-      'Welcome to our coaching family.',
-    ];
-    const admissionMessage = compactWhatsAppMessage(admissionMessageLines);
-    const admissionTemplateName = 'admission_confirmed';
-
-    for (const recipient of admissionRecipients) {
-      try {
-        const admissionTemplateComponents = [{
-          type: 'body',
-          parameters: [
-            { type: 'text', text: recipient.key === 'parent' ? parentName || 'Parent' : name },
-            { type: 'text', text: name },
-            { type: 'text', text: rollNo },
-            { type: 'text', text: req.currentBranch?.name || 'SCC' },
-          ],
-        }];
-        console.log('[WHATSAPP] Admission template parameter count:', {
-          recipient: recipient.key,
-          templateName: admissionTemplateName,
-          count: admissionTemplateComponents[0].parameters.length,
-        });
-        const admissionNotificationResult = await sendWhatsAppNotification({
-          studentId: createdStudentId,
-          phone: recipient.phone,
-          type: 'admission_confirmed',
-          message: admissionMessage,
-          eventKey: `admission_confirmed:${recipient.key}:${createdStudentId}`,
-          templateName: admissionTemplateName,
-          templateLanguage: 'en',
-          templateComponents: admissionTemplateComponents,
-        });
-        if (admissionNotificationResult?.failed) {
-          console.error('[WHATSAPP] Admission confirmation API failure', {
-            studentId: createdStudentId,
-            recipient: recipient.key,
-            phone: recipient.phone,
-            error: admissionNotificationResult.error || 'WhatsApp send failed',
-          });
-        } else {
-          console.log('[WHATSAPP] Admission confirmation result:', {
-            recipient: recipient.key,
-            result: admissionNotificationResult,
-          });
-        }
-      } catch (error) {
-        console.error('[WHATSAPP] Admission confirmation failed', {
-          studentId: createdStudentId,
-          recipient: recipient.key,
-          phone: recipient.phone,
-          error: error.message,
-        });
-      }
-    }
-  }
+  await sendStudentOnboarding(createdStudentId, { coachingId, branchId })
+    .catch((error) => console.error('[WHATSAPP ONBOARDING] Immediate send failed', {
+      studentId: createdStudentId,
+      branchId,
+      error: error.message,
+    }));
 
   req.session.flash = {
     type: 'success',
@@ -5802,6 +5757,7 @@ app.get('/admin/students/:id/overview', requireCoachingAdmin, async (req, res) =
   }
 
   startAdminStudentPreview(req, studentId);
+  const whatsappOnboarding = await getStudentOnboardingStatus(coachingId, branchId, studentId);
   renderWithMessage(res, 'admin-student-overview', {
     user: req.session.user,
     coaching,
@@ -5815,9 +5771,24 @@ app.get('/admin/students/:id/overview', requireCoachingAdmin, async (req, res) =
     feeSummary: dashboard.feeSummary,
     marksSummary: dashboard.marksSummary,
     progressSeries: dashboard.progressSeries,
+    whatsappOnboarding,
     flash: req.session.flash,
   });
   req.session.flash = null;
+});
+
+app.post('/admin/students/:id/resend-whatsapp', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
+  const studentId = Number(req.params.id);
+  const result = await sendStudentOnboarding(studentId, { coachingId, branchId });
+
+  req.session.flash = result.error
+    ? { type: 'error', text: result.error }
+    : result.failed
+      ? { type: 'error', text: `WhatsApp resend failed for ${result.failed} recipient(s).` }
+      : { type: 'success', text: result.sent ? 'WhatsApp onboarding sent.' : 'WhatsApp onboarding was already delivered.' };
+  return res.redirect(`/admin/students/${studentId}/overview`);
 });
 
 app.post('/admin/students/:id/update', requireCoachingAdmin, async (req, res) => {
@@ -7023,6 +6994,7 @@ async function prepareApp() {
       .then(() => ensureSessionTable())
       .then(() => ensureWhatsAppSchema())
       .then(() => ensureNotificationSchema())
+      .then(() => ensureOnboardingWhatsAppSchema())
       .then(() => ensureFeeStructureSchema())
       .then(() => ensurePerformanceIndexes())
       .then(async () => {
@@ -7051,6 +7023,12 @@ async function startServer() {
   const server = app.listen(PORT, () => {
     console.log(`Server started on http://localhost:${PORT}`);
   });
+  const retryTimer = setInterval(() => {
+    retryPendingOnboarding().catch((error) => {
+      console.error('[WHATSAPP ONBOARDING] Scheduled retry failed', error);
+    });
+  }, 5 * 60 * 1000);
+  retryTimer.unref();
 
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {

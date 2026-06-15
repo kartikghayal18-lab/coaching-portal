@@ -212,12 +212,14 @@ async function sendMetaMessage({ settings, payload }) {
       payload,
     });
 
+    const timeoutMs = Number(process.env.WHATSAPP_REQUEST_TIMEOUT_MS || 15000);
     const response = await fetch(apiUrl, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${settings.accessToken}`,
         'Content-Type': 'application/json',
       },
+      signal: AbortSignal.timeout(timeoutMs),
       body: JSON.stringify({
         messaging_product: 'whatsapp',
         ...payload,
