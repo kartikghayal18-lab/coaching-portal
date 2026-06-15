@@ -4000,6 +4000,7 @@ app.post('/admin/settings/password', requireCoachingAdmin, async (req, res) => {
 
 app.post('/admin/settings/profile', requireCoachingAdmin, async (req, res) => {
   const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const adminDisplayName = (req.body.adminDisplayName || '').trim();
   const adminContactPhone = (req.body.adminContactPhone || '').trim();
   const adminEmail = (req.body.adminEmail || '').trim().toLowerCase();
@@ -4036,25 +4037,32 @@ app.post('/admin/settings/profile', requireCoachingAdmin, async (req, res) => {
     return res.redirect('/admin/dashboard?section=settings');
   }
 
-  await withTransaction(async (tx) => {
-    await tx.run(
+  const updatedAdmin = await withTransaction(async (tx) => {
+    const adminUpdate = await tx.get(
       `UPDATE users
        SET name = ?, contact_phone = ?, email = ?
-       WHERE id = ? AND coaching_id = ? AND role = 'admin'`,
-      [adminDisplayName, adminContactPhone || null, adminEmail, req.session.user.id, coachingId]
+       WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'admin'
+       RETURNING id, name, contact_phone, email`,
+      [adminDisplayName, adminContactPhone || null, adminEmail, req.session.user.id, coachingId, branchId]
     );
 
     await tx.run(
       `UPDATE coaching_classes
        SET name = ?, brand_name = ?, contact_email = ?, logo_url = ?, theme_primary = ?, theme_background = ?, theme_surface = ?
-       WHERE id = ?`,
+      WHERE id = ?`,
       [coachingName, brandName, contactEmail || null, logoUrl || null, themePrimary, themeBackground, themeSurface, coachingId]
     );
+    return adminUpdate;
   });
 
-  req.session.user.name = adminDisplayName;
-  req.session.user.contactPhone = adminContactPhone || null;
-  req.session.user.email = adminEmail;
+  if (!updatedAdmin) {
+    req.session.flash = { type: 'error', text: 'Admin profile was not updated. Please sign in again and retry.' };
+    return res.redirect('/admin/dashboard?section=settings');
+  }
+
+  req.session.user.name = updatedAdmin.name;
+  req.session.user.contactPhone = updatedAdmin.contact_phone || null;
+  req.session.user.email = updatedAdmin.email;
   await auditActor(req, 'admin_profile_updated', {
     targetType: 'coaching',
     targetId: coachingId,
@@ -4066,8 +4074,20 @@ app.post('/admin/settings/profile', requireCoachingAdmin, async (req, res) => {
     },
   });
   req.session.user.coachingName = coachingName;
-  req.session.flash = { type: 'success', text: 'Settings updated successfully. Admin OTP email updated.' };
-  return res.redirect('/admin/dashboard?section=settings');
+  req.session.flash = {
+    type: 'success',
+    text: `Settings updated successfully. Login and password reset OTPs will now be sent to ${updatedAdmin.email}.`,
+  };
+  return req.session.save((error) => {
+    if (error) {
+      console.error('Failed to persist updated admin email in session', {
+        adminId: updatedAdmin.id,
+        branchId,
+        error: error.message,
+      });
+    }
+    return res.redirect('/admin/dashboard?section=settings');
+  });
 });
 
 app.post('/admin/settings/whatsapp-notifications', requireCoachingAdmin, async (req, res) => {
