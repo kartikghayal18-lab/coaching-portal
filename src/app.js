@@ -3950,6 +3950,8 @@ app.post('/admin/password/setup/save', requireCoachingAdmin, async (req, res) =>
 });
 
 app.post('/admin/settings/password', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
   const oldPassword = req.body.oldPassword || '';
   const newPassword = (req.body.newPassword || '').trim();
   const confirmPassword = (req.body.confirmPassword || '').trim();
@@ -3957,9 +3959,9 @@ app.post('/admin/settings/password', requireCoachingAdmin, async (req, res) => {
   const admin = await get(
     `SELECT id, password_hash
      FROM users
-     WHERE id = ? AND coaching_id = ? AND role = 'admin'
+     WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'admin'
      LIMIT 1`,
-    [req.session.user.id, req.session.user.coachingId]
+    [req.session.user.id, coachingId, branchId]
   );
 
   if (!admin) {
@@ -3985,12 +3987,17 @@ app.post('/admin/settings/password', requireCoachingAdmin, async (req, res) => {
   }
 
   const passwordHash = await bcrypt.hash(newPassword, 10);
-  await run(
+  const updatedAdmin = await get(
     `UPDATE users
      SET password_hash = ?, must_change_password = 0, password_changed_at = CURRENT_TIMESTAMP
-     WHERE id = ? AND coaching_id = ? AND role = 'admin'`,
-    [passwordHash, req.session.user.id, req.session.user.coachingId]
+     WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'admin'
+     RETURNING id`,
+    [passwordHash, req.session.user.id, coachingId, branchId]
   );
+  if (!updatedAdmin) {
+    req.session.flash = { type: 'error', text: 'Password was not updated. Please sign in again and retry.' };
+    return res.redirect('/admin/dashboard?section=settings');
+  }
 
   req.session.user.mustChangePassword = false;
   await auditActor(req, 'admin_password_changed');
