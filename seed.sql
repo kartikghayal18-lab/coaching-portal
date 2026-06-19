@@ -141,15 +141,15 @@ SELECT
   branch.id,
   'admin',
   0,
-  'satpur-admin',
+  'Nivedita',
   NULL,
   'Satpur Branch Admin',
   NULL,
   NULL,
   NULL,
   'satpur-admin@example.com',
-  '$2a$10$SWU6Er2QnTCyytjmjBpsXOqKZR9RvP9sRFY4Ul.aWQwuooUZjXiHO',
-  1
+  '$2a$10$JEQqgnNouRaaOqWi4gl/.eVKGBUaf5oTg6HyK3O2fR//apUt/mz1K',
+  0
 FROM coaching_classes coaching
 JOIN branches branch ON branch.coaching_id = coaching.id AND branch.code = 'satpur'
 WHERE coaching.slug = 'scc'
@@ -187,8 +187,8 @@ SELECT
   NULL,
   NULL,
   'meri-admin@example.com',
-  '$2a$10$SWU6Er2QnTCyytjmjBpsXOqKZR9RvP9sRFY4Ul.aWQwuooUZjXiHO',
-  1
+  '$2a$10$jGpNpq8Dq003cQoidWX34e4ByV2DU4WPp5w9xkL5cKuXAJ3Io5JhC',
+  0
 FROM coaching_classes coaching
 JOIN branches branch ON branch.coaching_id = coaching.id AND branch.code = 'meri'
 WHERE coaching.slug = 'scc'
