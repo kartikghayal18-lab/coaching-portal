@@ -187,7 +187,7 @@
     <section class="card">
       <h2>My Test Papers</h2>
       <table>
-        <tr><th>Test</th><th>Type</th><th>Uploaded By</th><th>Marks</th><th>Upload Date</th><th>Actions</th></tr>
+        <tr><th>Test</th><th>Type</th><th>Uploaded By</th><th>Marks</th><th>Percentage</th><th>Rank</th><th>OMR</th><th>Upload Date</th><th>Actions</th></tr>
         <% papers.forEach((p) => { %>
           <tr>
             <td><%= p.test_label || p.original_name %></td>
@@ -196,6 +196,16 @@
             <td>
               <% if (p.marks_obtained !== null && p.max_marks !== null) { %>
                 <%= p.marks_obtained %>/<%= p.max_marks %>
+              <% } else { %>
+                -
+              <% } %>
+            </td>
+            <td><%= p.percentage !== null && p.percentage !== undefined ? `${p.percentage}%` : '-' %></td>
+            <td><%= p.omr_rank !== null && p.omr_rank !== undefined ? `#${p.omr_rank}` : '-' %></td>
+            <td>
+              <% if (p.omr_scan_path) { %>
+                <a href="/omr/<%= p.id %>/view" target="_blank" rel="noopener">View OMR</a>
+                <a href="/omr/<%= p.id %>/download">Download</a>
               <% } else { %>
                 -
               <% } %>

@@ -45,6 +45,13 @@
         actionHref: '#paper-upload-panel',
         actionLabel: 'Upload Paper'
       },
+      omr: {
+        label: 'OMR Results',
+        title: 'Import OMR marks and link scanned sheets',
+        copy: 'Preview OScan CSV results, commit matched rows, and attach OMR sheets to student records.',
+        actionHref: '#omr-import-panel',
+        actionLabel: 'Import OMR'
+      },
       notes: {
         label: 'Learning Hub',
         title: 'Notes, links, and announcements',
@@ -167,6 +174,7 @@
         <a class="ops2-nav__item <%= activeSection === 'attendance' ? 'is-active' : '' %>" href="/admin/dashboard?section=attendance"><span>◌</span><span>Attendance</span></a>
         <a class="ops2-nav__item <%= activeSection === 'fees' ? 'is-active' : '' %>" href="/admin/dashboard?section=fees"><span>◈</span><span>Fees</span></a>
         <a class="ops2-nav__item <%= activeSection === 'papers' ? 'is-active' : '' %>" href="/admin/dashboard?section=papers"><span>◆</span><span>Test Papers</span></a>
+        <a class="ops2-nav__item <%= activeSection === 'omr' ? 'is-active' : '' %>" href="/admin/dashboard?section=omr"><span>▣</span><span>OMR Results</span></a>
         <a class="ops2-nav__item <%= activeSection === 'notes' ? 'is-active' : '' %>" href="/admin/dashboard?section=notes"><span>◫</span><span>Notes</span></a>
         <a class="ops2-nav__item <%= activeSection === 'whatsapp' ? 'is-active' : '' %>" href="/admin/dashboard?section=whatsapp"><span>◍</span><span>WhatsApp</span></a>
         <a class="ops2-nav__item <%= activeSection === 'notifications' ? 'is-active' : '' %>" href="/admin/dashboard?section=notifications"><span>◔</span><span>Notifications</span></a>
@@ -897,6 +905,129 @@
                       <tr>
                         <td><%= p.roll_no %></td><td><%= p.name %></td><td><%= p.batch_name || '-' %></td><td><%= p.test_label || p.original_name %></td><td><%= p.paper_type === 'answer_submission' ? 'Answer Upload' : 'General' %></td><td><%= p.uploaded_by_name || '-' %></td><td><%= p.marks_obtained !== null && p.max_marks !== null ? `${p.marks_obtained}/${p.max_marks}` : '-' %></td><td><%= p.upload_date %></td>
                         <td class="ops2-actions-inline"><a href="/papers/<%= p.id %>/view" target="_blank" rel="noopener" class="ops2-inline-link">Open</a><a href="/papers/<%= p.id %>/download" class="ops2-inline-link">Download</a><a href="/admin/papers/<%= p.id %>/debug" target="_blank" rel="noopener" class="ops2-inline-link">Debug</a><form method="post" action="/papers/<%= p.id %>/delete" class="inline-delete-form" onsubmit="return confirm('Delete this paper?');"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><input type="hidden" name="redirectTo" value="/admin/dashboard?section=papers" /><button type="submit" class="text-delete-btn" style="background:none;border:0;box-shadow:none;border-radius:0;padding:0;margin:0;color:#dc2626;font:inherit;font-weight:700;line-height:1.2;cursor:pointer;width:auto;min-height:0;height:auto;">Delete</button></form></td>
+                      </tr>
+                    <% }) %>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          <% } %>
+
+          <% if (activeSection === 'omr') { %>
+            <section class="ops2-split-grid">
+              <section class="ops2-panel" id="omr-import-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Import Preview</p><h3>Upload OScan result CSV</h3></div></div>
+                <form method="post" action="/admin/omr/import/preview" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field"><label>Test Name</label><input type="text" name="testLabel" placeholder="NEET Mock Test 01" required /></div>
+                  <div class="ops2-field"><label>Max Marks fallback</label><input type="number" name="maxMarks" step="0.01" min="0" placeholder="Use if CSV has no max marks" /></div>
+                  <label class="ops2-check full"><input type="checkbox" name="overwrite" /> Overwrite duplicate roll numbers for this test</label>
+                  <div class="ops2-field full"><label>CSV / XLSX File</label><input type="file" name="omrFile" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Preview Import</button></div>
+                </form>
+              </section>
+
+              <section class="ops2-panel">
+                <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Answer Sheets</p><h3>Bulk link scanned OMR files</h3></div></div>
+                <div class="ops2-rules">
+                  <p>Name files by roll number: <code>101.pdf</code> or <code>101.jpg</code></p>
+                  <p>Existing OMR for the same test is replaced safely.</p>
+                </div>
+                <form method="post" action="/admin/omr/scans/upload" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
+                  <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                  <div class="ops2-field full"><label>Test Name</label><input type="text" name="testLabel" placeholder="Same test name used in import" required /></div>
+                  <div class="ops2-field full"><label>PDF / JPG Sheets or ZIP</label><input type="file" name="omrScans" accept=".pdf,.jpg,.jpeg,.png,.zip,application/pdf,image/jpeg,image/png,application/zip" multiple required /></div>
+                  <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Upload OMR Sheets</button></div>
+                </form>
+              </section>
+            </section>
+
+            <% if (omrPreview) { %>
+              <section class="ops2-panel">
+                <div class="ops2-panel__header">
+                  <div>
+                    <p class="ops2-eyebrow">Preview Ready</p>
+                    <h3><%= omrPreview.testLabel %></h3>
+                    <p class="tiny-note">Matched rows are committed in one transaction. Duplicates are ignored unless overwrite was selected.</p>
+                  </div>
+                  <div class="ops2-actions-inline">
+                    <form method="post" action="/admin/omr/import/commit"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="ops2-primary-btn ops2-primary-btn--small">Commit Import</button></form>
+                    <form method="post" action="/admin/omr/import/cancel"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="ops2-secondary-btn ops2-primary-btn--small">Clear</button></form>
+                  </div>
+                </div>
+                <div class="ops2-table-shell">
+                  <table class="ops2-table ops2-table--wide">
+                    <thead><tr><th>Row</th><th>Roll</th><th>Student</th><th>Marks</th><th>%</th><th>Rank</th><th>Correct</th><th>Wrong</th><th>Blank</th><th>Status</th><th>Error</th></tr></thead>
+                    <tbody>
+                      <% omrPreview.rows.slice(0, 100).forEach((row) => { %>
+                        <tr>
+                          <td><%= row.rowNumber %></td>
+                          <td><%= row.matchedRollNo || row.rollNo || row.barcode || '-' %></td>
+                          <td><%= row.studentName || '-' %></td>
+                          <td><%= row.obtainedMarks !== null && row.maxMarks !== null ? `${row.obtainedMarks}/${row.maxMarks}` : '-' %></td>
+                          <td><%= row.percentage !== null ? row.percentage : '-' %></td>
+                          <td><%= row.rank !== null ? row.rank : '-' %></td>
+                          <td><%= row.correctCount !== null ? row.correctCount : '-' %></td>
+                          <td><%= row.wrongCount !== null ? row.wrongCount : '-' %></td>
+                          <td><%= row.unattemptedCount !== null ? row.unattemptedCount : '-' %></td>
+                          <td><span class="status <%= row.status === 'ready' ? 'paid' : row.status === 'duplicate' ? 'pending' : 'overdue' %>"><%= row.status %></span></td>
+                          <td><%= row.error || '-' %></td>
+                        </tr>
+                      <% }) %>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            <% } %>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">OMR Records</p><h3>Imported results and linked sheets</h3></div></div>
+              <div class="ops2-table-shell">
+                <table class="ops2-table ops2-table--wide">
+                  <thead><tr><th>Roll</th><th>Name</th><th>Batch</th><th>Test</th><th>Marks</th><th>%</th><th>Rank</th><th>Subject Marks</th><th>OMR Sheet</th></tr></thead>
+                  <tbody>
+                    <% papers.filter((p) => p.paper_type === 'omr_result' || p.omr_scan_path).forEach((p) => { %>
+                      <tr>
+                        <td><%= p.roll_no %></td>
+                        <td><%= p.name %></td>
+                        <td><%= p.batch_name || '-' %></td>
+                        <td><%= p.test_label || p.original_name %></td>
+                        <td><%= p.marks_obtained !== null && p.max_marks !== null ? `${p.marks_obtained}/${p.max_marks}` : '-' %></td>
+                        <td><%= p.percentage !== null ? p.percentage : '-' %></td>
+                        <td><%= p.omr_rank !== null && p.omr_rank !== undefined ? `#${p.omr_rank}` : '-' %></td>
+                        <td>Phy: <%= p.physics_marks ?? '-' %>, Chem: <%= p.chemistry_marks ?? '-' %>, Bot: <%= p.botany_marks ?? '-' %>, Zoo: <%= p.zoology_marks ?? '-' %></td>
+                        <td class="ops2-actions-inline">
+                          <% if (p.omr_scan_path) { %>
+                            <a href="/omr/<%= p.id %>/view" target="_blank" rel="noopener" class="ops2-inline-link">View</a>
+                            <a href="/omr/<%= p.id %>/download" class="ops2-inline-link">Download</a>
+                            <form method="post" action="/admin/omr/scans/<%= p.id %>/delete" class="inline-delete-form" onsubmit="return confirm('Delete this OMR sheet?');"><input type="hidden" name="_csrf" value="<%= csrfToken %>" /><button type="submit" class="text-delete-btn" style="background:none;border:0;box-shadow:none;border-radius:0;padding:0;margin:0;color:#dc2626;font:inherit;font-weight:700;line-height:1.2;cursor:pointer;width:auto;min-height:0;height:auto;">Delete</button></form>
+                          <% } else { %>
+                            <span class="muted">Not uploaded</span>
+                          <% } %>
+                        </td>
+                      </tr>
+                    <% }) %>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="ops2-panel">
+              <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Import History</p><h3>Recent OMR imports</h3></div></div>
+              <div class="ops2-table-shell">
+                <table class="ops2-table">
+                  <thead><tr><th>Date</th><th>Test</th><th>File</th><th>Rows</th><th>Matched</th><th>Unmatched</th><th>Duplicates</th><th>By</th></tr></thead>
+                  <tbody>
+                    <% (omrImports || []).forEach((item) => { %>
+                      <tr>
+                        <td><%= item.imported_at %></td>
+                        <td><%= item.test_label %></td>
+                        <td><%= item.original_file_name %></td>
+                        <td><%= item.row_count %></td>
+                        <td><%= item.matched_count %></td>
+                        <td><%= item.unmatched_count %></td>
+                        <td><%= item.duplicate_count %></td>
+                        <td><%= item.imported_by_name || '-' %></td>
                       </tr>
                     <% }) %>
                   </tbody>

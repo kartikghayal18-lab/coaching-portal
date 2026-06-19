@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const { Readable } = require('stream');
 const express = require('express');
 const session = require('express-session');
@@ -122,11 +123,240 @@ function getCurrentMonthValue() {
   return `${year}-${month}`;
 }
 
+function normalizeOmrHeader(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function parseCsvRows(buffer) {
+  const text = buffer.toString('utf8').replace(/^\uFEFF/, '');
+  const rows = [];
+  let row = [];
+  let value = '';
+  let quoted = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (quoted && char === '"' && next === '"') {
+      value += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (!quoted && char === ',') {
+      row.push(value);
+      value = '';
+    } else if (!quoted && (char === '\n' || char === '\r')) {
+      if (char === '\r' && next === '\n') index += 1;
+      row.push(value);
+      if (row.some((cell) => String(cell || '').trim())) rows.push(row);
+      row = [];
+      value = '';
+    } else {
+      value += char;
+    }
+  }
+  row.push(value);
+  if (row.some((cell) => String(cell || '').trim())) rows.push(row);
+  return rows;
+}
+
+function readZipEntries(buffer) {
+  const entries = [];
+  let offset = buffer.length - 22;
+  while (offset >= 0 && buffer.readUInt32LE(offset) !== 0x06054b50) offset -= 1;
+  if (offset < 0) throw new Error('Invalid ZIP file');
+  const entryCount = buffer.readUInt16LE(offset + 10);
+  let centralOffset = buffer.readUInt32LE(offset + 16);
+
+  for (let index = 0; index < entryCount; index += 1) {
+    if (buffer.readUInt32LE(centralOffset) !== 0x02014b50) throw new Error('Invalid ZIP directory');
+    const compression = buffer.readUInt16LE(centralOffset + 10);
+    const compressedSize = buffer.readUInt32LE(centralOffset + 20);
+    const fileNameLength = buffer.readUInt16LE(centralOffset + 28);
+    const extraLength = buffer.readUInt16LE(centralOffset + 30);
+    const commentLength = buffer.readUInt16LE(centralOffset + 32);
+    const localHeaderOffset = buffer.readUInt32LE(centralOffset + 42);
+    const fileName = buffer.subarray(centralOffset + 46, centralOffset + 46 + fileNameLength).toString('utf8');
+
+    const localNameLength = buffer.readUInt16LE(localHeaderOffset + 26);
+    const localExtraLength = buffer.readUInt16LE(localHeaderOffset + 28);
+    const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
+    const compressed = buffer.subarray(dataStart, dataStart + compressedSize);
+    let data;
+    if (compression === 0) {
+      data = Buffer.from(compressed);
+    } else if (compression === 8) {
+      data = zlib.inflateRawSync(compressed);
+    } else {
+      throw new Error(`Unsupported ZIP compression method ${compression}`);
+    }
+    if (fileName && !fileName.endsWith('/')) entries.push({ name: fileName, data });
+    centralOffset += 46 + fileNameLength + extraLength + commentLength;
+  }
+
+  return entries;
+}
+
+function decodeXmlText(value) {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
+}
+
+function parseSheetXml(sheetXml, sharedStrings) {
+  const rows = [];
+  const rowMatches = sheetXml.match(/<row\b[\s\S]*?<\/row>/g) || [];
+  for (const rowXml of rowMatches) {
+    const cells = [];
+    const cellMatches = rowXml.match(/<c\b[\s\S]*?<\/c>/g) || [];
+    for (const cellXml of cellMatches) {
+      const ref = (cellXml.match(/\br="([A-Z]+)\d+"/) || [])[1] || '';
+      const columnIndex = ref.split('').reduce((sum, char) => (sum * 26) + char.charCodeAt(0) - 64, 0) - 1;
+      const type = (cellXml.match(/\bt="([^"]+)"/) || [])[1] || '';
+      const rawValue = decodeXmlText((cellXml.match(/<v[^>]*>([\s\S]*?)<\/v>/) || [])[1] || (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/) || [])[1] || '');
+      const value = type === 's' ? (sharedStrings[Number(rawValue)] || '') : rawValue;
+      cells[columnIndex >= 0 ? columnIndex : cells.length] = value;
+    }
+    if (cells.some((cell) => String(cell || '').trim())) rows.push(cells.map((cell) => cell || ''));
+  }
+  return rows;
+}
+
+function parseXlsxRows(buffer) {
+  const entries = readZipEntries(buffer);
+  const entryByName = new Map(entries.map((entry) => [entry.name.replace(/^\/+/, ''), entry.data]));
+  const sharedXml = entryByName.get('xl/sharedStrings.xml')?.toString('utf8') || '';
+  const sharedStrings = (sharedXml.match(/<si\b[\s\S]*?<\/si>/g) || []).map((item) => decodeXmlText(
+    (item.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [])
+      .map((part) => (part.match(/<t[^>]*>([\s\S]*?)<\/t>/) || [])[1] || '')
+      .join('')
+  ));
+  const sheetEntry = entries.find((entry) => /^xl\/worksheets\/sheet\d+\.xml$/.test(entry.name));
+  if (!sheetEntry) throw new Error('No worksheet found in XLSX file');
+  return parseSheetXml(sheetEntry.data.toString('utf8'), sharedStrings);
+}
+
+function parseOmrNumber(value) {
+  const cleaned = String(value ?? '').replace(/,/g, '').trim();
+  if (!cleaned) return null;
+  const number = Number(cleaned);
+  return Number.isFinite(number) ? number : null;
+}
+
+function getOmrValue(row, aliases) {
+  for (const alias of aliases) {
+    const value = row[normalizeOmrHeader(alias)];
+    if (value !== undefined && String(value).trim() !== '') return String(value).trim();
+  }
+  return '';
+}
+
+function normalizeOmrRow(row, fallbackMaxMarks = null) {
+  const obtainedMarks = parseOmrNumber(getOmrValue(row, ['Correct Marks Total', 'Total Marks Total', 'Obtained Marks', 'Marks Obtained']));
+  const maxMarks = parseOmrNumber(getOmrValue(row, ['Max Marks', 'Maximum Marks', 'Total Maximum Marks', 'Out Of'])) ?? fallbackMaxMarks;
+  return {
+    rollNo: getOmrValue(row, ['RollNumber', 'Roll Number', 'Roll No', 'Roll']),
+    barcode: getOmrValue(row, ['Barcode', 'Bar Code']),
+    correctCount: parseOmrNumber(getOmrValue(row, ['Correct Total', 'Correct Count'])),
+    wrongCount: parseOmrNumber(getOmrValue(row, ['Wrong Total', 'Wrong Count'])),
+    unattemptedCount: parseOmrNumber(getOmrValue(row, ['Unattempted Total', 'Unattempted Count', 'Blank Total'])),
+    obtainedMarks,
+    maxMarks,
+    percentage: maxMarks && obtainedMarks !== null ? Number(((obtainedMarks / maxMarks) * 100).toFixed(2)) : parseOmrNumber(getOmrValue(row, ['Percentage', 'Percent'])),
+    physicsMarks: parseOmrNumber(getOmrValue(row, ['Physics Marks', 'Physics'])),
+    chemistryMarks: parseOmrNumber(getOmrValue(row, ['Chemistry Marks', 'Chemistry'])),
+    botanyMarks: parseOmrNumber(getOmrValue(row, ['Botany Marks', 'Botany'])),
+    zoologyMarks: parseOmrNumber(getOmrValue(row, ['Zoology Marks', 'Zoology'])),
+    rank: parseOmrNumber(getOmrValue(row, ['Rank', 'Student Rank'])),
+    raw: row,
+  };
+}
+
+function sanitizeOmrFileName(value) {
+  return String(value || '').replace(/[^a-zA-Z0-9._-]/g, '_').replace(/\.+/g, '.').slice(0, 160);
+}
+
+function getOmrStoragePath(testId, rollNo, originalName) {
+  const extension = path.extname(originalName || '').toLowerCase();
+  const safeExtension = ['.pdf', '.jpg', '.jpeg', '.png'].includes(extension) ? extension : '.pdf';
+  return path.join(__dirname, '..', 'uploads', 'omr', String(testId), `${sanitizeOmrFileName(rollNo)}${safeExtension}`);
+}
+
+async function ensureOmrSchema() {
+  await run(`ALTER TABLE users ADD COLUMN IF NOT EXISTS omr_barcode VARCHAR(120)`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS percentage NUMERIC(6,2)`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS correct_count INTEGER`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS wrong_count INTEGER`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS unattempted_count INTEGER`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS physics_marks NUMERIC(10,2)`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS chemistry_marks NUMERIC(10,2)`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS botany_marks NUMERIC(10,2)`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS zoology_marks NUMERIC(10,2)`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS omr_barcode VARCHAR(120)`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS omr_rank INTEGER`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS omr_import_id INTEGER`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS omr_scan_path TEXT`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS omr_scan_original_name TEXT`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS omr_scan_uploaded_at TIMESTAMPTZ`);
+  await run(`
+    CREATE TABLE IF NOT EXISTS omr_imports (
+      id SERIAL PRIMARY KEY,
+      coaching_id INTEGER NOT NULL,
+      branch_id INTEGER NOT NULL,
+      test_label VARCHAR(220) NOT NULL,
+      original_file_name TEXT NOT NULL,
+      row_count INTEGER NOT NULL DEFAULT 0,
+      matched_count INTEGER NOT NULL DEFAULT 0,
+      unmatched_count INTEGER NOT NULL DEFAULT 0,
+      duplicate_count INTEGER NOT NULL DEFAULT 0,
+      overwrite_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      status VARCHAR(40) NOT NULL DEFAULT 'committed',
+      error_report JSONB NOT NULL DEFAULT '[]'::jsonb,
+      imported_by INTEGER,
+      imported_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS omr_import_rows (
+      id SERIAL PRIMARY KEY,
+      import_id INTEGER NOT NULL REFERENCES omr_imports(id) ON DELETE CASCADE,
+      coaching_id INTEGER NOT NULL,
+      branch_id INTEGER NOT NULL,
+      student_id INTEGER,
+      roll_no VARCHAR(80),
+      barcode VARCHAR(120),
+      test_paper_id INTEGER,
+      obtained_marks NUMERIC(10,2),
+      max_marks NUMERIC(10,2),
+      percentage NUMERIC(6,2),
+      correct_count INTEGER,
+      wrong_count INTEGER,
+      unattempted_count INTEGER,
+      physics_marks NUMERIC(10,2),
+      chemistry_marks NUMERIC(10,2),
+      botany_marks NUMERIC(10,2),
+      zoology_marks NUMERIC(10,2),
+      rank INTEGER,
+      row_status VARCHAR(40) NOT NULL,
+      error_message TEXT,
+      raw_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS users_omr_barcode_branch_idx ON users (coaching_id, branch_id, omr_barcode)`);
+  await run(`CREATE INDEX IF NOT EXISTS omr_imports_branch_imported_idx ON omr_imports (coaching_id, branch_id, imported_at DESC)`);
+  await run(`CREATE INDEX IF NOT EXISTS omr_import_rows_import_idx ON omr_import_rows (import_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS test_papers_omr_scan_branch_idx ON test_papers (coaching_id, branch_id, student_id, test_label)`);
+}
+
 const PORT = process.env.PORT || 3000;
 const SINGLE_CLIENT_COACHING_SLUG = String(process.env.CLIENT_COACHING_SLUG || 'scc').trim().toLowerCase();
 const SINGLE_CLIENT_NAME = 'SHIV CHHATRAPATI CLASSES';
 const OWNER_SECTIONS = new Set(['overview', 'coachings', 'trial-requests']);
-const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes', 'whatsapp', 'notifications', 'settings']);
+const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes', 'whatsapp', 'notifications', 'settings', 'omr']);
 const ALLOWED_UPLOAD_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/jpg']);
 const DEFAULT_UPLOAD_LIMIT_BYTES = isVercel ? 4 * 1024 * 1024 : 25 * 1024 * 1024;
 const UPLOAD_FILE_SIZE_LIMIT_BYTES = Number(process.env.UPLOAD_FILE_SIZE_LIMIT_BYTES || DEFAULT_UPLOAD_LIMIT_BYTES);
@@ -148,6 +378,31 @@ const upload = multer({
       return;
     }
     cb(new Error('Only PDF, JPG, JPEG, and PNG files are allowed'));
+  },
+});
+
+const OMR_UPLOAD_LIMIT_BYTES = Number(process.env.OMR_UPLOAD_LIMIT_BYTES || (isVercel ? 4 * 1024 * 1024 : 25 * 1024 * 1024));
+const OMR_ALLOWED_MIME_TYPES = new Set([
+  'text/csv',
+  'application/csv',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/pdf',
+  'image/jpeg',
+  'image/png',
+  'image/jpg',
+  'application/zip',
+  'application/x-zip-compressed',
+]);
+const omrUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: OMR_UPLOAD_LIMIT_BYTES, files: 200 },
+  fileFilter: (req, file, cb) => {
+    if (OMR_ALLOWED_MIME_TYPES.has(file.mimetype) || /\.(csv|xlsx|pdf|jpe?g|png|zip)$/i.test(file.originalname || '')) {
+      cb(null, true);
+      return;
+    }
+    cb(new Error('Only CSV, XLSX, PDF, JPG, PNG, or ZIP files are allowed for OMR import'));
   },
 });
 
@@ -2218,6 +2473,9 @@ async function getStudentDashboardPayload(coachingId, branchId, studentId) {
 SELECT tp.id, tp.original_name, tp.stored_name, tp.upload_date,
 tp.storage_type, tp.storage_key, tp.content_type,
 tp.marks_obtained, tp.max_marks, tp.test_label, tp.paper_type,
+tp.percentage, tp.correct_count, tp.wrong_count, tp.unattempted_count,
+tp.physics_marks, tp.chemistry_marks, tp.botany_marks, tp.zoology_marks,
+tp.omr_barcode, tp.omr_rank, tp.omr_scan_path, tp.omr_scan_original_name, tp.omr_scan_uploaded_at,
 tp.answer_request_id, tp.uploaded_by AS uploaded_by_id,
 uploader.name AS uploaded_by_name, uploader.role AS uploaded_by_role
 FROM test_papers tp
@@ -4944,7 +5202,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
   const isOverviewSection = activeSection === 'overview';
   const needsStudents = ['overview', 'students', 'attendance', 'fees', 'notes', 'whatsapp'].includes(activeSection);
-  const needsPapers = ['overview', 'papers'].includes(activeSection);
+  const needsPapers = ['overview', 'papers', 'omr'].includes(activeSection);
   const needsAttendance = ['overview', 'attendance'].includes(activeSection);
   const needsFees = ['overview', 'fees'].includes(activeSection);
   const needsNotes = ['overview', 'notes'].includes(activeSection);
@@ -4953,6 +5211,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
   const needsWhatsAppLogs = activeSection === 'whatsapp';
   const needsNotificationLogs = activeSection === 'notifications';
   const needsAdminProfile = activeSection === 'settings';
+  const needsOmr = activeSection === 'omr';
 
   const studentCountPromise = get(
     `SELECT COUNT(*) AS total_students
@@ -5000,6 +5259,19 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
        tp.size_bytes,
        tp.marks_obtained,
        tp.max_marks,
+       tp.percentage,
+       tp.correct_count,
+       tp.wrong_count,
+       tp.unattempted_count,
+       tp.physics_marks,
+       tp.chemistry_marks,
+       tp.botany_marks,
+       tp.zoology_marks,
+       tp.omr_barcode,
+       tp.omr_rank,
+       tp.omr_scan_path,
+       tp.omr_scan_original_name,
+       tp.omr_scan_uploaded_at,
        tp.test_label,
        tp.paper_type,
        tp.answer_request_id,
@@ -5088,6 +5360,15 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
      ORDER BY upload_date DESC`,
     [coachingId, branchId]
   ) : Promise.resolve([]);
+  const omrImportsPromise = needsOmr ? all(
+    `SELECT oi.*, admin.name AS imported_by_name
+     FROM omr_imports oi
+     LEFT JOIN users admin ON admin.id = oi.imported_by AND admin.branch_id = oi.branch_id
+     WHERE oi.coaching_id = ? AND oi.branch_id = ?
+     ORDER BY oi.imported_at DESC
+     LIMIT 30`,
+    [coachingId, branchId]
+  ) : Promise.resolve([]);
 
   const [
     studentCountRow,
@@ -5105,6 +5386,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     answerRequests,
     paperStats,
     latestMarkedPapers,
+    omrImports,
   ] = await Promise.all([
     studentCountPromise,
     adminProfilePromise,
@@ -5121,6 +5403,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     answerRequestsPromise,
     paperStatsPromise,
     latestMarkedPapersPromise,
+    omrImportsPromise,
   ]);
   const totalStudentCount = Number(studentCountRow?.total_students || 0);
   const whatsappSettings = buildWhatsAppSettingsView(rawWhatsappSettings);
@@ -5223,6 +5506,8 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
     completedBatches,
     studentUsage,
     papers,
+    omrImports,
+    omrPreview: req.session.omrPreview || null,
     attendance,
     attendanceByDate: groupAttendanceByDate(attendance),
     attendanceDates,
@@ -6193,6 +6478,454 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
   return res.redirect('/admin/dashboard?section=papers');
 });
 
+app.post('/admin/omr/import/preview', requireCoachingAdmin, omrUpload.single('omrFile'), async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
+  const testLabel = String(req.body.testLabel || '').trim();
+  const fallbackMaxMarks = parseOmrNumber(req.body.maxMarks);
+  const overwrite = req.body.overwrite === 'on';
+  const file = req.file;
+
+  if (!testLabel) {
+    req.session.flash = { type: 'error', text: 'Enter a test name before importing OMR results.' };
+    return res.redirect('/admin/dashboard?section=omr');
+  }
+  if (!file) {
+    req.session.flash = { type: 'error', text: 'Select an OMR CSV file.' };
+    return res.redirect('/admin/dashboard?section=omr');
+  }
+  let importRows;
+  try {
+    importRows = /\.xlsx$/i.test(file.originalname || '') ? parseXlsxRows(file.buffer) : parseCsvRows(file.buffer);
+  } catch (error) {
+    req.session.flash = { type: 'error', text: `Could not read OMR file: ${error.message}` };
+    return res.redirect('/admin/dashboard?section=omr');
+  }
+  const headers = importRows.shift() || [];
+  if (!headers.length) {
+    req.session.flash = { type: 'error', text: 'The OMR file does not contain a header row.' };
+    return res.redirect('/admin/dashboard?section=omr');
+  }
+  const normalizedHeaders = headers.map(normalizeOmrHeader);
+  const rows = importRows.map((cells) => {
+    const raw = {};
+    normalizedHeaders.forEach((header, index) => {
+      raw[header] = cells[index] || '';
+    });
+    return normalizeOmrRow(raw, fallbackMaxMarks);
+  }).filter((row) => row.rollNo);
+
+  const students = await all(
+    `SELECT id, roll_no, name, batch_id
+     FROM users
+     WHERE coaching_id = ? AND branch_id = ? AND role = 'student'`,
+    [coachingId, branchId]
+  );
+  const studentByRoll = new Map(students.map((student) => [String(student.roll_no || '').trim().toLowerCase(), student]));
+  const duplicateRows = await all(
+    `SELECT student_id
+     FROM test_papers
+     WHERE coaching_id = ? AND branch_id = ? AND test_label = ?
+       AND marks_obtained IS NOT NULL AND max_marks IS NOT NULL`,
+    [coachingId, branchId, testLabel]
+  );
+  const duplicateStudentIds = new Set(duplicateRows.map((row) => Number(row.student_id)));
+
+  const previewRows = rows.map((row, index) => {
+    const student = studentByRoll.get(String(row.rollNo || '').trim().toLowerCase()) || null;
+    const duplicate = student ? duplicateStudentIds.has(Number(student.id)) : false;
+    const status = !student ? 'unmatched' : duplicate && !overwrite ? 'duplicate' : 'ready';
+    return {
+      rowNumber: index + 2,
+      ...row,
+      studentId: student?.id || null,
+      studentName: student?.name || '',
+      matchedRollNo: student?.roll_no || '',
+      status,
+      error: !student ? 'No student matched by roll number' : duplicate && !overwrite ? 'Duplicate test result exists' : '',
+    };
+  });
+
+  req.session.omrPreview = {
+    coachingId,
+    branchId,
+    testLabel,
+    overwrite,
+    maxMarks: fallbackMaxMarks,
+    originalFileName: file.originalname,
+    createdAt: new Date().toISOString(),
+    rows: previewRows,
+  };
+  req.session.flash = {
+    type: 'success',
+    text: `Preview ready. Matched ${previewRows.filter((row) => row.status === 'ready').length} row(s), unmatched ${previewRows.filter((row) => row.status === 'unmatched').length}, duplicates ${previewRows.filter((row) => row.status === 'duplicate').length}.`,
+  };
+  return res.redirect('/admin/dashboard?section=omr');
+});
+
+async function getOverallBatchRank(coachingId, branchId, studentId) {
+  const target = await get(
+    `SELECT id, batch_id
+     FROM users
+     WHERE id = ? AND coaching_id = ? AND branch_id = ? AND role = 'student'
+     LIMIT 1`,
+    [studentId, coachingId, branchId]
+  );
+  if (!target?.batch_id) return null;
+  const rows = await all(
+    `SELECT u.id AS student_id,
+            SUM(COALESCE(tp.marks_obtained, 0)) AS total_obtained,
+            SUM(COALESCE(tp.max_marks, 0)) AS total_max
+     FROM users u
+     JOIN test_papers tp ON tp.student_id = u.id
+       AND tp.coaching_id = u.coaching_id
+       AND tp.branch_id = u.branch_id
+     WHERE u.coaching_id = ? AND u.branch_id = ? AND u.batch_id = ? AND u.role = 'student'
+       AND tp.marks_obtained IS NOT NULL AND tp.max_marks IS NOT NULL AND tp.max_marks > 0
+     GROUP BY u.id`,
+    [coachingId, branchId, target.batch_id]
+  );
+  const percentages = rows.map((row) => ({
+    studentId: Number(row.student_id),
+    percentage: Number(row.total_max) > 0 ? (Number(row.total_obtained || 0) / Number(row.total_max)) * 100 : 0,
+  }));
+  const current = percentages.find((row) => row.studentId === Number(studentId));
+  if (!current) return null;
+  return percentages.filter((row) => row.percentage > current.percentage).length + 1;
+}
+
+app.post('/admin/omr/import/commit', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
+  const preview = req.session.omrPreview;
+
+  if (!preview || preview.coachingId !== coachingId || preview.branchId !== branchId) {
+    req.session.flash = { type: 'error', text: 'OMR preview expired. Upload the CSV again.' };
+    return res.redirect('/admin/dashboard?section=omr');
+  }
+
+  const commitRows = preview.rows.filter((row) => row.status === 'ready');
+  if (!commitRows.length) {
+    req.session.flash = { type: 'error', text: 'No valid OMR rows to import.' };
+    return res.redirect('/admin/dashboard?section=omr');
+  }
+
+  const rankBeforeByStudent = new Map();
+  await Promise.all(commitRows.map(async (row) => {
+    rankBeforeByStudent.set(Number(row.studentId), await getOverallBatchRank(coachingId, branchId, row.studentId));
+  }));
+
+  const importResult = await withTransaction(async (tx) => {
+    const importRow = await tx.run(
+      `INSERT INTO omr_imports (
+        coaching_id, branch_id, test_label, original_file_name, row_count, matched_count,
+        unmatched_count, duplicate_count, overwrite_enabled, error_report, imported_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)`,
+      [
+        coachingId,
+        branchId,
+        preview.testLabel,
+        preview.originalFileName,
+        preview.rows.length,
+        commitRows.length,
+        preview.rows.filter((row) => row.status === 'unmatched').length,
+        preview.rows.filter((row) => row.status === 'duplicate').length,
+        preview.overwrite,
+        JSON.stringify(preview.rows.filter((row) => row.status !== 'ready')),
+        req.session.user.id,
+      ]
+    );
+    const importId = importRow.lastID;
+
+    const importedPapers = [];
+    for (const row of commitRows) {
+      let paper = await tx.get(
+        `SELECT id
+         FROM test_papers
+         WHERE coaching_id = ? AND branch_id = ? AND student_id = ? AND test_label = ?
+         ORDER BY upload_date DESC, id DESC
+         LIMIT 1`,
+        [coachingId, branchId, row.studentId, preview.testLabel]
+      );
+      if (paper) {
+        await tx.run(
+          `UPDATE test_papers
+           SET marks_obtained = ?, max_marks = ?, percentage = ?, correct_count = ?, wrong_count = ?,
+               unattempted_count = ?, physics_marks = ?, chemistry_marks = ?, botany_marks = ?,
+               zoology_marks = ?, omr_barcode = ?, omr_rank = ?, omr_import_id = ?, upload_date = CURRENT_TIMESTAMP
+           WHERE id = ? AND branch_id = ?`,
+          [
+            row.obtainedMarks,
+            row.maxMarks,
+            row.percentage,
+            row.correctCount,
+            row.wrongCount,
+            row.unattemptedCount,
+            row.physicsMarks,
+            row.chemistryMarks,
+            row.botanyMarks,
+            row.zoologyMarks,
+            row.barcode || null,
+            row.rank,
+            importId,
+            paper.id,
+            branchId,
+          ]
+        );
+      } else {
+        const inserted = await tx.run(
+          `INSERT INTO test_papers (
+            coaching_id, branch_id, student_id, original_name, stored_name, uploaded_by,
+            storage_type, storage_key, public_url, content_type, size_bytes,
+            marks_obtained, max_marks, percentage, test_label, paper_type,
+            correct_count, wrong_count, unattempted_count, physics_marks, chemistry_marks,
+            botany_marks, zoology_marks, omr_barcode, omr_rank, omr_import_id
+          ) VALUES (?, ?, ?, ?, ?, ?, 'omr', NULL, NULL, NULL, 0, ?, ?, ?, ?, 'omr_result', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            coachingId,
+            branchId,
+            row.studentId,
+            `${preview.testLabel}-${row.matchedRollNo || row.rollNo}.csv`,
+            `${preview.testLabel}-${row.matchedRollNo || row.rollNo}.csv`,
+            req.session.user.id,
+            row.obtainedMarks,
+            row.maxMarks,
+            row.percentage,
+            preview.testLabel,
+            row.correctCount,
+            row.wrongCount,
+            row.unattemptedCount,
+            row.physicsMarks,
+            row.chemistryMarks,
+            row.botanyMarks,
+            row.zoologyMarks,
+            row.barcode || null,
+            row.rank,
+            importId,
+          ]
+        );
+        paper = { id: inserted.lastID };
+      }
+      await tx.run(
+        `INSERT INTO omr_import_rows (
+          import_id, coaching_id, branch_id, student_id, roll_no, barcode, test_paper_id,
+          obtained_marks, max_marks, percentage, correct_count, wrong_count, unattempted_count,
+          physics_marks, chemistry_marks, botany_marks, zoology_marks, rank, row_status, raw_data
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported', ?::jsonb)`,
+        [
+          importId,
+          coachingId,
+          branchId,
+          row.studentId,
+          row.matchedRollNo || row.rollNo,
+          row.barcode || null,
+          paper.id,
+          row.obtainedMarks,
+          row.maxMarks,
+          row.percentage,
+          row.correctCount,
+          row.wrongCount,
+          row.unattemptedCount,
+          row.physicsMarks,
+          row.chemistryMarks,
+          row.botanyMarks,
+          row.zoologyMarks,
+          row.rank,
+          JSON.stringify(row.raw || {}),
+        ]
+      );
+      importedPapers.push({ studentId: row.studentId, paperId: paper.id });
+    }
+    return { importId, imported: commitRows.length, importedPapers };
+  });
+
+  delete req.session.omrPreview;
+  await auditActor(req, 'omr_results_imported', {
+    targetType: 'omr_import',
+    targetId: importResult.importId,
+    details: { testLabel: preview.testLabel, imported: importResult.imported, overwrite: preview.overwrite },
+  });
+  const coaching = req.currentCoaching || await getCoachingContextById(coachingId);
+  for (const item of importResult.importedPapers) {
+    const beforeRank = rankBeforeByStudent.get(Number(item.studentId));
+    const afterRank = await getOverallBatchRank(coachingId, branchId, item.studentId);
+    if (beforeRank && afterRank && afterRank < beforeRank) {
+      const student = await get(
+        `SELECT id, roll_no, name, contact_phone, guardian_phone, whatsapp_number, parent_whatsapp_number
+         FROM users
+         WHERE id = ? AND coaching_id = ? AND branch_id = ?
+         LIMIT 1`,
+        [item.studentId, coachingId, branchId]
+      );
+      if (student) {
+        await notifyPaperEvent({ req, coaching, student, paperId: item.paperId, type: 'test_result_published' });
+      }
+    }
+  }
+  req.session.flash = { type: 'success', text: `OMR import committed. ${importResult.imported} result(s) updated.` };
+  return res.redirect('/admin/dashboard?section=omr');
+});
+
+app.post('/admin/omr/import/cancel', requireCoachingAdmin, async (req, res) => {
+  delete req.session.omrPreview;
+  req.session.flash = { type: 'success', text: 'OMR preview cleared.' };
+  return res.redirect('/admin/dashboard?section=omr');
+});
+
+app.post('/admin/omr/scans/upload', requireCoachingAdmin, omrUpload.array('omrScans', 200), async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
+  const testLabel = String(req.body.testLabel || '').trim();
+  const files = req.files || [];
+
+  if (!testLabel) {
+    req.session.flash = { type: 'error', text: 'Enter the test name before uploading OMR sheets.' };
+    return res.redirect('/admin/dashboard?section=omr');
+  }
+  if (!files.length) {
+    req.session.flash = { type: 'error', text: 'Select OMR PDF/JPG files.' };
+    return res.redirect('/admin/dashboard?section=omr');
+  }
+
+  let linked = 0;
+  const errors = [];
+  const scanFiles = [];
+  for (const file of files) {
+    if (/\.zip$/i.test(file.originalname || '')) {
+      try {
+        readZipEntries(file.buffer)
+          .filter((entry) => /\.(pdf|jpe?g|png)$/i.test(entry.name))
+          .forEach((entry) => scanFiles.push({
+            originalname: path.basename(entry.name),
+            mimetype: path.extname(entry.name).toLowerCase() === '.pdf' ? 'application/pdf' : path.extname(entry.name).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg',
+            buffer: entry.data,
+          }));
+      } catch (error) {
+        errors.push(`${file.originalname}: ${error.message}`);
+      }
+    } else {
+      scanFiles.push(file);
+    }
+  }
+
+  for (const file of scanFiles) {
+    if (!/\.(pdf|jpe?g|png)$/i.test(file.originalname || '')) {
+      errors.push(`${file.originalname}: unsupported file type`);
+      continue;
+    }
+    const rollNo = path.parse(file.originalname).name.split(/[_\-\s]/)[0];
+    const student = await get(
+      `SELECT id, roll_no
+       FROM users
+       WHERE coaching_id = ? AND branch_id = ? AND role = 'student' AND roll_no = ?
+       LIMIT 1`,
+      [coachingId, branchId, rollNo]
+    );
+    if (!student) {
+      errors.push(`${file.originalname}: no student found for roll ${rollNo}`);
+      continue;
+    }
+    const paper = await get(
+      `SELECT id
+       FROM test_papers
+       WHERE coaching_id = ? AND branch_id = ? AND student_id = ? AND test_label = ?
+       ORDER BY upload_date DESC, id DESC
+       LIMIT 1`,
+      [coachingId, branchId, student.id, testLabel]
+    );
+    if (!paper) {
+      errors.push(`${file.originalname}: result not imported yet for ${testLabel}`);
+      continue;
+    }
+    const targetPath = getOmrStoragePath(paper.id, student.roll_no, file.originalname);
+    await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.promises.writeFile(targetPath, file.buffer);
+    await run(
+      `UPDATE test_papers
+       SET omr_scan_path = ?, omr_scan_original_name = ?, omr_scan_uploaded_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND coaching_id = ? AND branch_id = ?`,
+      [targetPath, sanitizeOmrFileName(file.originalname), paper.id, coachingId, branchId]
+    );
+    linked += 1;
+  }
+
+  await auditActor(req, 'omr_scans_uploaded', {
+    targetType: 'omr_scan',
+    details: { testLabel, linked, failed: errors.length },
+  });
+  req.session.flash = {
+    type: errors.length ? 'warning' : 'success',
+    text: `OMR sheets linked: ${linked}. Failed: ${errors.length}.`,
+    details: errors.slice(0, 20),
+  };
+  return res.redirect('/admin/dashboard?section=omr');
+});
+
+app.post('/admin/omr/scans/:paperId/delete', requireCoachingAdmin, async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
+  const paperId = Number(req.params.paperId);
+  const paper = await get(
+    `SELECT id, omr_scan_path
+     FROM test_papers
+     WHERE id = ? AND coaching_id = ? AND branch_id = ?
+     LIMIT 1`,
+    [paperId, coachingId, branchId]
+  );
+  if (paper?.omr_scan_path) {
+    await fs.promises.unlink(paper.omr_scan_path).catch(() => {});
+    await run(
+      `UPDATE test_papers
+       SET omr_scan_path = NULL, omr_scan_original_name = NULL, omr_scan_uploaded_at = NULL
+       WHERE id = ? AND branch_id = ?`,
+      [paper.id, branchId]
+    );
+  }
+  req.session.flash = { type: 'success', text: 'OMR sheet removed.' };
+  return res.redirect('/admin/dashboard?section=omr');
+});
+
+async function getOmrScanForSession(paperId, sessionUser) {
+  const params = [Number(paperId), sessionUser.coachingId, sessionUser.branchId];
+  let scopeSql = '';
+  if (sessionUser.role === 'student') {
+    scopeSql = ' AND tp.student_id = ?';
+    params.push(sessionUser.id);
+  }
+  return get(
+    `SELECT tp.id, tp.omr_scan_path, tp.omr_scan_original_name, tp.test_label, u.roll_no
+     FROM test_papers tp
+     JOIN users u ON u.id = tp.student_id AND u.branch_id = tp.branch_id
+     WHERE tp.id = ? AND tp.coaching_id = ? AND tp.branch_id = ?
+       AND tp.omr_scan_path IS NOT NULL
+       ${scopeSql}
+     LIMIT 1`,
+    params
+  );
+}
+
+async function sendOmrScan(req, res, disposition) {
+  const paper = await getOmrScanForSession(req.params.paperId, req.session.user);
+  if (!paper?.omr_scan_path) return res.status(404).send('OMR sheet not found');
+  const resolvedPath = path.resolve(paper.omr_scan_path);
+  const expectedRoot = path.resolve(__dirname, '..', 'uploads', 'omr');
+  if (!resolvedPath.startsWith(`${expectedRoot}${path.sep}`)) return res.status(403).send('Invalid OMR path');
+  try {
+    await fs.promises.access(resolvedPath, fs.constants.R_OK);
+  } catch {
+    return res.status(404).send('OMR sheet file missing');
+  }
+  const extension = path.extname(resolvedPath).toLowerCase();
+  const contentType = extension === '.pdf' ? 'application/pdf' : extension === '.png' ? 'image/png' : 'image/jpeg';
+  const safeName = sanitizeOmrFileName(paper.omr_scan_original_name || `${paper.roll_no}-${paper.test_label || 'omr'}${extension}`);
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Content-Disposition', `${disposition}; filename="${safeName}"`);
+  return fs.createReadStream(resolvedPath).pipe(res);
+}
+
+app.get('/omr/:paperId/view', requireAuth, (req, res) => sendOmrScan(req, res, 'inline'));
+app.get('/omr/:paperId/download', requireAuth, (req, res) => sendOmrScan(req, res, 'attachment'));
+
 app.get('/admin/papers/:id/debug', requireCoachingAdmin, async (req, res) => {
   const paper = await getPaperForUser(req.params.id, req.session.user);
   if (!paper) {
@@ -7119,6 +7852,7 @@ async function prepareApp() {
       .then(() => ensureNotificationSchema())
       .then(() => ensureOnboardingWhatsAppSchema())
       .then(() => ensureFeeStructureSchema())
+      .then(() => ensureOmrSchema())
       .then(() => ensurePerformanceIndexes())
       .then(async () => {
         console.log('[BOOT] Database ready');
