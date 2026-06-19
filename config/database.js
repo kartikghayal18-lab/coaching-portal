@@ -80,10 +80,11 @@ async function query(executor, sql, params = []) {
     .trim()
     .slice(0, 180);
   const scope = getBranchContext();
-  const client = typeof executor.connect === 'function'
+  const shouldConnect = typeof executor.connect === 'function' && typeof executor.release !== 'function';
+  const client = shouldConnect
     ? await executor.connect()
     : executor;
-  const shouldRelease = client !== executor;
+  const shouldRelease = shouldConnect;
 
   try {
     await client.query(
@@ -183,11 +184,14 @@ function createTransactionHelpers(client) {
 }
 
 async function withTransaction(work) {
+  console.log("[DB] withTransaction entered");
   const client = await getPool().connect();
+  console.log("[DB] client acquired");
   const scope = getBranchContext();
 
   try {
     await client.query('BEGIN');
+    console.log("[DB] BEGIN executed");
     await client.query(
       `SELECT
          set_config('app.branch_id', $1, true),
@@ -198,11 +202,20 @@ async function withTransaction(work) {
       ]
     );
     const tx = createTransactionHelpers(client);
+    console.log("[DB] invoking callback");
     const result = await work(tx);
+    console.log("[DB] callback returned");
+    console.log("[DB] before COMMIT");
     await client.query('COMMIT');
+    console.log("[DB] after COMMIT");
     return result;
   } catch (error) {
+    console.error('[DB TX] before ROLLBACK', {
+      message: error.message,
+      stack: error.stack,
+    });
     await client.query('ROLLBACK');
+    console.error('[DB TX] after ROLLBACK');
     throw error;
   } finally {
     client.release();

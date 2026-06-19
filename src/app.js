@@ -6744,6 +6744,8 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
   });
 
   const importSummary = await withTransaction(async (tx) => {
+    console.log('[OMR IMPORT][TX] callback entered');
+    console.log('[OMR IMPORT][TX] before build error rows');
     const errorRows = normalizedRows.filter((row) => row.status !== 'ready').map((row) => ({
       rowNumber: row.rowNumber,
       rollNo: row.rollNo || '',
@@ -6751,6 +6753,10 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
       status: row.status,
       error: row.error,
     }));
+    console.log('[OMR IMPORT][TX] after build error rows', {
+      count: errorRows.length,
+    });
+    console.log('[OMR IMPORT][TX] before insert import header');
     const importRow = await tx.run(
       `INSERT INTO omr_imports (
         coaching_id, branch_id, test_label, original_file_name, row_count, matched_count,
@@ -6768,11 +6774,25 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
         req.session.user.id,
       ]
     );
+    console.log('[OMR IMPORT][TX] after insert import header', {
+      importId: importRow.lastID,
+      rowCount: importRow.rowCount,
+    });
     const importId = importRow.lastID;
     const details = [];
     const importedPapers = [];
+    const importedAuditRows = [];
+    const skippedAuditRows = [];
 
+    console.log('[OMR IMPORT][TX] before ready rows loop', {
+      count: readyRows.length,
+    });
     for (const row of readyRows) {
+      console.log('[OMR IMPORT][TX] before select existing paper', {
+        rollNo: row.matchedRollNo || row.rollNo,
+        studentId: row.studentId,
+        testLabel,
+      });
       let paper = await tx.get(
         `SELECT id
          FROM test_papers
@@ -6781,7 +6801,15 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
          LIMIT 1`,
         [coachingId, branchId, row.studentId, testLabel]
       );
+      console.log('[OMR IMPORT][TX] after select existing paper', {
+        rollNo: row.matchedRollNo || row.rollNo,
+        paperId: paper?.id || null,
+      });
       if (paper) {
+        console.log('[OMR IMPORT][TX] before update paper', {
+          rollNo: row.matchedRollNo || row.rollNo,
+          paperId: paper.id,
+        });
         await tx.run(
           `UPDATE test_papers
            SET marks_obtained = ?, max_marks = ?, percentage = ?, physics_marks = ?, chemistry_marks = ?,
@@ -6804,7 +6832,15 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
             branchId,
           ]
         );
+        console.log('[OMR IMPORT][TX] after update paper', {
+          rollNo: row.matchedRollNo || row.rollNo,
+          paperId: paper.id,
+        });
       } else {
+        console.log('[OMR IMPORT][TX] before insert paper', {
+          rollNo: row.matchedRollNo || row.rollNo,
+          studentId: row.studentId,
+        });
         const inserted = await tx.run(
           `INSERT INTO test_papers (
             coaching_id, branch_id, student_id, original_name, stored_name, uploaded_by,
@@ -6833,6 +6869,11 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
             importId,
           ]
         );
+        console.log('[OMR IMPORT][TX] after insert paper', {
+          rollNo: row.matchedRollNo || row.rollNo,
+          paperId: inserted.lastID,
+          rowCount: inserted.rowCount,
+        });
         paper = { id: inserted.lastID };
       }
 
@@ -6840,75 +6881,152 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
       const scanFile = scanByRoll.get(rollKey);
       if (scanFile) {
         const targetPath = getOmrStoragePath(paper.id, row.matchedRollNo || row.rollNo, scanFile.originalname);
+        console.log('[OMR IMPORT][TX] before create answer sheet directory', {
+          rollNo: row.matchedRollNo || row.rollNo,
+          targetDir: path.dirname(targetPath),
+        });
         await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+        console.log('[OMR IMPORT][TX] after create answer sheet directory', {
+          rollNo: row.matchedRollNo || row.rollNo,
+          targetDir: path.dirname(targetPath),
+        });
+        console.log('[OMR IMPORT][TX] before write answer sheet', {
+          rollNo: row.matchedRollNo || row.rollNo,
+          targetPath,
+          bytes: scanFile.buffer?.length || 0,
+        });
         await fs.promises.writeFile(targetPath, scanFile.buffer);
+        console.log('[OMR IMPORT][TX] after write answer sheet', {
+          rollNo: row.matchedRollNo || row.rollNo,
+          targetPath,
+        });
+        console.log('[OMR IMPORT][TX] before update paper answer sheet path', {
+          rollNo: row.matchedRollNo || row.rollNo,
+          paperId: paper.id,
+        });
         await tx.run(
           `UPDATE test_papers
            SET omr_scan_path = ?, omr_scan_original_name = ?, omr_scan_uploaded_at = CURRENT_TIMESTAMP
            WHERE id = ? AND coaching_id = ? AND branch_id = ?`,
           [targetPath, sanitizeOmrFileName(scanFile.originalname), paper.id, coachingId, branchId]
         );
+        console.log('[OMR IMPORT][TX] after update paper answer sheet path', {
+          rollNo: row.matchedRollNo || row.rollNo,
+          paperId: paper.id,
+        });
       }
 
+      console.log('[OMR IMPORT][TX] before queue imported row audit', {
+        rollNo: row.matchedRollNo || row.rollNo,
+        paperId: paper.id,
+      });
+      importedAuditRows.push([
+        importId,
+        coachingId,
+        branchId,
+        row.studentId,
+        row.matchedRollNo || row.rollNo,
+        paper.id,
+        row.obtainedMarks,
+        row.maxMarks,
+        row.percentage,
+        row.physicsMarks,
+        row.chemistryMarks,
+        row.biologyMarks,
+        row.botanyMarks,
+        row.zoologyMarks,
+        row.rank,
+        JSON.stringify(row.raw || {}),
+      ]);
+      console.log('[OMR IMPORT][TX] after queue imported row audit', {
+        rollNo: row.matchedRollNo || row.rollNo,
+        paperId: paper.id,
+      });
+      details.push({ rollNo: row.matchedRollNo || row.rollNo, reason: scanFile ? 'Imported with answer sheet' : 'Imported' });
+      importedPapers.push({ studentId: row.studentId, paperId: paper.id });
+    }
+    console.log('[OMR IMPORT][TX] after ready rows loop', {
+      count: readyRows.length,
+      importedAuditRows: importedAuditRows.length,
+    });
+
+    console.log('[OMR IMPORT][TX] before skipped rows loop', {
+      count: normalizedRows.filter((item) => item.status !== 'ready').length,
+    });
+    for (const row of normalizedRows.filter((item) => item.status !== 'ready')) {
+      console.log('[OMR IMPORT][TX] before queue skipped row audit', {
+        rollNo: row.rollNo || null,
+        status: row.status,
+        error: row.error,
+      });
+      skippedAuditRows.push([
+        importId,
+        coachingId,
+        branchId,
+        row.rollNo || null,
+        row.obtainedMarks,
+        row.maxMarks,
+        row.percentage,
+        row.physicsMarks,
+        row.chemistryMarks,
+        row.biologyMarks,
+        row.botanyMarks,
+        row.zoologyMarks,
+        row.rank,
+        row.status,
+        row.error,
+        JSON.stringify(row.raw || {}),
+      ]);
+      console.log('[OMR IMPORT][TX] after queue skipped row audit', {
+        rollNo: row.rollNo || null,
+        status: row.status,
+      });
+      details.push({ rollNo: row.rollNo || '-', reason: row.error });
+    }
+    console.log('[OMR IMPORT][TX] after skipped rows loop', {
+      skippedAuditRows: skippedAuditRows.length,
+    });
+
+    if (importedAuditRows.length) {
+      console.log('[OMR IMPORT][TX] before batch insert imported row audits', {
+        count: importedAuditRows.length,
+      });
       await tx.run(
         `INSERT INTO omr_import_rows (
           import_id, coaching_id, branch_id, student_id, roll_no, test_paper_id,
           obtained_marks, max_marks, percentage, physics_marks, chemistry_marks, biology_marks,
           botany_marks, zoology_marks, rank, row_status, raw_data
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported', ?::jsonb)`,
-        [
-          importId,
-          coachingId,
-          branchId,
-          row.studentId,
-          row.matchedRollNo || row.rollNo,
-          paper.id,
-          row.obtainedMarks,
-          row.maxMarks,
-          row.percentage,
-          row.physicsMarks,
-          row.chemistryMarks,
-          row.biologyMarks,
-          row.botanyMarks,
-          row.zoologyMarks,
-          row.rank,
-          JSON.stringify(row.raw || {}),
-        ]
+        ) VALUES ${importedAuditRows.map(() => `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported', ?::jsonb)`).join(', ')}`,
+        importedAuditRows.flat()
       );
-      details.push({ rollNo: row.matchedRollNo || row.rollNo, reason: scanFile ? 'Imported with answer sheet' : 'Imported' });
-      importedPapers.push({ studentId: row.studentId, paperId: paper.id });
+      console.log('[OMR IMPORT][TX] after batch insert imported row audits', {
+        count: importedAuditRows.length,
+      });
+    } else {
+      console.log('[OMR IMPORT][TX] skipped batch insert imported row audits');
     }
 
-    for (const row of normalizedRows.filter((item) => item.status !== 'ready')) {
+    if (skippedAuditRows.length) {
+      console.log('[OMR IMPORT][TX] before batch insert skipped row audits', {
+        count: skippedAuditRows.length,
+      });
       await tx.run(
         `INSERT INTO omr_import_rows (
           import_id, coaching_id, branch_id, student_id, roll_no, obtained_marks, max_marks,
           percentage, physics_marks, chemistry_marks, biology_marks, botany_marks, zoology_marks,
           rank, row_status, error_message, raw_data
-        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`,
-        [
-          importId,
-          coachingId,
-          branchId,
-          row.rollNo || null,
-          row.obtainedMarks,
-          row.maxMarks,
-          row.percentage,
-          row.physicsMarks,
-          row.chemistryMarks,
-          row.biologyMarks,
-          row.botanyMarks,
-          row.zoologyMarks,
-          row.rank,
-          row.status,
-          row.error,
-          JSON.stringify(row.raw || {}),
-        ]
+        ) VALUES ${skippedAuditRows.map(() => `(?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`).join(', ')}`,
+        skippedAuditRows.flat()
       );
-      details.push({ rollNo: row.rollNo || '-', reason: row.error });
+      console.log('[OMR IMPORT][TX] after batch insert skipped row audits', {
+        count: skippedAuditRows.length,
+      });
+    } else {
+      console.log('[OMR IMPORT][TX] skipped batch insert skipped row audits');
     }
 
-    return {
+    console.log('[OMR IMPORT][TX] before build import summary');
+    const summary = {
       importId,
       imported: readyRows.length,
       skipped: normalizedRows.filter((row) => row.status === 'skipped').length,
@@ -6917,6 +7035,14 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
       details,
       importedPapers,
     };
+    console.log('[OMR IMPORT][TX] after build import summary', {
+      importId: summary.importId,
+      imported: summary.imported,
+      skipped: summary.skipped,
+      unmatched: summary.unmatchedRollNumbers.length,
+      sheetErrors: summary.sheetErrors.length,
+    });
+    return summary;
   });
   console.log('[OMR IMPORT] database transaction committed', {
     importId: importSummary.importId,
