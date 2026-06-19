@@ -255,10 +255,12 @@ function getOmrValue(row, aliases) {
 }
 
 function normalizeOmrRow(row, fallbackMaxMarks = null) {
-  const obtainedMarks = parseOmrNumber(getOmrValue(row, ['Correct Marks Total', 'Total Marks Total', 'Obtained Marks', 'Marks Obtained']));
+  const obtainedMarks = parseOmrNumber(getOmrValue(row, ['Total Marks', 'Correct Marks Total', 'Total Marks Total', 'Obtained Marks', 'Marks Obtained']));
   const maxMarks = parseOmrNumber(getOmrValue(row, ['Max Marks', 'Maximum Marks', 'Total Maximum Marks', 'Out Of'])) ?? fallbackMaxMarks;
+  const biologyMarks = parseOmrNumber(getOmrValue(row, ['Biology Marks', 'Biology']));
   return {
-    rollNo: getOmrValue(row, ['RollNumber', 'Roll Number', 'Roll No', 'Roll']),
+    rollNo: getOmrValue(row, ['Roll No', 'RollNumber', 'Roll Number', 'Roll']),
+    studentName: getOmrValue(row, ['Student Name', 'Name']),
     barcode: getOmrValue(row, ['Barcode', 'Bar Code']),
     correctCount: parseOmrNumber(getOmrValue(row, ['Correct Total', 'Correct Count'])),
     wrongCount: parseOmrNumber(getOmrValue(row, ['Wrong Total', 'Wrong Count'])),
@@ -268,7 +270,8 @@ function normalizeOmrRow(row, fallbackMaxMarks = null) {
     percentage: maxMarks && obtainedMarks !== null ? Number(((obtainedMarks / maxMarks) * 100).toFixed(2)) : parseOmrNumber(getOmrValue(row, ['Percentage', 'Percent'])),
     physicsMarks: parseOmrNumber(getOmrValue(row, ['Physics Marks', 'Physics'])),
     chemistryMarks: parseOmrNumber(getOmrValue(row, ['Chemistry Marks', 'Chemistry'])),
-    botanyMarks: parseOmrNumber(getOmrValue(row, ['Botany Marks', 'Botany'])),
+    biologyMarks,
+    botanyMarks: biologyMarks ?? parseOmrNumber(getOmrValue(row, ['Botany Marks', 'Botany'])),
     zoologyMarks: parseOmrNumber(getOmrValue(row, ['Zoology Marks', 'Zoology'])),
     rank: parseOmrNumber(getOmrValue(row, ['Rank', 'Student Rank'])),
     raw: row,
@@ -285,6 +288,50 @@ function getOmrStoragePath(testId, rollNo, originalName) {
   return path.join(__dirname, '..', 'uploads', 'omr', String(testId), `${sanitizeOmrFileName(rollNo)}${safeExtension}`);
 }
 
+function getExactSheetRollNo(fileName) {
+  return path.parse(fileName || '').name.trim();
+}
+
+function toOmrTableRows(fileBuffer, fallbackMaxMarks) {
+  const csvRows = parseCsvRows(fileBuffer);
+  const headers = csvRows.shift() || [];
+  if (!headers.length) throw new Error('CSV header row is missing');
+  const normalizedHeaders = headers.map(normalizeOmrHeader);
+  return csvRows.map((cells, index) => {
+    const raw = {};
+    normalizedHeaders.forEach((header, cellIndex) => {
+      raw[header] = cells[cellIndex] || '';
+    });
+    return {
+      rowNumber: index + 2,
+      ...normalizeOmrRow(raw, fallbackMaxMarks),
+    };
+  });
+}
+
+function expandOmrSheetFiles(files) {
+  const expanded = [];
+  const errors = [];
+  for (const file of files || []) {
+    if (/\.zip$/i.test(file.originalname || '')) {
+      try {
+        readZipEntries(file.buffer)
+          .filter((entry) => /\.(pdf|jpe?g|png)$/i.test(entry.name))
+          .forEach((entry) => expanded.push({
+            originalname: path.basename(entry.name),
+            mimetype: path.extname(entry.name).toLowerCase() === '.pdf' ? 'application/pdf' : path.extname(entry.name).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg',
+            buffer: entry.data,
+          }));
+      } catch (error) {
+        errors.push(`${file.originalname}: ${error.message}`);
+      }
+      continue;
+    }
+    expanded.push(file);
+  }
+  return { files: expanded, errors };
+}
+
 async function ensureOmrSchema() {
   await run(`ALTER TABLE users ADD COLUMN IF NOT EXISTS omr_barcode VARCHAR(120)`);
   await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS percentage NUMERIC(6,2)`);
@@ -293,6 +340,7 @@ async function ensureOmrSchema() {
   await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS unattempted_count INTEGER`);
   await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS physics_marks NUMERIC(10,2)`);
   await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS chemistry_marks NUMERIC(10,2)`);
+  await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS biology_marks NUMERIC(10,2)`);
   await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS botany_marks NUMERIC(10,2)`);
   await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS zoology_marks NUMERIC(10,2)`);
   await run(`ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS omr_barcode VARCHAR(120)`);
@@ -337,6 +385,7 @@ async function ensureOmrSchema() {
       unattempted_count INTEGER,
       physics_marks NUMERIC(10,2),
       chemistry_marks NUMERIC(10,2),
+      biology_marks NUMERIC(10,2),
       botany_marks NUMERIC(10,2),
       zoology_marks NUMERIC(10,2),
       rank INTEGER,
@@ -2474,7 +2523,7 @@ SELECT tp.id, tp.original_name, tp.stored_name, tp.upload_date,
 tp.storage_type, tp.storage_key, tp.content_type,
 tp.marks_obtained, tp.max_marks, tp.test_label, tp.paper_type,
 tp.percentage, tp.correct_count, tp.wrong_count, tp.unattempted_count,
-tp.physics_marks, tp.chemistry_marks, tp.botany_marks, tp.zoology_marks,
+tp.physics_marks, tp.chemistry_marks, tp.biology_marks, tp.botany_marks, tp.zoology_marks,
 tp.omr_barcode, tp.omr_rank, tp.omr_scan_path, tp.omr_scan_original_name, tp.omr_scan_uploaded_at,
 tp.answer_request_id, tp.uploaded_by AS uploaded_by_id,
 uploader.name AS uploaded_by_name, uploader.role AS uploaded_by_role
@@ -5265,6 +5314,7 @@ app.get('/admin/dashboard', requireCoachingAdmin, async (req, res) => {
        tp.unattempted_count,
        tp.physics_marks,
        tp.chemistry_marks,
+       tp.biology_marks,
        tp.botany_marks,
        tp.zoology_marks,
        tp.omr_barcode,
@@ -6475,6 +6525,294 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
     targetType: 'paper_batch',
     details: report,
   });
+  return res.redirect('/admin/dashboard?section=papers');
+});
+
+app.post('/admin/omr/import-results', requireCoachingAdmin, omrUpload.fields([
+  { name: 'omrCsv', maxCount: 1 },
+  { name: 'answerSheets', maxCount: 200 },
+]), async (req, res) => {
+  const coachingId = req.session.user.coachingId;
+  const branchId = getCurrentBranchId(req);
+  const testLabel = String(req.body.testLabel || '').trim();
+  const maxMarks = parseOmrNumber(req.body.maxMarks);
+  const csvFile = (req.files?.omrCsv || [])[0];
+  const uploadedSheets = req.files?.answerSheets || [];
+
+  if (!testLabel) {
+    req.session.flash = { type: 'error', text: 'Enter a test name before importing OMR results.' };
+    return res.redirect('/admin/dashboard?section=papers');
+  }
+  if (!maxMarks || maxMarks <= 0) {
+    req.session.flash = { type: 'error', text: 'Enter valid max marks so graphs and percentages can be generated.' };
+    return res.redirect('/admin/dashboard?section=papers');
+  }
+  if (!csvFile || !/\.csv$/i.test(csvFile.originalname || '')) {
+    req.session.flash = { type: 'error', text: 'Upload one OMR result CSV file.' };
+    return res.redirect('/admin/dashboard?section=papers');
+  }
+
+  let parsedRows;
+  try {
+    parsedRows = toOmrTableRows(csvFile.buffer, maxMarks);
+  } catch (error) {
+    req.session.flash = { type: 'error', text: `Could not parse OMR CSV: ${error.message}` };
+    return res.redirect('/admin/dashboard?section=papers');
+  }
+
+  const students = await all(
+    `SELECT id, roll_no, name
+     FROM users
+     WHERE coaching_id = ? AND branch_id = ? AND role = 'student'`,
+    [coachingId, branchId]
+  );
+  const studentByRoll = new Map(students.map((student) => [String(student.roll_no || '').trim().toLowerCase(), student]));
+  const normalizedRows = parsedRows.map((row) => {
+    const rollKey = String(row.rollNo || '').trim().toLowerCase();
+    const student = rollKey ? studentByRoll.get(rollKey) : null;
+    let status = 'ready';
+    let error = '';
+    if (!rollKey) {
+      status = 'skipped';
+      error = 'Missing Roll No';
+    } else if (!student) {
+      status = 'unmatched';
+      error = `Roll No ${row.rollNo} not found`;
+    } else if (row.obtainedMarks === null || row.obtainedMarks === undefined) {
+      status = 'skipped';
+      error = 'Missing Total Marks';
+    }
+    return {
+      ...row,
+      studentId: student?.id || null,
+      matchedRollNo: student?.roll_no || row.rollNo || '',
+      studentName: student?.name || row.studentName || '',
+      status,
+      error,
+    };
+  });
+  const readyRows = normalizedRows.filter((row) => row.status === 'ready');
+  const readyRolls = new Map(readyRows.map((row) => [String(row.matchedRollNo || row.rollNo).trim().toLowerCase(), row]));
+  const { files: scanFiles, errors: sheetErrors } = expandOmrSheetFiles(uploadedSheets);
+  const scanByRoll = new Map();
+  const scanErrors = [...sheetErrors];
+
+  for (const file of scanFiles) {
+    if (!/\.(pdf|jpe?g|png)$/i.test(file.originalname || '')) {
+      scanErrors.push(`${file.originalname}: unsupported answer sheet type`);
+      continue;
+    }
+    let rollNo = '';
+    if (scanFiles.length === 1 && readyRows.length === 1) {
+      rollNo = String(readyRows[0].matchedRollNo || readyRows[0].rollNo).trim();
+    } else {
+      rollNo = getExactSheetRollNo(file.originalname);
+    }
+    const rollKey = String(rollNo || '').trim().toLowerCase();
+    if (!readyRolls.has(rollKey)) {
+      scanErrors.push(`${file.originalname}: filename must be exact Roll No from CSV, for example 101.pdf`);
+      continue;
+    }
+    scanByRoll.set(rollKey, file);
+  }
+
+  const importSummary = await withTransaction(async (tx) => {
+    const errorRows = normalizedRows.filter((row) => row.status !== 'ready').map((row) => ({
+      rowNumber: row.rowNumber,
+      rollNo: row.rollNo || '',
+      studentName: row.studentName || '',
+      status: row.status,
+      error: row.error,
+    }));
+    const importRow = await tx.run(
+      `INSERT INTO omr_imports (
+        coaching_id, branch_id, test_label, original_file_name, row_count, matched_count,
+        unmatched_count, duplicate_count, overwrite_enabled, error_report, imported_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, TRUE, ?::jsonb, ?)`,
+      [
+        coachingId,
+        branchId,
+        testLabel,
+        csvFile.originalname,
+        normalizedRows.length,
+        readyRows.length,
+        normalizedRows.filter((row) => row.status === 'unmatched').length,
+        JSON.stringify([...errorRows, ...scanErrors.map((error) => ({ status: 'sheet_error', error }))]),
+        req.session.user.id,
+      ]
+    );
+    const importId = importRow.lastID;
+    const details = [];
+    const importedPapers = [];
+
+    for (const row of readyRows) {
+      let paper = await tx.get(
+        `SELECT id
+         FROM test_papers
+         WHERE coaching_id = ? AND branch_id = ? AND student_id = ? AND test_label = ?
+         ORDER BY upload_date DESC, id DESC
+         LIMIT 1`,
+        [coachingId, branchId, row.studentId, testLabel]
+      );
+      if (paper) {
+        await tx.run(
+          `UPDATE test_papers
+           SET marks_obtained = ?, max_marks = ?, percentage = ?, physics_marks = ?, chemistry_marks = ?,
+               biology_marks = ?, botany_marks = ?, zoology_marks = ?, omr_rank = ?, omr_import_id = ?,
+               paper_type = 'omr_result', upload_date = CURRENT_TIMESTAMP
+           WHERE id = ? AND coaching_id = ? AND branch_id = ?`,
+          [
+            row.obtainedMarks,
+            row.maxMarks,
+            row.percentage,
+            row.physicsMarks,
+            row.chemistryMarks,
+            row.biologyMarks,
+            row.botanyMarks,
+            row.zoologyMarks,
+            row.rank,
+            importId,
+            paper.id,
+            coachingId,
+            branchId,
+          ]
+        );
+      } else {
+        const inserted = await tx.run(
+          `INSERT INTO test_papers (
+            coaching_id, branch_id, student_id, original_name, stored_name, uploaded_by,
+            storage_type, storage_key, public_url, content_type, size_bytes,
+            marks_obtained, max_marks, percentage, test_label, paper_type,
+            physics_marks, chemistry_marks, biology_marks, botany_marks, zoology_marks,
+            omr_rank, omr_import_id
+          ) VALUES (?, ?, ?, ?, ?, ?, 'omr', NULL, NULL, NULL, 0, ?, ?, ?, ?, 'omr_result', ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            coachingId,
+            branchId,
+            row.studentId,
+            `${testLabel}-${row.matchedRollNo}.csv`,
+            `${testLabel}-${row.matchedRollNo}.csv`,
+            req.session.user.id,
+            row.obtainedMarks,
+            row.maxMarks,
+            row.percentage,
+            testLabel,
+            row.physicsMarks,
+            row.chemistryMarks,
+            row.biologyMarks,
+            row.botanyMarks,
+            row.zoologyMarks,
+            row.rank,
+            importId,
+          ]
+        );
+        paper = { id: inserted.lastID };
+      }
+
+      const rollKey = String(row.matchedRollNo || row.rollNo).trim().toLowerCase();
+      const scanFile = scanByRoll.get(rollKey);
+      if (scanFile) {
+        const targetPath = getOmrStoragePath(paper.id, row.matchedRollNo || row.rollNo, scanFile.originalname);
+        await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
+        await fs.promises.writeFile(targetPath, scanFile.buffer);
+        await tx.run(
+          `UPDATE test_papers
+           SET omr_scan_path = ?, omr_scan_original_name = ?, omr_scan_uploaded_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND coaching_id = ? AND branch_id = ?`,
+          [targetPath, sanitizeOmrFileName(scanFile.originalname), paper.id, coachingId, branchId]
+        );
+      }
+
+      await tx.run(
+        `INSERT INTO omr_import_rows (
+          import_id, coaching_id, branch_id, student_id, roll_no, test_paper_id,
+          obtained_marks, max_marks, percentage, physics_marks, chemistry_marks, biology_marks,
+          botany_marks, zoology_marks, rank, row_status, raw_data
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported', ?::jsonb)`,
+        [
+          importId,
+          coachingId,
+          branchId,
+          row.studentId,
+          row.matchedRollNo || row.rollNo,
+          paper.id,
+          row.obtainedMarks,
+          row.maxMarks,
+          row.percentage,
+          row.physicsMarks,
+          row.chemistryMarks,
+          row.biologyMarks,
+          row.botanyMarks,
+          row.zoologyMarks,
+          row.rank,
+          JSON.stringify(row.raw || {}),
+        ]
+      );
+      details.push({ rollNo: row.matchedRollNo || row.rollNo, reason: scanFile ? 'Imported with answer sheet' : 'Imported' });
+      importedPapers.push({ studentId: row.studentId, paperId: paper.id });
+    }
+
+    for (const row of normalizedRows.filter((item) => item.status !== 'ready')) {
+      await tx.run(
+        `INSERT INTO omr_import_rows (
+          import_id, coaching_id, branch_id, student_id, roll_no, obtained_marks, max_marks,
+          percentage, physics_marks, chemistry_marks, biology_marks, botany_marks, zoology_marks,
+          rank, row_status, error_message, raw_data
+        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)`,
+        [
+          importId,
+          coachingId,
+          branchId,
+          row.rollNo || null,
+          row.obtainedMarks,
+          row.maxMarks,
+          row.percentage,
+          row.physicsMarks,
+          row.chemistryMarks,
+          row.biologyMarks,
+          row.botanyMarks,
+          row.zoologyMarks,
+          row.rank,
+          row.status,
+          row.error,
+          JSON.stringify(row.raw || {}),
+        ]
+      );
+      details.push({ rollNo: row.rollNo || '-', reason: row.error });
+    }
+
+    return {
+      importId,
+      imported: readyRows.length,
+      skipped: normalizedRows.filter((row) => row.status === 'skipped').length,
+      unmatchedRollNumbers: normalizedRows.filter((row) => row.status === 'unmatched').map((row) => row.rollNo),
+      sheetErrors: scanErrors,
+      details,
+      importedPapers,
+    };
+  });
+
+  await auditActor(req, 'omr_results_imported', {
+    targetType: 'omr_import',
+    targetId: importSummary.importId,
+    details: {
+      testLabel,
+      imported: importSummary.imported,
+      skipped: importSummary.skipped,
+      unmatchedRollNumbers: importSummary.unmatchedRollNumbers,
+      sheetErrors: importSummary.sheetErrors,
+    },
+  });
+
+  req.session.flash = {
+    type: importSummary.unmatchedRollNumbers.length || importSummary.skipped || importSummary.sheetErrors.length ? 'warning' : 'success',
+    text: `OMR import complete. Imported: ${importSummary.imported}, Skipped: ${importSummary.skipped}, Unmatched: ${importSummary.unmatchedRollNumbers.length}, Errors: ${importSummary.sheetErrors.length}`,
+    details: [
+      ...importSummary.unmatchedRollNumbers.map((rollNo) => ({ file: `Roll ${rollNo}`, reason: 'Roll No not found' })),
+      ...importSummary.sheetErrors.map((error) => ({ file: 'Answer sheet', reason: error })),
+      ...importSummary.details.slice(0, 15),
+    ].slice(0, 30),
+  };
   return res.redirect('/admin/dashboard?section=papers');
 });
 

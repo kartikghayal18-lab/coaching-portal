@@ -6,6 +6,7 @@ ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS wrong_count INTEGER;
 ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS unattempted_count INTEGER;
 ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS physics_marks NUMERIC(10,2);
 ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS chemistry_marks NUMERIC(10,2);
+ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS biology_marks NUMERIC(10,2);
 ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS botany_marks NUMERIC(10,2);
 ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS zoology_marks NUMERIC(10,2);
 ALTER TABLE test_papers ADD COLUMN IF NOT EXISTS omr_barcode VARCHAR(120);
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS omr_import_rows (
   unattempted_count INTEGER,
   physics_marks NUMERIC(10,2),
   chemistry_marks NUMERIC(10,2),
+  biology_marks NUMERIC(10,2),
   botany_marks NUMERIC(10,2),
   zoology_marks NUMERIC(10,2),
   rank INTEGER,

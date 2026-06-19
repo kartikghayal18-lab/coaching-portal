@@ -174,7 +174,6 @@
         <a class="ops2-nav__item <%= activeSection === 'attendance' ? 'is-active' : '' %>" href="/admin/dashboard?section=attendance"><span>◌</span><span>Attendance</span></a>
         <a class="ops2-nav__item <%= activeSection === 'fees' ? 'is-active' : '' %>" href="/admin/dashboard?section=fees"><span>◈</span><span>Fees</span></a>
         <a class="ops2-nav__item <%= activeSection === 'papers' ? 'is-active' : '' %>" href="/admin/dashboard?section=papers"><span>◆</span><span>Test Papers</span></a>
-        <a class="ops2-nav__item <%= activeSection === 'omr' ? 'is-active' : '' %>" href="/admin/dashboard?section=omr"><span>▣</span><span>OMR Results</span></a>
         <a class="ops2-nav__item <%= activeSection === 'notes' ? 'is-active' : '' %>" href="/admin/dashboard?section=notes"><span>◫</span><span>Notes</span></a>
         <a class="ops2-nav__item <%= activeSection === 'whatsapp' ? 'is-active' : '' %>" href="/admin/dashboard?section=whatsapp"><span>◍</span><span>WhatsApp</span></a>
         <a class="ops2-nav__item <%= activeSection === 'notifications' ? 'is-active' : '' %>" href="/admin/dashboard?section=notifications"><span>◔</span><span>Notifications</span></a>
@@ -895,6 +894,28 @@
               </section>
             </section>
 
+            <section class="ops2-panel" id="omr-import-panel">
+              <div class="ops2-panel__header">
+                <div>
+                  <p class="ops2-eyebrow">Import OMR Results</p>
+                  <h3>CSV marks + optional scanned answer sheets</h3>
+                  <p class="tiny-note">CSV marks are matched strictly by Roll No. Answer sheet filenames must be exact Roll No, such as <code>101.pdf</code>; marks are never read from filenames.</p>
+                </div>
+              </div>
+              <form method="post" action="/admin/omr/import-results" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
+                <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
+                <div class="ops2-field"><label>Test Name</label><input type="text" name="testLabel" placeholder="NEET Mock Test 01" required /></div>
+                <div class="ops2-field"><label>Max Marks</label><input type="number" name="maxMarks" step="0.01" min="1" placeholder="Required for graphs" required /></div>
+                <div class="ops2-field full"><label>Result CSV</label><input type="file" name="omrCsv" accept=".csv,text/csv" required /></div>
+                <div class="ops2-field full"><label>Optional Answer Sheets ZIP/PDF/Image</label><input type="file" name="answerSheets" accept=".zip,.pdf,.jpg,.jpeg,.png,application/zip,application/pdf,image/jpeg,image/png" multiple /></div>
+                <div class="ops2-rules full">
+                  <p>Required CSV columns: <code>Roll No</code>, <code>Student Name</code>, <code>Physics Marks</code>, <code>Chemistry Marks</code>, <code>Biology Marks</code>, <code>Total Marks</code>, <code>Rank</code>.</p>
+                  <p>Unmatched Roll No values are reported and do not stop matched students from importing.</p>
+                </div>
+                <div class="ops2-actions full"><button type="submit" class="ops2-primary-btn">Import OMR Results</button></div>
+              </form>
+            </section>
+
             <section class="ops2-panel">
               <div class="ops2-panel__header"><div><p class="ops2-eyebrow">Academic Records</p><h3>All test papers</h3></div><form method="get" action="/admin/dashboard" class="ops2-inline-tools"><input type="hidden" name="section" value="papers" /><input type="month" name="papersMonth" value="<%= papersMonthFilter %>" /><button type="submit" class="ops2-primary-btn ops2-primary-btn--small">Apply</button></form></div>
               <div class="ops2-table-shell">
@@ -995,7 +1016,7 @@
                         <td><%= p.marks_obtained !== null && p.max_marks !== null ? `${p.marks_obtained}/${p.max_marks}` : '-' %></td>
                         <td><%= p.percentage !== null ? p.percentage : '-' %></td>
                         <td><%= p.omr_rank !== null && p.omr_rank !== undefined ? `#${p.omr_rank}` : '-' %></td>
-                        <td>Phy: <%= p.physics_marks ?? '-' %>, Chem: <%= p.chemistry_marks ?? '-' %>, Bot: <%= p.botany_marks ?? '-' %>, Zoo: <%= p.zoology_marks ?? '-' %></td>
+                        <td>Phy: <%= p.physics_marks ?? '-' %>, Chem: <%= p.chemistry_marks ?? '-' %>, Bio: <%= p.biology_marks ?? '-' %></td>
                         <td class="ops2-actions-inline">
                           <% if (p.omr_scan_path) { %>
                             <a href="/omr/<%= p.id %>/view" target="_blank" rel="noopener" class="ops2-inline-link">View</a>

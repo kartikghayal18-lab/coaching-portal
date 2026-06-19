@@ -1,19 +1,21 @@
 # OMR Result Import
 
-Admins can import OScan OMR result exports from the Admin Dashboard under **OMR Results**.
+Admins can import OMR result exports from **Admin Dashboard > Test Papers > Import OMR Results**.
 
 ## CSV Import
 
-1. Export the OScan result as CSV or XLSX.
-2. Open **Admin Dashboard > OMR Results**.
+1. Export the result as CSV.
+2. Open **Admin Dashboard > Test Papers**.
 3. Enter the exact test name.
-4. Enter max marks if the CSV does not include a max marks column.
-5. Upload the CSV and review the preview.
-6. Commit the import.
+4. Enter max marks for percentage, graph, and analytics generation.
+5. Upload the CSV and optional scanned answer sheets.
+6. Submit the import.
 
 Supported columns include:
 
 - RollNumber
+- Roll No
+- Student Name
 - Barcode
 - Correct Total
 - Wrong Total
@@ -23,8 +25,7 @@ Supported columns include:
 - Total Marks Total
 - Physics Marks
 - Chemistry Marks
-- Botany Marks
-- Zoology Marks
+- Biology Marks
 - Rank
 - Student Rank
 
@@ -34,13 +35,14 @@ Duplicate rows for the same branch, test, and student are skipped unless **Overw
 
 ## OMR Sheet Uploads
 
-Scanned answer sheets can be uploaded in bulk as PDF, JPG, JPEG, PNG, or a ZIP containing those files.
+Scanned answer sheets can be uploaded as PDF, JPG, JPEG, PNG, or a ZIP containing those files.
 
-Name each file with the roll number first:
+Name each file with the exact roll number:
 
 - `101.pdf`
 - `101.jpg`
-- `101_mock1.pdf`
+
+Do not encode marks in answer sheet filenames. Names like `101_78_100.pdf` are not used by the OMR import.
 
 Files are stored under:
 
