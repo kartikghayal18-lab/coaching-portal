@@ -456,6 +456,10 @@ const omrUpload = multer({
     cb(new Error('Only CSV, XLSX, PDF, JPG, PNG, or ZIP files are allowed for OMR import'));
   },
 });
+const omrImportUpload = omrUpload.fields([
+  { name: 'omrCsv', maxCount: 1 },
+  { name: 'answerSheets', maxCount: 200 },
+]);
 
 app.disable('x-powered-by');
 if (isProduction) {
@@ -619,6 +623,55 @@ function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
 
+function asyncAdminPapersRoute(handler) {
+  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch((error) => {
+    console.error('[ADMIN PAPERS ROUTE ERROR]', error);
+    if (req.session) {
+      req.session.flash = {
+        type: 'error',
+        text: error.message || 'Something went wrong while processing the upload.',
+      };
+      return res.redirect('/admin/dashboard?section=papers#omr-import-panel');
+    }
+    return next(error);
+  });
+}
+
+function handleOmrImportUpload(req, res, next) {
+  console.log('[OMR IMPORT] multer entered', {
+    method: req.method,
+    path: req.path,
+    originalUrl: req.originalUrl,
+    contentType: req.headers['content-type'] || '',
+    contentLength: req.headers['content-length'] || '',
+    csrfQuery: req.query?._csrf || '',
+  });
+
+  omrImportUpload(req, res, (error) => {
+    if (error) {
+      console.error('[OMR IMPORT] multer failed', {
+        message: error.message,
+        stack: error.stack,
+      });
+      if (req.session) {
+        req.session.flash = {
+          type: 'error',
+          text: error.message || 'OMR upload failed before import started.',
+        };
+      }
+      return res.redirect('/admin/dashboard?section=papers#omr-import-panel');
+    }
+
+    console.log('[OMR IMPORT] multer completed', {
+      bodyKeys: Object.keys(req.body || {}),
+      fileFields: Object.keys(req.files || {}),
+      csrfBody: req.body?._csrf || '',
+      csrfQuery: req.query?._csrf || '',
+    });
+    return next();
+  });
+}
+
 function buildOtpStatus(sessionOtp = null) {
   if (!sessionOtp?.expiresAt) return null;
   const expiresAt = new Date(sessionOtp.expiresAt);
@@ -712,6 +765,10 @@ function isLoginPostPath(req) {
 
 function isLogoutPostPath(req) {
   return getRequestPathCandidates(req).some((requestPath) => requestPath === '/logout');
+}
+
+function isOmrImportResultsPostPath(req) {
+  return getRequestPathCandidates(req).some((requestPath) => requestPath === '/admin/omr/import-results');
 }
 
 function hasValidRequestOrigin(req) {
@@ -1447,6 +1504,14 @@ app.use((req, res, next) => {
         text: 'Your login page expired. Please try again.',
       };
       return res.redirect('/login');
+    }
+
+    if (req.method === 'POST' && isOmrImportResultsPostPath(req)) {
+      req.session.flash = {
+        type: 'error',
+        text: 'Your OMR import page expired. Please try uploading the CSV again.',
+      };
+      return res.redirect('/admin/dashboard?section=papers#omr-import-panel');
     }
 
     return res.status(403).send('Invalid security token');
@@ -6546,14 +6611,23 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
   return res.redirect('/admin/dashboard?section=papers');
 });
 
-app.post('/admin/omr/import-results', requireCoachingAdmin, omrUpload.fields([
-  { name: 'omrCsv', maxCount: 1 },
-  { name: 'answerSheets', maxCount: 200 },
-]), asyncRoute(async (req, res) => {
+app.get('/admin/omr/import-results', requireCoachingAdmin, (req, res) => {
+  console.log('[OMR IMPORT] GET redirected to papers page', {
+    originalUrl: req.originalUrl,
+    adminId: req.session?.user?.id || null,
+  });
+  return res.redirect('/admin/dashboard?section=papers#omr-import-panel');
+});
+
+app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUpload, asyncAdminPapersRoute(async (req, res) => {
   console.log('[OMR IMPORT] handler reached', {
+    method: req.method,
+    path: req.path,
+    originalUrl: req.originalUrl,
     adminId: req.session?.user?.id || null,
     branchId: getCurrentBranchId(req),
     contentType: req.headers['content-type'] || '',
+    contentLength: req.headers['content-length'] || '',
     bodyKeys: Object.keys(req.body || {}),
     fileFields: Object.keys(req.files || {}),
     reqBodyCsrf: req.body?._csrf || '',
@@ -6570,15 +6644,15 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, omrUpload.fields([
 
   if (!testLabel) {
     req.session.flash = { type: 'error', text: 'Enter a test name before importing OMR results.' };
-    return res.redirect('/admin/dashboard?section=papers');
+    return res.redirect('/admin/dashboard?section=papers#omr-import-panel');
   }
   if (!maxMarks || maxMarks <= 0) {
     req.session.flash = { type: 'error', text: 'Enter valid max marks so graphs and percentages can be generated.' };
-    return res.redirect('/admin/dashboard?section=papers');
+    return res.redirect('/admin/dashboard?section=papers#omr-import-panel');
   }
   if (!csvFile || !/\.csv$/i.test(csvFile.originalname || '')) {
     req.session.flash = { type: 'error', text: 'Upload one OMR result CSV file.' };
-    return res.redirect('/admin/dashboard?section=papers');
+    return res.redirect('/admin/dashboard?section=papers#omr-import-panel');
   }
 
   let parsedRows;
@@ -6586,8 +6660,19 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, omrUpload.fields([
     parsedRows = toOmrTableRows(csvFile.buffer, maxMarks);
   } catch (error) {
     req.session.flash = { type: 'error', text: `Could not parse OMR CSV: ${error.message}` };
-    return res.redirect('/admin/dashboard?section=papers');
+    console.error('[OMR IMPORT] CSV parse failed', {
+      fileName: csvFile.originalname,
+      error: error.message,
+      stack: error.stack,
+    });
+    return res.redirect('/admin/dashboard?section=papers#omr-import-panel');
   }
+  console.log('[OMR IMPORT] CSV parsed', {
+    fileName: csvFile.originalname,
+    rowCount: parsedRows.length,
+    testLabel,
+    maxMarks,
+  });
 
   const students = await all(
     `SELECT id, roll_no, name
@@ -6625,6 +6710,13 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, omrUpload.fields([
   const { files: scanFiles, errors: sheetErrors } = expandOmrSheetFiles(uploadedSheets);
   const scanByRoll = new Map();
   const scanErrors = [...sheetErrors];
+  console.log('[OMR IMPORT] rows matched', {
+    parsed: normalizedRows.length,
+    ready: readyRows.length,
+    skipped: normalizedRows.filter((row) => row.status === 'skipped').length,
+    unmatched: normalizedRows.filter((row) => row.status === 'unmatched').length,
+    uploadedSheetFiles: uploadedSheets.length,
+  });
 
   for (const file of scanFiles) {
     if (!/\.(pdf|jpe?g|png)$/i.test(file.originalname || '')) {
@@ -6644,6 +6736,12 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, omrUpload.fields([
     }
     scanByRoll.set(rollKey, file);
   }
+
+  console.log('[OMR IMPORT] database transaction starting', {
+    readyRows: readyRows.length,
+    errorRows: normalizedRows.filter((row) => row.status !== 'ready').length,
+    scanErrors: scanErrors.length,
+  });
 
   const importSummary = await withTransaction(async (tx) => {
     const errorRows = normalizedRows.filter((row) => row.status !== 'ready').map((row) => ({
@@ -6820,6 +6918,13 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, omrUpload.fields([
       importedPapers,
     };
   });
+  console.log('[OMR IMPORT] database transaction committed', {
+    importId: importSummary.importId,
+    imported: importSummary.imported,
+    skipped: importSummary.skipped,
+    unmatched: importSummary.unmatchedRollNumbers.length,
+    sheetErrors: importSummary.sheetErrors.length,
+  });
 
   await auditActor(req, 'omr_results_imported', {
     targetType: 'omr_import',
@@ -6842,7 +6947,11 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, omrUpload.fields([
       ...importSummary.details.slice(0, 15),
     ].slice(0, 30),
   };
-  return res.redirect('/admin/dashboard?section=papers');
+  console.log('[OMR IMPORT] redirect executed', {
+    location: '/admin/dashboard?section=papers#omr-import-panel',
+    importId: importSummary.importId,
+  });
+  return res.redirect('/admin/dashboard?section=papers#omr-import-panel');
 }));
 
 app.post('/admin/omr/import/preview', requireCoachingAdmin, omrUpload.single('omrFile'), async (req, res) => {
