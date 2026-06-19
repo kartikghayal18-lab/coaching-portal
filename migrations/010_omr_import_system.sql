@@ -66,6 +66,9 @@ CREATE TABLE IF NOT EXISTS omr_import_rows (
 CREATE INDEX IF NOT EXISTS omr_import_rows_import_idx
   ON omr_import_rows (import_id);
 
+ALTER TABLE omr_import_rows ADD COLUMN IF NOT EXISTS biology_marks NUMERIC(10,2);
+ALTER TABLE omr_import_rows ADD COLUMN IF NOT EXISTS rank INTEGER;
+
 CREATE INDEX IF NOT EXISTS test_papers_omr_scan_branch_idx
   ON test_papers (coaching_id, branch_id, student_id, test_label)
   WHERE omr_scan_path IS NOT NULL;

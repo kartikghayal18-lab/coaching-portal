@@ -395,6 +395,8 @@ async function ensureOmrSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  await run(`ALTER TABLE omr_import_rows ADD COLUMN IF NOT EXISTS biology_marks NUMERIC(10,2)`);
+  await run(`ALTER TABLE omr_import_rows ADD COLUMN IF NOT EXISTS rank INTEGER`);
   await run(`CREATE INDEX IF NOT EXISTS users_omr_barcode_branch_idx ON users (coaching_id, branch_id, omr_barcode)`);
   await run(`CREATE INDEX IF NOT EXISTS omr_imports_branch_imported_idx ON omr_imports (coaching_id, branch_id, imported_at DESC)`);
   await run(`CREATE INDEX IF NOT EXISTS omr_import_rows_import_idx ON omr_import_rows (import_id)`);
@@ -405,7 +407,7 @@ const PORT = process.env.PORT || 3000;
 const SINGLE_CLIENT_COACHING_SLUG = String(process.env.CLIENT_COACHING_SLUG || 'scc').trim().toLowerCase();
 const SINGLE_CLIENT_NAME = 'SHIV CHHATRAPATI CLASSES';
 const OWNER_SECTIONS = new Set(['overview', 'coachings', 'trial-requests']);
-const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes', 'whatsapp', 'notifications', 'settings', 'omr']);
+const ADMIN_SECTIONS = new Set(['overview', 'attendance', 'students', 'fees', 'papers', 'notes', 'whatsapp', 'notifications', 'settings']);
 const ALLOWED_UPLOAD_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/jpg']);
 const DEFAULT_UPLOAD_LIMIT_BYTES = isVercel ? 4 * 1024 * 1024 : 25 * 1024 * 1024;
 const UPLOAD_FILE_SIZE_LIMIT_BYTES = Number(process.env.UPLOAD_FILE_SIZE_LIMIT_BYTES || DEFAULT_UPLOAD_LIMIT_BYTES);
@@ -611,6 +613,10 @@ app.get('/receipts/:feeId/:token/:fileName', async (req, res) => {
 function renderWithMessage(res, view, data = {}) {
   const flash = data.flash || null;
   return res.render(view, { ...data, flash });
+}
+
+function asyncRoute(handler) {
+  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
 
 function buildOtpStatus(sessionOtp = null) {
@@ -6543,7 +6549,7 @@ app.post('/admin/upload-papers', requireCoachingAdmin, upload.array('papers', 10
 app.post('/admin/omr/import-results', requireCoachingAdmin, omrUpload.fields([
   { name: 'omrCsv', maxCount: 1 },
   { name: 'answerSheets', maxCount: 200 },
-]), async (req, res) => {
+]), asyncRoute(async (req, res) => {
   console.log('[OMR IMPORT] handler reached', {
     adminId: req.session?.user?.id || null,
     branchId: getCurrentBranchId(req),
@@ -6837,7 +6843,7 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, omrUpload.fields([
     ].slice(0, 30),
   };
   return res.redirect('/admin/dashboard?section=papers');
-});
+}));
 
 app.post('/admin/omr/import/preview', requireCoachingAdmin, omrUpload.single('omrFile'), async (req, res) => {
   const coachingId = req.session.user.coachingId;
