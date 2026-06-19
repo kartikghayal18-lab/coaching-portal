@@ -666,8 +666,20 @@ function verifyCaptcha(req, scope, answer) {
 
 function ensureCsrf(req) {
   const expected = req.session?.csrfToken || '';
-  const received = String(req.body?._csrf || req.query?._csrf || '').trim();
-  return timingSafeEqualString(received, expected);
+  const bodyToken = String(req.body?._csrf || '').trim();
+  const queryToken = String(req.query?._csrf || '').trim();
+  const headerToken = String(req.get?.('x-csrf-token') || req.headers?.['x-csrf-token'] || '').trim();
+  const received = bodyToken || queryToken || headerToken;
+  const comparisonSucceeds = Boolean(received && expected && timingSafeEqualString(received, expected));
+  console.log('[CSRF CHECK]', {
+    originalUrl: req.originalUrl,
+    reqQueryCsrf: req.query?._csrf || '',
+    reqBodyCsrf: req.body?._csrf || '',
+    reqHeaderCsrf: headerToken,
+    reqSessionCsrfToken: expected,
+    csrfComparisonSucceeds: comparisonSucceeds,
+  });
+  return comparisonSucceeds;
 }
 
 function normalizeRequestPath(value) {
@@ -6532,6 +6544,17 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, omrUpload.fields([
   { name: 'omrCsv', maxCount: 1 },
   { name: 'answerSheets', maxCount: 200 },
 ]), async (req, res) => {
+  console.log('[OMR IMPORT] handler reached', {
+    adminId: req.session?.user?.id || null,
+    branchId: getCurrentBranchId(req),
+    contentType: req.headers['content-type'] || '',
+    bodyKeys: Object.keys(req.body || {}),
+    fileFields: Object.keys(req.files || {}),
+    reqBodyCsrf: req.body?._csrf || '',
+    reqQueryCsrf: req.query?._csrf || '',
+    reqSessionCsrfToken: req.session?.csrfToken || '',
+  });
+
   const coachingId = req.session.user.coachingId;
   const branchId = getCurrentBranchId(req);
   const testLabel = String(req.body.testLabel || '').trim();

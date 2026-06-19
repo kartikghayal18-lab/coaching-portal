@@ -902,7 +902,7 @@
                   <p class="tiny-note">CSV marks are matched strictly by Roll No. Answer sheet filenames must be exact Roll No, such as <code>101.pdf</code>; marks are never read from filenames.</p>
                 </div>
               </div>
-              <form method="post" action="/admin/omr/import-results" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
+              <form method="post" action="<%= appendCsrfToUrl('/admin/omr/import-results') %>" enctype="multipart/form-data" data-single-submit class="ops2-form-grid">
                 <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
                 <div class="ops2-field"><label>Test Name</label><input type="text" name="testLabel" placeholder="NEET Mock Test 01" required /></div>
                 <div class="ops2-field"><label>Max Marks</label><input type="number" name="maxMarks" step="0.01" min="1" placeholder="Required for graphs" required /></div>
