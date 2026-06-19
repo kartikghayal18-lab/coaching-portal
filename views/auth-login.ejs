@@ -93,7 +93,7 @@
         <form id="loginForm" method="post" action="/login" class="rounded-[2rem] border border-white/70 bg-white/70 p-6 shadow-2xl shadow-blue-950/15 backdrop-blur-2xl sm:p-8">
           <input type="hidden" name="_csrf" value="<%= csrfToken %>" />
           <input type="hidden" name="coachingSlug" value="<%= coachingHint || 'scc' %>" />
-          <input type="hidden" id="hiddenBranchCode" name="branchCode" value="satpur" />
+          <input type="hidden" id="hiddenBranchCode" name="branchCode" value="<%= selectedBranchCode || 'satpur' %>" />
 
           <div class="mb-8">
             <p class="text-xs font-black uppercase tracking-[0.32em] text-blue-600">Secure Login</p>

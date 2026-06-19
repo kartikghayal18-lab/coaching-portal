@@ -3722,7 +3722,7 @@ app.post('/login', async (req, res) => {
          FROM users u
          JOIN branches b ON b.id = u.branch_id
          WHERE u.coaching_id = ? AND u.branch_id = ?
-           AND u.role = 'admin' AND u.is_owner = 0 AND u.username = ?
+           AND u.role = 'admin' AND u.is_owner = 0 AND LOWER(u.username) = LOWER(?)
          LIMIT 1`,
         [coaching.id, branch.id, username]
       );
