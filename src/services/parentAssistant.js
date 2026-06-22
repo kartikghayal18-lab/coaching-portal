@@ -1,7 +1,6 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const PDFDocument = require('pdfkit');
 const { get, all, run } = require('../db');
 const { getPaperAccess, getStoredFilePublicUrl, uploadGeneratedFile } = require('../storage');
 const { sendDocumentNotification, sendWhatsAppNotification } = require('./notificationService');
@@ -61,6 +60,16 @@ function getAppPublicBaseUrl() {
     || process.env.VERCEL_URL
     || ''
   ).trim().replace(/\/$/, '').replace(/^([^h])/, 'https://$1');
+}
+
+function isRealPaperFile(paper) {
+  return Boolean(
+    paper
+    && (
+      (paper.storage_type === 's3' && paper.public_url)
+      || (paper.storage_type === 'local' && paper.storage_key)
+    )
+  );
 }
 
 function normalizePublicBaseUrl(value) {
@@ -133,6 +142,7 @@ function buildReceiptNumber(feeId, paymentDate = new Date()) {
 
 function createPdfKitBuffer(buildDocument) {
   return new Promise((resolve, reject) => {
+    const PDFDocument = require('pdfkit');
     const doc = new PDFDocument({ size: 'A4', margin: 48 });
     const chunks = [];
     doc.on('data', (chunk) => chunks.push(chunk));
@@ -352,7 +362,13 @@ async function validatePublicUrl(url) {
 }
 
 async function getPaperDocument(paper) {
-  if (!paper) return null;
+  if (!isRealPaperFile(paper)) return null;
+  if (paper.public_url) {
+    return {
+      fileUrl: paper.public_url,
+      fileName: paper.original_name || 'paper.pdf',
+    };
+  }
   const access = await getPaperAccess(paper, 'attachment');
   const localUrl = access?.type === 'local' && getAppPublicBaseUrl() && paper.stored_name
     ? `${getAppPublicBaseUrl()}/paper-files/${encodeURIComponent(paper.stored_name)}`
@@ -734,9 +750,11 @@ async function sendLatestPaper(student, phone) {
   const paper = await get(
     `SELECT id, original_name, stored_name, storage_type, storage_key, public_url, content_type
      FROM test_papers
-     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
-       AND (marks_obtained IS NULL OR max_marks IS NULL)
-     ORDER BY upload_date DESC, id DESC
+	     WHERE coaching_id = ? AND branch_id = ? AND student_id = ?
+	       AND (marks_obtained IS NULL OR max_marks IS NULL)
+	       AND ((storage_type = 's3' AND public_url IS NOT NULL AND public_url <> '')
+	         OR (storage_type = 'local' AND storage_key IS NOT NULL AND storage_key <> ''))
+	     ORDER BY upload_date DESC, id DESC
      LIMIT 1`,
     [student.coaching_id, student.branch_id, student.id]
   );
