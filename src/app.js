@@ -3964,7 +3964,20 @@ app.post('/login', async (req, res) => {
   }
 
   if (role === 'admin') {
-    return finishAuthenticatedLogin(req, res, user, coaching);
+    const identity = getTwoFactorIdentity(user, coaching);
+    const otpChannels = getOtpChannelOptions({
+      email: identity.email,
+      contactPhone: identity.contactPhone,
+    });
+    if (!otpChannels.email.available) {
+      return renderLoginPage(req, res, {
+        type: 'error',
+        text: 'Two-factor login is not configured for this admin account yet. Add admin email and configure SMTP first.',
+      });
+    }
+    await createPendingTwoFactorLogin(req, user, coaching);
+    delete req.session.loginOtp;
+    return res.redirect('/auth/2fa');
   }
 
   return finishAuthenticatedLogin(req, res, user, coaching);
