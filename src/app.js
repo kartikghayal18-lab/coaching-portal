@@ -19,6 +19,7 @@ const {
   saveWhatsAppSettings,
   getRecentWhatsAppLogs,
   updateWhatsAppLogStatus,
+  sendDocumentMessage,
   sendTextMessage,
 } = require('./services/whatsapp');
 const {
@@ -1078,6 +1079,12 @@ async function getPaperDocumentUrl(req, paperId, studentId) {
 
 async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
   try {
+    console.log('[WHATSAPP PAPER] upload hook start', {
+      studentId: student.id,
+      paperId,
+      type,
+    });
+    console.log('[WHATSAPP PAPER] paper id', { paperId });
     const isResult = type === 'test_result_published';
     const document = await getPaperDocumentUrl(req, paperId, student.id);
     if (!document?.paper) {
@@ -1130,26 +1137,29 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
 
     for (const recipient of recipients) {
       try {
-        await sendWhatsAppNotification({
+        const result = await sendDocumentMessage({
+          coachingId: document.paper.coaching_id || student.coaching_id || req.session?.user?.coachingId || null,
+          branchId: paperStudent.branch_id || student.branch_id || getCurrentBranchId(req),
           studentId: paperStudent.id,
-          phone: recipient.phone,
-          type: `${type}_text`,
-          message: compactCaption,
-          eventKey: `${type}_text:${recipient.key}:${paperStudent.id}:${paperId}`,
+          to: recipient.phone,
+          documentUrl: document.fileUrl,
+          filename: document.fileName,
+          caption: compactCaption,
         });
-
-        await sendDocumentNotification(
-          paperStudent.id,
-          recipient.phone,
-          document.fileUrl,
-          document.fileName,
-          isResult ? 'Result PDF attached below.' : 'Paper PDF attached below.',
-          { type, eventKey: `${type}:document:${recipient.key}:${paperStudent.id}:${paperId}` }
-        );
-        console.log('[WHATSAPP PAPER] sent', {
+        if (result?.failed || result?.ok === false) {
+          console.error('[WHATSAPP PAPER] failed', {
+            recipient: recipient.key,
+            studentId: paperStudent.id,
+            paperId,
+            error: result.error || 'WhatsApp document send failed',
+          });
+          continue;
+        }
+        console.log(`[WHATSAPP PAPER] sent ${recipient.key}`, {
           recipient: recipient.key,
           studentId: paperStudent.id,
           paperId,
+          metaMessageId: result?.metaMessageId || null,
         });
       } catch (error) {
         console.error('[WHATSAPP PAPER] failed', {
@@ -1161,7 +1171,16 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
       }
 
       if (isResult) {
-        await sendPerformanceGraph(paperStudent, recipient.phone, coaching);
+        try {
+          await sendPerformanceGraph(paperStudent, recipient.phone, coaching);
+        } catch (error) {
+          console.error('[WHATSAPP PAPER] failed', {
+            recipient: recipient.key,
+            studentId: paperStudent.id,
+            paperId,
+            error: error.message,
+          });
+        }
       }
     }
 
@@ -1174,6 +1193,150 @@ async function notifyPaperEvent({ req, coaching, student, paperId, type }) {
       error: error.message,
     });
     return { ok: false, error: error.message };
+  }
+}
+
+function getOmrScanPublicUrl(req, scanPath) {
+  if (!scanPath) return null;
+  const uploadsRoot = path.resolve(__dirname, '..', 'uploads');
+  const resolvedPath = path.resolve(scanPath);
+  if (!resolvedPath.startsWith(`${uploadsRoot}${path.sep}`)) return null;
+  const relativePath = path.relative(uploadsRoot, resolvedPath)
+    .split(path.sep)
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+  return `${getRequestBaseUrl(req)}/uploads/${relativePath}`;
+}
+
+function buildOmrResultMessage({ coaching, student, paper }) {
+  const percentage = paper.percentage !== null && paper.percentage !== undefined
+    ? formatWhatsAppPercent(Number(paper.percentage))
+    : Number(paper.max_marks) > 0
+      ? formatWhatsAppPercent((Number(paper.marks_obtained || 0) / Number(paper.max_marks)) * 100)
+      : null;
+  return compactWhatsAppMessage([
+    `🏫 ${coaching?.name || 'SHIV CHHATRAPATI CLASSES'}`,
+    '',
+    '📚 OMR Result Available',
+    '',
+    `Student: ${student.name || student.roll_no || '-'}`,
+    `Test: ${paper.test_label || '-'}`,
+    `Marks: ${paper.marks_obtained ?? '-'}/${paper.max_marks ?? '-'}`,
+    `Percentage: ${percentage || '-'}%`,
+  ]);
+}
+
+async function notifyOmrImportResults({ req, coaching, coachingId, branchId, testLabel, importId, importedPapers }) {
+  const paperIds = [...new Set((importedPapers || []).map((item) => Number(item.paperId)).filter(Number.isInteger))];
+  console.log('[WHATSAPP OMR] start', { testLabel, importId });
+  console.log('[WHATSAPP OMR] imported rows count', { count: paperIds.length });
+  if (!paperIds.length) return;
+
+  try {
+    const rows = await all(
+      `SELECT tp.id AS paper_id, tp.student_id, tp.test_label, tp.marks_obtained, tp.max_marks, tp.percentage,
+              tp.omr_scan_path, tp.omr_scan_original_name,
+              u.id, u.name, u.role, u.whatsapp_number, u.parent_whatsapp_number,
+              u.contact_phone, u.guardian_phone, u.branch_id, u.roll_no
+       FROM test_papers tp
+       LEFT JOIN users u ON u.id = tp.student_id
+       WHERE tp.coaching_id = ? AND tp.branch_id = ?
+         AND tp.id = ANY(?::int[])
+         AND u.role = 'student'`,
+      [coachingId, branchId, paperIds]
+    );
+
+    for (const row of rows) {
+      const student = {
+        id: row.student_id,
+        name: row.name,
+        roll_no: row.roll_no,
+        branch_id: row.branch_id,
+        whatsapp_number: row.whatsapp_number,
+        parent_whatsapp_number: row.parent_whatsapp_number,
+        contact_phone: row.contact_phone,
+        guardian_phone: row.guardian_phone,
+      };
+      const paper = {
+        id: row.paper_id,
+        test_label: row.test_label || testLabel,
+        marks_obtained: row.marks_obtained,
+        max_marks: row.max_marks,
+        percentage: row.percentage,
+        omr_scan_path: row.omr_scan_path,
+        omr_scan_original_name: row.omr_scan_original_name,
+      };
+      const studentPhone = student.whatsapp_number || student.contact_phone;
+      const parentPhone = student.parent_whatsapp_number || student.guardian_phone;
+      console.log(`[WHATSAPP OMR] student number ${studentPhone ? 'found' : 'missing'}`, {
+        studentId: student.id,
+        paperId: paper.id,
+      });
+      console.log(`[WHATSAPP OMR] parent number ${parentPhone ? 'found' : 'missing'}`, {
+        studentId: student.id,
+        paperId: paper.id,
+      });
+
+      const documentUrl = getOmrScanPublicUrl(req, paper.omr_scan_path);
+      const message = buildOmrResultMessage({ coaching, student, paper });
+      const recipients = [
+        { key: 'student', phone: studentPhone },
+        { key: 'parent', phone: parentPhone },
+      ].filter((recipient, index, recipientsList) => (
+        recipient.phone && recipientsList.findIndex((item) => item.phone === recipient.phone) === index
+      ));
+
+      for (const recipient of recipients) {
+        try {
+          console.log(`[WHATSAPP OMR] sending ${documentUrl ? 'document' : 'text'}`, {
+            recipient: recipient.key,
+            studentId: student.id,
+            paperId: paper.id,
+          });
+          let result;
+          if (documentUrl) {
+            result = await sendDocumentNotification(
+              student.id,
+              recipient.phone,
+              documentUrl,
+              paper.omr_scan_original_name || `${student.roll_no || student.id}-${paper.test_label || 'omr'}.pdf`,
+              message,
+              { type: 'omr_result', eventKey: `omr_result:document:${recipient.key}:${student.id}:${paper.id}` }
+            );
+          } else {
+            result = await sendWhatsAppNotification({
+              studentId: student.id,
+              phone: recipient.phone,
+              type: 'omr_result',
+              message,
+              eventKey: `omr_result:text:${recipient.key}:${student.id}:${paper.id}`,
+            });
+          }
+          if (result?.failed || result?.ok === false) {
+            console.error('[WHATSAPP OMR] failed', {
+              recipient: recipient.key,
+              studentId: student.id,
+              paperId: paper.id,
+              error: result.error || result.reason || 'WhatsApp notification failed',
+            });
+            continue;
+          }
+          console.log(`[WHATSAPP OMR] sent to ${recipient.key}`, {
+            studentId: student.id,
+            paperId: paper.id,
+          });
+        } catch (error) {
+          console.error('[WHATSAPP OMR] failed', {
+            recipient: recipient.key,
+            studentId: student.id,
+            paperId: paper.id,
+            error: error.message,
+          });
+        }
+      }
+    }
+  } catch (error) {
+    console.error('[WHATSAPP OMR] failed', { error: error.message });
   }
 }
 
@@ -7104,6 +7267,16 @@ app.post('/admin/omr/import-results', requireCoachingAdmin, handleOmrImportUploa
       unmatchedRollNumbers: importSummary.unmatchedRollNumbers,
       sheetErrors: importSummary.sheetErrors,
     },
+  });
+
+  await notifyOmrImportResults({
+    req,
+    coaching: req.currentCoaching || await getCoachingContextById(coachingId),
+    coachingId,
+    branchId,
+    testLabel,
+    importId: importSummary.importId,
+    importedPapers: importSummary.importedPapers,
   });
 
   req.session.flash = {
